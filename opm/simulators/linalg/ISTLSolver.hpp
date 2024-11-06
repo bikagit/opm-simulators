@@ -57,6 +57,13 @@
 #include <tuple>
 #include <vector>
 
+
+#include <opm/ml/ml_model.hpp>
+
+using namespace Opm;
+typedef Opm::DenseAd::Evaluation<double, 1> Evaluation;
+
+
 namespace Opm::Properties {
 
 namespace TTag {
@@ -64,6 +71,7 @@ struct FlowIstlSolver {
     using InheritsFrom = std::tuple<FlowIstlSolverParams>;
 };
 }
+
 
 template <class TypeTag, class MyTypeTag>
 struct WellModel;
@@ -193,6 +201,8 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
               converged_(false),
               matrix_(nullptr),
               parameters_{parameters},
+              // new
+              currentresidual_(0.),
               forceSerial_(forceSerial)
         {
             initialize();
@@ -204,6 +214,10 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
             : simulator_(simulator),
               iterations_( 0 ),
               solveCount_(0),
+              stepCount_(0),
+              iterCount_(0),
+              // new
+              currentresidual_(0.),
               converged_(false),
               matrix_(nullptr)
         {
@@ -407,6 +421,10 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
             solveCount_ = 0;
         }
 
+        void resetIterCount() {
+            iterCount_ = 0;
+        }
+
         bool solve(Vector& x)
         {
             OPM_TIMEBLOCK(istlSolverSolve);
@@ -420,15 +438,87 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
                                     *rhs_,
                                     comm_.get());
             }
+            
+            auto tempresid = simulator_.model().linearizer().residual();
+            for (unsigned dofIdx = 0; dofIdx < tempresid.size(); ++dofIdx) {
 
+                const auto& r = tempresid[dofIdx];
+                for (unsigned eqIdx = 0; eqIdx < r.size(); ++eqIdx){
+                        currentresidual_ = max(std::abs(tempresid[dofIdx][eqIdx]* simulator_.model().eqWeight(dofIdx, eqIdx)), currentresidual_);
+                    }
+                    // std::cout<<"r.size() "<< r.size()<<std::endl;
+                            // std::cout<<"currentresidual_  "<< currentresidual_<<std::endl;
+                 }
+
+
+
+            if (iterCount_ == 0 && simulator_.episodeIndex() == 0){
+                auto output = this->simulator_.vanguard().eclState().getIOConfig().fullBasePath();
+                auto path = output.substr(0, output.size()-22) + "bestpath.csv";
+                std::string data(path);
+                std::ifstream in(data.c_str());
+                std::string line;
+                while (getline(in, line))
+                {
+                    std::stringstream ss(line);
+                    std::string substr;
+                    while (std::getline(ss, substr, '[') && !ss.eof());
+                    std::stringstream int_ss(substr);
+                    std::vector<Scalar> nums;
+                    Scalar num;
+                    while (int_ss >> num) {
+                        nums.push_back(num);
+                        if (int_ss.peek() == ',') {
+                            int_ss.ignore();
+                        }
+                    }
+                    bestpaths_.push_back(nums);
+                }
+            }
+            Scalar reduction = bestpaths_[stepCount_][1];
+            if (stepCount_ < simulator_.episodeIndex()){
+                ++stepCount_;
+                resetIterCount();
+            }
+
+            Opm::Tensor<Evaluation> in{4};
+            auto tstepDays = simulator_.episodeLength()/86400;
+            in.data_ = {tstepDays,5.00e-03,currentresidual_,iterCount_};
+
+            Opm::Tensor<Evaluation> out{1};
+            out.data_ = {5.00e-03};
+
+            NNModel<Evaluation> model;
+            OPM_ERROR_IF(!model.loadModel("/Users/macbookn/hackatonwork/opm-tests/norne/mlfolder/linredNN.model"), "Failed to load model");
+            Opm::Tensor<Evaluation> predict = out;
+            OPM_ERROR_IF(!model.apply(in, out), "Failed to apply");
+            auto ml_linredval = fabs(out(0).value());
+            // for (int i = 0; i < out.dims_[0]; i++)
+            // {
+            //     // OPM_ERROR_IF ((fabs(out(i).value() - predict(i).value()) > 1e-6), fmt::format(" Expected " "{}" " got " "{}",predict(i).value(),out(i).value()));
+            //             // std::cout << fabs(out(i).value() - predict(i).value()) << std::endl;
+            //             std::cout << fabs(out(i).value()) << std::endl;
+            // }
+            // std::cout << ml_linredval << std::endl;
+
+
+            if (iterCount_ < bestpaths_[stepCount_].size() - 2)
+                reduction = bestpaths_[stepCount_][iterCount_ + 2];
+            else
+                reduction = bestpaths_[stepCount_][1];
+
+            // std::cout << "simulator_.episodeLength()" << std::endl;
+            // std::cout << simulator_.episodeLength()/86400 << std::endl;
+            // std::cout <<" iterCount_" << std::endl;
+            // std::cout << iterCount_ << std::endl;
             // Solve system.
             Dune::InverseOperatorResult result;
             {
                 OPM_TIMEBLOCK(flexibleSolverApply);
                 assert(flexibleSolver_[activeSolverNum_].solver_);
-                flexibleSolver_[activeSolverNum_].solver_->apply(x, *rhs_, result);
+                flexibleSolver_[activeSolverNum_].solver_->apply(x, *rhs_, ml_linredval, result);
             }
-
+            ++iterCount_;
             // Check convergence, iterations etc.
             checkConvergence(result);
 
@@ -656,7 +746,11 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
         const Simulator& simulator_;
         mutable int iterations_;
         mutable int solveCount_;
+        mutable int stepCount_;
+        mutable int iterCount_;
         mutable bool converged_;
+        // new
+        mutable double currentresidual_;
         std::any parallelInformation_;
 
         // non-const to be able to scale the linear system
@@ -675,6 +769,7 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
         std::vector<FlowLinearSolverParameters> parameters_;
         bool forceSerial_ = false;
         std::vector<PropertyTree> prm_;
+        std::vector<std::vector<Scalar>> bestpaths_;
 
         std::shared_ptr< CommunicationType > comm_;
     }; // end ISTLSolver
