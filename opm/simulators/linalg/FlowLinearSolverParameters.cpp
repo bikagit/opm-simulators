@@ -32,6 +32,12 @@ namespace Opm {
 void FlowLinearSolverParameters::init(bool cprRequestedInDataFile)
 {
     // TODO: these parameters have undocumented non-trivial dependencies
+    tol_eisenstat_ = Parameters::Get<Parameters::ToleranceEisenstat>();
+    use_eisenstat_ =  Parameters::Get<Parameters::UseEisenstat>();
+    use_resid_ =  Parameters::Get<Parameters::UseBestResidual>();
+    use_besthpath_ =  Parameters::Get<Parameters::UseBestPath>();
+    use_ml_methods_ =  Parameters::Get<Parameters::UseMLmethodsTols>();
+
     relaxed_linear_solver_reduction_ = Parameters::Get<Parameters::RelaxedLinearSolverReduction>();
     linear_solver_restart_ = Parameters::Get<Parameters::LinearSolverRestart>();
     linear_solver_verbosity_ = Parameters::Get<Parameters::LinearSolverVerbosity>();
@@ -74,6 +80,17 @@ void FlowLinearSolverParameters::init(bool cprRequestedInDataFile)
 
 void FlowLinearSolverParameters::registerParameters()
 {
+    Parameters::Register<Parameters::ToleranceEisenstat>
+        ("Eisenstat Tolerance");
+    Parameters::Register<Parameters::UseEisenstat>
+        ("Use Eisenstat method");
+    Parameters::Register<Parameters::UseBestResidual>
+        ("Use best residuals from ensemble runs");
+    Parameters::Register<Parameters::UseBestPath>
+        ("Use best path (by residuals or eisenstat) param from ensemble runs");
+    Parameters::Register<Parameters::UseMLmethodsTols>
+        ("Use ML methods to select best linreduction tol");
+
     Parameters::Register<Parameters::LinearSolverReduction>
         ("The minimum reduction of the residual which the linear solver must achieve");
     Parameters::Register<Parameters::NlddLocalLinearSolverReduction>
@@ -156,6 +173,12 @@ void FlowLinearSolverParameters::registerParameters()
 
 void FlowLinearSolverParameters::reset()
 {
+    tol_eisenstat_             = 0.5;
+    use_eisenstat_             = false;
+    use_resid_       = false;
+    use_besthpath_       = false;
+    use_ml_methods_            = false;
+
     relaxed_linear_solver_reduction_ = 1e-2;
     linear_solver_reduction_  = 1e-2;
     linear_solver_maxiter_    = 200;

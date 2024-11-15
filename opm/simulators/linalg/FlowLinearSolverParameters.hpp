@@ -61,6 +61,12 @@ struct LinearSolverBackend<TypeTag, TTag::FlowIstlSolverParams>
 }
 
 namespace Opm::Parameters {
+struct ToleranceEisenstat { static constexpr double value = 0.5; };
+struct UseEisenstat {  static constexpr bool value = false;  };
+struct UseBestResidual {  static constexpr bool value = false;  };
+struct UseBestPath {  static constexpr bool value = false;  };
+struct UseMLmethodsTols {  static constexpr bool value = false;  };
+
 
 struct LinearSolverReduction { static constexpr double value = 1e-2; };
 struct NlddLocalLinearSolverReduction { static constexpr double value = 1e-2; };
@@ -93,6 +99,12 @@ namespace Opm {
 /// This class carries all parameters for the NewtonIterationBlackoilInterleaved class.
 struct FlowLinearSolverParameters
 {
+    double tol_eisenstat_;
+    bool   use_eisenstat_;
+    bool   use_resid_;
+    bool   use_besthpath_;
+    bool   use_ml_methods_;
+
     double linear_solver_reduction_;
     double relaxed_linear_solver_reduction_;
     int    linear_solver_maxiter_;
