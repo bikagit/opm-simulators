@@ -600,7 +600,11 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
                 out.data_ = {5.00e-03};
 
                 NNModel<Evaluation> model;
-                OPM_ERROR_IF(!model.loadModel("/Users/macbookn/hackatonwork/opm-tests/norne/mlfolder/linredNN.model"), "Failed to load model");
+                auto output_mlfile = this->simulator_.vanguard().eclState().getIOConfig().fullBasePath();
+                auto pathml = output_mlfile.substr(0, output_mlfile.size()-22);
+                pathml +=  "../mlfolder/linredNN.model";
+
+                OPM_ERROR_IF(!model.loadModel(pathml), "Failed to load model");
                 Opm::Tensor<Evaluation> predict = out;
                 OPM_ERROR_IF(!model.apply(in, out), "Failed to apply");
                 auto ml_linredval = fabs(out(0).value());
@@ -618,7 +622,10 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
                 out.data_ = {5.00e-03};
 
                 NNModel<Evaluation> model;
-                OPM_ERROR_IF(!model.loadModel("/Users/macbookn/hackatonwork/opm-tests/norne/mlfolder/eisenNN.model"), "Failed to load model");
+                auto output_mleisenfile = this->simulator_.vanguard().eclState().getIOConfig().fullBasePath();
+                auto pathmleisen = output_mleisenfile.substr(0, output_mleisenfile.size()-22);
+                pathmleisen +=  "../mlfolder/eisenNN.model";
+                OPM_ERROR_IF(!model.loadModel(pathmleisen), "Failed to load model");
                 Opm::Tensor<Evaluation> predict = out;
                 OPM_ERROR_IF(!model.apply(in, out), "Failed to apply");
                 auto ml_linredval = fabs(out(0).value());
