@@ -79,6 +79,9 @@
 #include <string>
 #include <vector>
 
+
+#include <opm/ml/ml_model.hpp>
+
 namespace Opm {
 
 /*!
@@ -788,6 +791,53 @@ public:
             const auto& materialParams = materialLawParams(globalSpaceIdx);
             MaterialLaw::relativePermeabilities(mobility, materialParams, fluidState);
             Valgrind::CheckDefined(mobility);
+
+            ML::NNModel<Evaluation> model,modelrw;
+            auto output_mlfile = this->simulator().vanguard().eclState().getIOConfig().fullBasePath();
+            // auto pathml = output_mlfile.substr(0, output_mlfile.size()-22);
+            auto pathml =  "/Users/macbookn/activopmwkspc/stable_releases/opm-tests/testhyst/mlhyst/oldmodelkrnw.model";
+            auto pathmlkrw =  "/Users/macbookn/activopmwkspc/stable_releases/opm-tests/testhyst/mlhyst/oldmodelkrw.model";
+
+            Opm::ML::Tensor<Evaluation> inkrn{2};
+            inkrn.data_ = {fluidState.saturation(gasPhaseIdx),fluidState.saturation(gasPhaseIdx)};
+
+            Opm::ML::Tensor<Evaluation> outkrn{1};
+            outkrn.data_ = {0.00e-03};
+
+            OPM_ERROR_IF(!model.loadModel(pathml), "Failed to load model");
+            Opm::ML::Tensor<Evaluation> predictkrn = outkrn;
+            OPM_ERROR_IF(!model.apply(inkrn, outkrn), "Failed to apply");
+            auto ml_krn = fabs(outkrn(0).value());
+            auto errorkrn = fabs(ml_krn - mobility[2].value());
+
+            // std::cout<<"ml_krn"<<std::endl;
+
+            // // // if (errorkrn <= 1e-3){
+            //     mobility[2] = ml_krn;
+            // //   std::cout<<"pred "<< ml_krn<<" groundtruth "<<mobility[2].value()<<" errorkrn "<<errorkrn<<std::endl;
+            // //                 // }
+
+
+            Opm::ML::Tensor<Evaluation> inkrw{2};
+            inkrw.data_ = {fluidState.saturation(gasPhaseIdx),fluidState.saturation(gasPhaseIdx)};
+
+            Opm::ML::Tensor<Evaluation> outkrw{1};
+            outkrn.data_ = {0.00e-03};
+
+            OPM_ERROR_IF(!modelrw.loadModel(pathmlkrw), "Failed to load model");
+            Opm::ML::Tensor<Evaluation> predictkrw = outkrw;
+            OPM_ERROR_IF(!modelrw.apply(inkrw, outkrw), "Failed to apply");
+            auto ml_krw = fabs(outkrw(0).value());
+            auto errorkrw = fabs(ml_krw - mobility[0].value());
+
+            // std::cout<<"ml_krw"<<std::endl;
+
+            // if (errorkrw <= 1e-3){
+            //     mobility[0] = ml_krw;
+            //     // std::cout<<"predkrw "<< ml_krw<<" groundtruthkrw "<<mobility[0].value()<<" errorkrw "<<errorkrw<<std::endl;
+            // }
+
+
         }
         if (materialLawManager_->hasDirectionalRelperms()
                || materialLawManager_->hasDirectionalImbnum())
@@ -1704,6 +1754,7 @@ protected:
     BCData<int> bcindex_;
     bool nonTrivialBoundaryConditions_ = false;
     bool first_step_ = true;
+
 };
 
 } // namespace Opm
