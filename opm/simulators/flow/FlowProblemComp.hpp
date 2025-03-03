@@ -193,6 +193,10 @@ public:
             this->maxOilSaturation_.resize(this->model().numGridDof(), 0.0);
         }
 
+        if (FluidSystem::phaseIsActive(FluidSystem::gasPhaseIdx)) {
+            this->maxGasSaturation_.resize(this->model().numGridDof(), 0.0);
+        }
+
         this->readRockParameters_(simulator.vanguard().cellCenterDepths(), [&simulator](const unsigned idx) {
             std::array<int, dim> coords;
             simulator.vanguard().cartesianCoordinate(idx, coords);

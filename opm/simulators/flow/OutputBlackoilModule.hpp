@@ -1172,6 +1172,9 @@ public:
     {
         if (!this->soMax_.empty())
             simulator.problem().setMaxOilSaturation(elemIdx, this->soMax_[elemIdx]);
+        
+        if (!this->sgmax_.empty())
+            simulator.problem().setMaxGasSaturation(elemIdx, this->sgmax_[elemIdx]);
 
         if (simulator.problem().materialLawManager()->enableHysteresis()) {
             auto matLawManager = simulator.problem().materialLawManager();

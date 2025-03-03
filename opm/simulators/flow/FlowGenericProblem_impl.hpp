@@ -94,6 +94,9 @@ serializationTestObject(const EclipseState& eclState,
 {
     FlowGenericProblem result(eclState, schedule, gridView);
     result.maxOilSaturation_ = {1.0, 2.0};
+    
+    result.maxGasSaturation_ = {3.0, 4.0};
+
     result.maxWaterSaturation_ = {6.0};
     result.minRefPressure_ = {7.0, 8.0, 9.0, 10.0};
     result.overburdenPressure_ = {11.0};

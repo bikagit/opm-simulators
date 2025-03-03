@@ -264,6 +264,9 @@ public:
     void serializeOp(Serializer& serializer)
     {
         serializer(maxOilSaturation_);
+
+        serializer(maxGasSaturation_);
+
         serializer(polymer_);
         serializer(maxWaterSaturation_);
         serializer(minRefPressure_);
@@ -338,6 +341,9 @@ protected:
 
     PolymerSolutionContainer<Scalar> polymer_;
     std::vector<Scalar> maxOilSaturation_;
+
+    std::vector<Scalar> maxGasSaturation_;
+
     std::vector<Scalar> maxWaterSaturation_;
     std::vector<Scalar> minRefPressure_;
     std::vector<Scalar> overburdenPressure_;

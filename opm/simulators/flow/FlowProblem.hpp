@@ -799,7 +799,8 @@ public:
             auto pathmlkrw =  "/Users/macbookn/activopmwkspc/stable_releases/opm-tests/testhyst/mlhyst/oldmodelkrw.model";
 
             Opm::ML::Tensor<Evaluation> inkrn{2};
-            inkrn.data_ = {fluidState.saturation(gasPhaseIdx),fluidState.saturation(gasPhaseIdx)};
+            auto maxsatgas = std::max(fluidState.saturation(gasPhaseIdx).value(), maxGasSaturation(globalSpaceIdx));
+            inkrn.data_ = {fluidState.saturation(gasPhaseIdx).value(), maxsatgas};
 
             Opm::ML::Tensor<Evaluation> outkrn{1};
             outkrn.data_ = {0.00e-03};
@@ -810,6 +811,8 @@ public:
             auto ml_krn = fabs(outkrn(0).value());
             auto errorkrn = fabs(ml_krn - mobility[2].value());
 
+            mobility[2] = ml_krn;
+
             // std::cout<<"ml_krn"<<std::endl;
 
             // // // if (errorkrn <= 1e-3){
@@ -817,25 +820,24 @@ public:
             // //   std::cout<<"pred "<< ml_krn<<" groundtruth "<<mobility[2].value()<<" errorkrn "<<errorkrn<<std::endl;
             // //                 // }
 
+            // Opm::ML::Tensor<Evaluation> inkrw{2};
+            // inkrw.data_ = {fluidState.saturation(gasPhaseIdx),fluidState.saturation(gasPhaseIdx)};
 
-            Opm::ML::Tensor<Evaluation> inkrw{2};
-            inkrw.data_ = {fluidState.saturation(gasPhaseIdx),fluidState.saturation(gasPhaseIdx)};
+            // Opm::ML::Tensor<Evaluation> outkrw{1};
+            // outkrn.data_ = {0.00e-03};
 
-            Opm::ML::Tensor<Evaluation> outkrw{1};
-            outkrn.data_ = {0.00e-03};
+            // OPM_ERROR_IF(!modelrw.loadModel(pathmlkrw), "Failed to load model");
+            // Opm::ML::Tensor<Evaluation> predictkrw = outkrw;
+            // OPM_ERROR_IF(!modelrw.apply(inkrw, outkrw), "Failed to apply");
+            // auto ml_krw = fabs(outkrw(0).value());
+            // auto errorkrw = fabs(ml_krw - mobility[0].value());
 
-            OPM_ERROR_IF(!modelrw.loadModel(pathmlkrw), "Failed to load model");
-            Opm::ML::Tensor<Evaluation> predictkrw = outkrw;
-            OPM_ERROR_IF(!modelrw.apply(inkrw, outkrw), "Failed to apply");
-            auto ml_krw = fabs(outkrw(0).value());
-            auto errorkrw = fabs(ml_krw - mobility[0].value());
+            // // std::cout<<"ml_krw"<<std::endl;
 
-            // std::cout<<"ml_krw"<<std::endl;
-
-            // if (errorkrw <= 1e-3){
-            //     mobility[0] = ml_krw;
-            //     // std::cout<<"predkrw "<< ml_krw<<" groundtruthkrw "<<mobility[0].value()<<" errorkrw "<<errorkrw<<std::endl;
-            // }
+            // // if (errorkrw <= 1e-3){
+            // //     mobility[0] = ml_krw;
+            // //     // std::cout<<"predkrw "<< ml_krw<<" groundtruthkrw "<<mobility[0].value()<<" errorkrw "<<errorkrw<<std::endl;
+            // // }
 
 
         }
@@ -957,6 +959,16 @@ public:
         return this->maxOilSaturation_[globalDofIdx];
     }
 
+    Scalar maxGasSaturation(unsigned globalDofIdx) const
+    {
+        return this->maxGasSaturation_[globalDofIdx];
+    }
+
+    Scalar maxWaterSaturation(unsigned globalDofIdx) const
+    {
+        return this->maxWaterSaturation_[globalDofIdx];
+    }
+
     /*!
      * \brief Sets an element's maximum oil phase saturation observed during the
      *        simulation.
@@ -972,6 +984,11 @@ public:
             return;
 
         this->maxOilSaturation_[globalDofIdx] = value;
+    }
+
+    void setMaxGasSaturation(unsigned globalDofIdx, Scalar value)
+    {
+        this->maxGasSaturation_[globalDofIdx] = value;
     }
 
     /*!
@@ -1283,6 +1300,34 @@ protected:
         }
     }
 
+    bool updateMaxGasSaturation_()
+    {
+        OPM_TIMEBLOCK(updateMaxGasSaturation);
+        int episodeIdx = this->episodeIndex();
+
+        this->updateProperty_("FlowProblem::updateMaxGasSaturation_() failed:",
+                                [this](unsigned compressedDofIdx, const IntensiveQuantities& iq)
+                                {
+                                    this->updateMaxGasSaturation_(compressedDofIdx,iq);
+                                });
+        return true;
+    }
+
+    bool updateMaxGasSaturation_(unsigned compressedDofIdx, const IntensiveQuantities& iq)
+    {
+        OPM_TIMEBLOCK_LOCAL(updateMaxGasSaturation);
+        const auto& fs = iq.fluidState();
+        const Scalar Sg = decay<Scalar>(fs.saturation(gasPhaseIdx));
+        auto& mog = this->maxGasSaturation_;
+        if(mog[compressedDofIdx] < Sg){
+            mog[compressedDofIdx] = Sg;
+            return true;
+        }else{
+            return false;
+        }
+    }
+
+
     bool updateMaxWaterSaturation_()
     {
         OPM_TIMEBLOCK(updateMaxWaterSaturation);
@@ -1466,6 +1511,10 @@ protected:
                 this->maxWaterSaturation_[elemIdx] = std::max(this->maxWaterSaturation_[elemIdx], fs.saturation(waterPhaseIdx));
             if (!this->maxOilSaturation_.empty() && oilPhaseIdx > -1)
                 this->maxOilSaturation_[elemIdx] = std::max(this->maxOilSaturation_[elemIdx], fs.saturation(oilPhaseIdx));
+
+            if (!this->maxGasSaturation_.empty() && gasPhaseIdx > -1)
+                this->maxGasSaturation_[elemIdx] = std::max(this->maxGasSaturation_[elemIdx], fs.saturation(gasPhaseIdx));
+
             if (!this->minRefPressure_.empty() && refPressurePhaseIdx_() > -1)
                 this->minRefPressure_[elemIdx] = std::min(this->minRefPressure_[elemIdx], fs.pressure(refPressurePhaseIdx_()));
         }
