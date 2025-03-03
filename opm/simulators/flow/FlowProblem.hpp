@@ -795,8 +795,12 @@ public:
             ML::NNModel<Evaluation> model,modelrw;
             auto output_mlfile = this->simulator().vanguard().eclState().getIOConfig().fullBasePath();
             // auto pathml = output_mlfile.substr(0, output_mlfile.size()-22);
-            auto pathml =  "/Users/macbookn/activopmwkspc/stable_releases/opm-tests/testhyst/mlhyst/oldmodelkrnw.model";
-            auto pathmlkrw =  "/Users/macbookn/activopmwkspc/stable_releases/opm-tests/testhyst/mlhyst/oldmodelkrw.model";
+            // pathml +=  "../mlhyst/oldmodelkrnw.model";
+            // auto pathml =  "/Users/macbookn/activopmwkspc/stable_releases/opm-tests/testhyst/mlhyst/oldmodelkrnw.model";
+            // auto pathmlkrw =  "/Users/macbookn/activopmwkspc/stable_releases/opm-tests/testhyst/mlhyst/oldmodelkrw.model";
+
+
+            auto pathml = std::filesystem::current_path() / "mlhyst/oldmodelkrnw.model" ;
 
             Opm::ML::Tensor<Evaluation> inkrn{2};
             auto maxsatgas = std::max(fluidState.saturation(gasPhaseIdx).value(), maxGasSaturation(globalSpaceIdx));
@@ -813,7 +817,10 @@ public:
 
             mobility[2] = ml_krn;
 
-            // std::cout<<"ml_krn"<<std::endl;
+            // std::cout<<"pathml"<<std::endl;
+            // std::cout<<pathml<<std::endl;
+            // std::cout<<"pathmlbis"<<std::endl;
+            // std::cout<<pathmlbis<<std::endl;
 
             // // // if (errorkrn <= 1e-3){
             //     mobility[2] = ml_krn;
