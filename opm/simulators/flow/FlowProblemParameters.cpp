@@ -63,6 +63,11 @@ void registerFlowProblemParameters()
         ("Use pressure from end of the last time step when evaluating rock compaction");
     Parameters::Hide<Parameters::ExplicitRockCompaction>(); // Users will typically not need to modify this parameter..
 
+
+    Parameters::Register<Parameters::ActivateMLRelPErm>
+        ("Whether or not to activate ML method");
+
+
     Parameters::Register<Parameters::CheckSatfuncConsistency>
         ("Whether or not to check saturation function consistency requirements");
 

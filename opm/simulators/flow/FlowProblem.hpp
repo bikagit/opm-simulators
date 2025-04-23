@@ -79,7 +79,6 @@
 #include <string>
 #include <vector>
 
-
 #include <opm/ml/ml_model.hpp>
 
 namespace Opm {
@@ -176,6 +175,8 @@ public:
     using BaseType::shouldWriteRestartFile;
     using BaseType::rockCompressibility;
     using BaseType::porosity;
+    mutable ML::NNModel<Evaluation> modelml_;
+    bool activatemodelml_;
 
     /*!
      * \copydoc FvBaseProblem::registerParameters
@@ -226,6 +227,8 @@ public:
         , aquiferModel_(simulator)
         , pffDofData_(simulator.gridView(), this->elementMapper())
         , tracerModel_(simulator)
+        , modelml_()
+        ,activatemodelml_(Parameters::Get<Parameters::ActivateMLRelPErm>())
     {
         if (! Parameters::Get<Parameters::CheckSatfuncConsistency>()) {
             // User did not enable the "new" saturation function consistency
@@ -235,6 +238,8 @@ public:
             relpermDiagnostics.diagnosis(simulator.vanguard().eclState(),
                                          simulator.vanguard().levelCartesianIndexMapper());
         }
+        auto pathml = std::filesystem::current_path() / "mlhyst/oldmodelkrnw.model" ;
+        OPM_ERROR_IF(!modelml_.loadModel(pathml), "Failed to load model");
     }
 
     virtual ~FlowProblem() = default;
@@ -561,8 +566,6 @@ public:
     }
 
 
-
-
     /*!
      * \copydoc EclTransmissiblity::transmissibilityBoundary
      */
@@ -792,59 +795,34 @@ public:
             MaterialLaw::relativePermeabilities(mobility, materialParams, fluidState);
             Valgrind::CheckDefined(mobility);
 
-            ML::NNModel<Evaluation> model,modelrw;
-            auto output_mlfile = this->simulator().vanguard().eclState().getIOConfig().fullBasePath();
-            // auto pathml = output_mlfile.substr(0, output_mlfile.size()-22);
-            // pathml +=  "../mlhyst/oldmodelkrnw.model";
-            // auto pathml =  "/Users/macbookn/activopmwkspc/stable_releases/opm-tests/testhyst/mlhyst/oldmodelkrnw.model";
-            // auto pathmlkrw =  "/Users/macbookn/activopmwkspc/stable_releases/opm-tests/testhyst/mlhyst/oldmodelkrw.model";
+           
+            if (activatemodelml_) {
 
+                Opm::ML::Tensor<Evaluation> inkrn{2};
 
-            auto pathml = std::filesystem::current_path() / "mlhyst/oldmodelkrnw.model" ;
+                auto maxsatgas = std::max(fluidState.saturation(gasPhaseIdx).value(), maxGasSaturation(globalSpaceIdx));
+                
+                inkrn.data_ = {fluidState.saturation(gasPhaseIdx).value(), maxsatgas};
 
-            Opm::ML::Tensor<Evaluation> inkrn{2};
-            auto maxsatgas = std::max(fluidState.saturation(gasPhaseIdx).value(), maxGasSaturation(globalSpaceIdx));
-            inkrn.data_ = {fluidState.saturation(gasPhaseIdx).value(), maxsatgas};
+                Opm::ML::Tensor<Evaluation> outkrn{1};
+                outkrn.data_ = {0.00e-03};
+                OPM_ERROR_IF(!modelml_.apply(inkrn, outkrn), "Failed to apply");
+                auto ml_krn = fabs(outkrn(0).value());
+                auto errorkrn = fabs(ml_krn - mobility[2].value());
 
-            Opm::ML::Tensor<Evaluation> outkrn{1};
-            outkrn.data_ = {0.00e-03};
+                // std::cout<<"pred "<< ml_krn<<" groundtruth "<<mobility[2].value()<<" errorkrn "<<errorkrn<<std::endl;
 
-            OPM_ERROR_IF(!model.loadModel(pathml), "Failed to load model");
-            Opm::ML::Tensor<Evaluation> predictkrn = outkrn;
-            OPM_ERROR_IF(!model.apply(inkrn, outkrn), "Failed to apply");
-            auto ml_krn = fabs(outkrn(0).value());
-            auto errorkrn = fabs(ml_krn - mobility[2].value());
+                if (ml_krn < 1e-3){
+                    // if (errorkrn < 1e-3){
+                        ml_krn = 0.0;
+                    // }
+                }
+                
+            // if (errorkrn < 1e-4){
 
-            mobility[2] = ml_krn;
-
-            // std::cout<<"pathml"<<std::endl;
-            // std::cout<<pathml<<std::endl;
-            // std::cout<<"pathmlbis"<<std::endl;
-            // std::cout<<pathmlbis<<std::endl;
-
-            // // // if (errorkrn <= 1e-3){
-            //     mobility[2] = ml_krn;
-            // //   std::cout<<"pred "<< ml_krn<<" groundtruth "<<mobility[2].value()<<" errorkrn "<<errorkrn<<std::endl;
-            // //                 // }
-
-            // Opm::ML::Tensor<Evaluation> inkrw{2};
-            // inkrw.data_ = {fluidState.saturation(gasPhaseIdx),fluidState.saturation(gasPhaseIdx)};
-
-            // Opm::ML::Tensor<Evaluation> outkrw{1};
-            // outkrn.data_ = {0.00e-03};
-
-            // OPM_ERROR_IF(!modelrw.loadModel(pathmlkrw), "Failed to load model");
-            // Opm::ML::Tensor<Evaluation> predictkrw = outkrw;
-            // OPM_ERROR_IF(!modelrw.apply(inkrw, outkrw), "Failed to apply");
-            // auto ml_krw = fabs(outkrw(0).value());
-            // auto errorkrw = fabs(ml_krw - mobility[0].value());
-
-            // // std::cout<<"ml_krw"<<std::endl;
-
-            // // if (errorkrw <= 1e-3){
-            // //     mobility[0] = ml_krw;
-            // //     // std::cout<<"predkrw "<< ml_krw<<" groundtruthkrw "<<mobility[0].value()<<" errorkrw "<<errorkrw<<std::endl;
-            // // }
+                mobility[2] = ml_krn;
+            // }
+            }
 
 
         }

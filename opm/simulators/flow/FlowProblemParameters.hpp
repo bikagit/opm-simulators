@@ -32,6 +32,10 @@
 
 namespace Opm::Parameters {
 
+// Whether or not to check saturation function consistency requirements.
+struct ActivateMLRelPErm { static constexpr bool value = false; };
+
+
 // Enable partial compensation of systematic mass losses via
 // the source term of the next time step
 struct EnableDriftCompensation { static constexpr bool value = false; };
