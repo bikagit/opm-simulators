@@ -200,9 +200,8 @@ public:
         this->readRockParameters_(simulator.vanguard().cellCenterDepths(), [&simulator](const unsigned idx) {
             std::array<int, dim> coords;
             simulator.vanguard().cartesianCoordinate(idx, coords);
-            for (auto& c : coords) {
-                ++c;
-            }
+            std::transform(coords.begin(), coords.end(), coords.begin(),
+                           [](const auto c) { return c + 1; });
             return coords;
         });
         FlowProblemType::readMaterialParameters_();
@@ -366,6 +365,9 @@ public:
             Dune::FieldVector<Scalar, numComponents> z(0.0);
             Scalar sumMoles = 0.0;
             for (unsigned phaseIdx = 0; phaseIdx < numPhases; ++phaseIdx) {
+                if (Indices::waterEnabled && phaseIdx == static_cast<unsigned int>(waterPhaseIdx)){ 
+                    continue;
+                }
                 const auto saturation = fs.saturation(phaseIdx);
                 for (unsigned compIdx = 0; compIdx < numComponents; ++compIdx) {
                     Scalar tmp = fs.molarity(phaseIdx, compIdx) * saturation;
@@ -417,6 +419,12 @@ public:
                 " Threshold Pressures are not supported by compostional simulation ");
         return thresholdPressures_;
     }
+
+    const EclWriterType& eclWriter() const
+    { return *eclWriter_; }
+
+    EclWriterType& eclWriter()
+    { return *eclWriter_; }
 
     // TODO: do we need this one?
     template<class Serializer>
@@ -495,7 +503,7 @@ protected:
         const bool gas_active = FluidSystem::phaseIsActive(gasPhaseIdx);
         const bool oil_active = FluidSystem::phaseIsActive(oilPhaseIdx);
 
-        if (water_active && Indices::numPhases > 1)
+        if (water_active && Indices::numPhases > 2)
             waterSaturationData = fp.get_double("SWAT");
         else
             waterSaturationData.resize(numDof);
@@ -530,6 +538,10 @@ protected:
                                             1.0
                                             - waterSaturationData[dofIdx]
                                             - gasSaturationData[dofIdx]);
+            }
+            if (water_active) {
+                dofFluidState.setSaturation(FluidSystem::waterPhaseIdx,
+                                            waterSaturationData[dofIdx]);
             }
 
             //////
@@ -596,6 +608,21 @@ private:
     void handlePolymerBC(const BCProp::BCFace& /* bc */, RateVector& /* rate */) const override
     {
         throw std::logic_error("polymer is disabled for compositional modeling and you're trying to add polymer to BC");
+    }
+
+    void handleMicrBC(const BCProp::BCFace& /* bc */, RateVector& /* rate */) const override
+    {
+        throw std::logic_error("MICP is disabled for compositional modeling and you're trying to add microbes to BC");
+    }
+
+    void handleOxygBC(const BCProp::BCFace& /* bc */, RateVector& /* rate */) const override
+    {
+        throw std::logic_error("MICP is disabled for compositional modeling and you're trying to add oxygen to BC");
+    }
+
+    void handleUreaBC(const BCProp::BCFace& /* bc */, RateVector& /* rate */) const override
+    {
+        throw std::logic_error("MICP is disabled for compositional modeling and you're trying to add urea to BC");
     }
 
     FlowThresholdPressure<TypeTag> thresholdPressures_;

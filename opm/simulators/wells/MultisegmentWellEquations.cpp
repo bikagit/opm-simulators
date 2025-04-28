@@ -42,6 +42,7 @@
 #include <opm/simulators/wells/WellInterfaceGeneric.hpp>
 
 #include <cstddef>
+#include <numeric>
 #include <stdexcept>
 
 namespace Opm {
@@ -73,10 +74,10 @@ init(const int numPerfs,
     // calculating the NNZ for duneD_
     // NNZ = number_of_segments + 2 * (number_of_inlets / number_of_outlets)
     {
-        int nnz_d = well_.numberOfSegments();
-        for (const std::vector<int>& inlets : segment_inlets) {
-            nnz_d += 2 * inlets.size();
-        }
+        const int nnz_d = std::accumulate(segment_inlets.begin(), segment_inlets.end(),
+                                          well_.numberOfSegments(),
+                                          [](const auto acc, const auto& inlets)
+                                          { return acc + 2 * inlets.size(); });
         duneD_.setSize(well_.numberOfSegments(), well_.numberOfSegments(), nnz_d);
     }
     duneB_.setSize(well_.numberOfSegments(), numPerfs, numPerfs);
@@ -109,7 +110,7 @@ init(const int numPerfs,
               end = duneC_.createend(); row != end; ++row) {
         // the number of the row corresponds to the segment number now.
         for (const int& perf : perforations[row.index()]) {
-            const int local_perf_index = pw_info_.globalToLocal(perf);
+            const int local_perf_index = pw_info_.activeToLocal(perf);
             if (local_perf_index < 0) // then the perforation is not on this process
                 continue;
             row.insert(local_perf_index);
@@ -121,7 +122,7 @@ init(const int numPerfs,
               end = duneB_.createend(); row != end; ++row) {
         // the number of the row corresponds to the segment number now.
         for (const int& perf : perforations[row.index()]) {
-            const int local_perf_index = pw_info_.globalToLocal(perf);
+            const int local_perf_index = pw_info_.activeToLocal(perf);
             if (local_perf_index < 0) // then the perforation is not on this process
                 continue;
             row.insert(local_perf_index);
@@ -157,28 +158,35 @@ apply(const BVector& x, BVector& Ax) const
     // the single process to complete the computation.
     // invDBx = duneD^-1 * Bx_
     const BVectorWell invDBx = mswellhelpers::applyUMFPack(*duneDSolver_, Bx);
-
-    // Ax = Ax - duneC_^T * invDBx
-    duneC_.mmtv(invDBx,Ax);
+    // Ax.size() == 0 indicates that there are no active perforations on this process.
+    // Then, Ax does not need to be updated by the following calculation.
+    if (Ax.size() > 0) {
+        // Ax = Ax - duneC_^T * invDBx
+        duneC_.mmtv(invDBx,Ax);
+    }
 }
 
 template<class Scalar, int numWellEq, int numEq>
 void MultisegmentWellEquations<Scalar,numWellEq,numEq>::
 apply(BVector& r) const
 {
-    // It is ok to do this on each process instead of only on one,
-    // because the other processes would remain idle while waiting for
-    // the single process to complete the computation.
-    // invDrw_ = duneD^-1 * resWell_
-    const BVectorWell invDrw = mswellhelpers::applyUMFPack(*duneDSolver_, resWell_);
-    // r = r - duneC_^T * invDrw
-    duneC_.mmtv(invDrw, r);
+    // r.size() == 0 indicates that there are no active perforations on this process.
+    // Then, r does not need to be updated by the following calculation.
+    if (r.size() > 0) {
+        // It is ok to do this on each process instead of only on one,
+        // because the other processes would remain idle while waiting for
+        // the single process to complete the computation.
+        // invDrw_ = duneD^-1 * resWell_
+        const BVectorWell invDrw = mswellhelpers::applyUMFPack(*duneDSolver_, resWell_);
+        // r = r - duneC_^T * invDrw
+        duneC_.mmtv(invDrw, r);
+    }
 }
 
 template<class Scalar, int numWellEq, int numEq>
 void MultisegmentWellEquations<Scalar,numWellEq,numEq>::createSolver()
 {
-#if HAVE_UMFPACK
+#if HAVE_SUITESPARSE_UMFPACK
     if (duneDSolver_) {
         return;
     }

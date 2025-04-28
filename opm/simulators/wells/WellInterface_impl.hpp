@@ -76,7 +76,7 @@ namespace Opm
                                                   index_of_well,
                                                   perf_data)
     {
-        connectionRates_.resize(this->number_of_perforations_);
+        connectionRates_.resize(this->number_of_local_perforations_);
 
         if constexpr (has_solvent || has_zFraction) {
             if (well.isInjector()) {
@@ -172,12 +172,6 @@ namespace Opm
 
       return 0.0;
     }
-
-    // The urea injection concentration is scaled down by a factor of 10, since its value
-    // can be much bigger than 1 (not doing this slows the simulations). The
-    // corresponding values are scaled accordingly in blackoilmicpmodules.hh when computing
-    // the reactions and also when writing the output files (vtk and eclipse format, i.e.,
-    // vtkblackoilmicpmodule.hh and ecloutputblackoilmodel.hh respectively).
 
     template<typename TypeTag>
     typename WellInterface<TypeTag>::Scalar
@@ -397,10 +391,18 @@ namespace Opm
         WellState<Scalar> well_state_copy = well_state;
         auto& ws = well_state_copy.well(this->indexOfWell());
 
+        const auto& summary_state = simulator.vanguard().summaryState();
+        const bool has_thp_limit = this->wellHasTHPConstraints(summary_state);
+        if (has_thp_limit) {
+            ws.production_cmode = Well::ProducerCMode::THP;
+        }
+        else {
+            ws.production_cmode = Well::ProducerCMode::BHP;
+        }
+
         updateWellStateWithTarget(simulator, group_state, well_state_copy, deferred_logger);
         calculateExplicitQuantities(simulator, well_state_copy, deferred_logger);
         updatePrimaryVariables(simulator, well_state_copy, deferred_logger);
-        initPrimaryVariablesEvaluation();
 
         if (this->isProducer()) {
             const auto& schedule = simulator.vanguard().schedule();
@@ -716,19 +718,8 @@ namespace Opm
                         DeferredLogger& deferred_logger)
     {
         OPM_TIMEFUNCTION();
-        // keep a copy of the original well state
-        const WellState<Scalar> well_state0 = well_state;
         const double dt = simulator.timeStepSize();
-        const auto& summary_state = simulator.vanguard().summaryState();
-        const bool has_thp_limit = this->wellHasTHPConstraints(summary_state);
-        bool converged;
-        if (has_thp_limit) {
-            well_state.well(this->indexOfWell()).production_cmode = Well::ProducerCMode::THP;
-        }
-        else {
-            well_state.well(this->indexOfWell()).production_cmode = Well::ProducerCMode::BHP;
-        }
-        converged = iterateWellEquations(simulator, dt, well_state, group_state, deferred_logger);
+        const bool converged = iterateWellEquations(simulator, dt, well_state, group_state, deferred_logger);
         if (converged) {
             deferred_logger.debug("WellTest: Well equation for well " + this->name() +  " converged");
             return true;
@@ -736,7 +727,6 @@ namespace Opm
         const int max_iter = this->param_.max_welleq_iter_;
         deferred_logger.debug("WellTest: Well equation for well " + this->name() + " failed converging in "
                               + std::to_string(max_iter) + " iterations");
-        well_state = well_state0;
         return false;
     }
 
@@ -916,11 +906,11 @@ namespace Opm
         const bool well_operable = this->operability_status_.isOperableAndSolvable();
 
         if (!well_operable && old_well_operable) {
-            deferred_logger.info(" well " + this->name() + " gets STOPPED during iteration ");
+            deferred_logger.debug(" well " + this->name() + " gets STOPPED during iteration ");
             this->stopWell();
             changed_to_stopped_this_step_ = true;
         } else if (well_operable && !old_well_operable) {
-            deferred_logger.info(" well " + this->name() + " gets REVIVED during iteration ");
+            deferred_logger.debug(" well " + this->name() + " gets REVIVED during iteration ");
             this->openWell();
             changed_to_stopped_this_step_ = false;
             this->changed_to_open_this_step_ = true;
@@ -934,7 +924,7 @@ namespace Opm
         if(!this->isOperableAndSolvable() && !this->wellIsStopped())
             return;
 
-        for (int perfIdx = 0; perfIdx < this->number_of_perforations_; ++perfIdx) {
+        for (int perfIdx = 0; perfIdx < this->number_of_local_perforations_; ++perfIdx) {
             if (this->cells()[perfIdx] == cellIdx) {
                 for (int i = 0; i < RateVector::dimension; ++i) {
                     rates[i] += connectionRates_[perfIdx][i];
@@ -947,7 +937,7 @@ namespace Opm
     typename WellInterface<TypeTag>::Scalar
     WellInterface<TypeTag>::volumetricSurfaceRateForConnection(int cellIdx, int phaseIdx) const
     {
-        for (int perfIdx = 0; perfIdx < this->number_of_perforations_; ++perfIdx) {
+        for (int perfIdx = 0; perfIdx < this->number_of_local_perforations_; ++perfIdx) {
             if (this->cells()[perfIdx] == cellIdx) {
                 const unsigned activeCompIdx = Indices::canonicalToActiveComponentIndex(FluidSystem::solventComponentIndex(phaseIdx));
                 return connectionRates_[perfIdx][activeCompIdx].value();
@@ -987,40 +977,7 @@ namespace Opm
         }
     }
 
-    template<typename TypeTag>
-    bool
-    WellInterface<TypeTag>::
-    gliftBeginTimeStepWellTestIterateWellEquations(const Simulator& simulator,
-                                                   const double dt,
-                                                   WellState<Scalar>& well_state,
-                                                   const GroupState<Scalar>& group_state,
-                                                   DeferredLogger& deferred_logger)
-    {
-        OPM_TIMEFUNCTION();
-        const auto& well_name = this->name();
-        assert(this->wellHasTHPConstraints(simulator.vanguard().summaryState()));
-        const auto& schedule = simulator.vanguard().schedule();
-        auto report_step_idx = simulator.episodeIndex();
-        const auto& glo = schedule.glo(report_step_idx);
-        if(glo.active() && glo.has_well(well_name)) {
-            const auto increment = glo.gaslift_increment();
-            auto alq = well_state.getALQ(well_name);
-            bool converged;
-            while (alq > 0) {
-                well_state.setALQ(well_name, alq);
-                if ((converged =
-                      iterateWellEquations(simulator, dt, well_state, group_state, deferred_logger)))
-                {
-                    return converged;
-                }
-                alq -= increment;
-            }
-            return false;
-        }
-        else {
-            return iterateWellEquations(simulator, dt, well_state, group_state, deferred_logger);
-        }
-    }
+
 
     template<typename TypeTag>
     void
@@ -1501,9 +1458,11 @@ namespace Opm
                     for (int p = 0; p<np; ++p) {
                         ws.surface_rates[p] *= scale;
                     }
-                    ws.trivial_target = false;
+                    ws.trivial_group_target = false;
                 } else {
-                    ws.trivial_target = true;
+                    // If group target is trivial we dont want to flip to other controls. To avoid oscillation we store
+                    // this information in the well state and explicitly check for this condition when evaluating well controls.
+                    ws.trivial_group_target = true;
                 }
                 break;
             }
@@ -1595,10 +1554,12 @@ namespace Opm
         // if we don't have any potentials we weight it using the mobilites
         // We only need approximation so we don't bother with the vapporized oil and dissolved gas
         Scalar total_tw = 0;
-        const int nperf = this->number_of_perforations_;
+        const int nperf = this->number_of_local_perforations_;
         for (int perf = 0; perf < nperf; ++perf) {
             total_tw += this->well_index_[perf];
         }
+        total_tw = this->parallelWellInfo().communication().sum(total_tw);
+
         for (int perf = 0; perf < nperf; ++perf) {
             const int cell_idx = this->well_cells_[perf];
             const auto& intQuants = simulator.model().intensiveQuantities(cell_idx, /*timeIdx=*/0);
@@ -1762,7 +1723,7 @@ namespace Opm
 
         auto& d_factor = ws.perf_data.connection_d_factor;
 
-        for (int perf = 0; perf < this->number_of_perforations_; ++perf) {
+        for (int perf = 0; perf < this->number_of_local_perforations_; ++perf) {
             const int cell_idx = this->well_cells_[perf];
             const auto& intQuants = simulator.model().intensiveQuantities(cell_idx, /*timeIdx=*/ 0);
 
@@ -1828,7 +1789,7 @@ namespace Opm
         auto& tmult = ws.perf_data.connection_compaction_tmult;
         auto& ctf   = ws.perf_data.connection_transmissibility_factor;
 
-        for (int perf = 0; perf < this->number_of_perforations_; ++perf) {
+        for (int perf = 0; perf < this->number_of_local_perforations_; ++perf) {
             const int cell_idx = this->well_cells_[perf];
 
             const auto& intQuants = simulator.model()
@@ -1926,9 +1887,9 @@ namespace Opm
             const auto& connections = this->well_ecl_.getConnections();
             const auto& connection = connections[perf_ecl_index];
             if (connection.filterCakeActive()) {
-                for (auto& val : mob) {
-                    val *= this->inj_fc_multiplier_[perf];
-                }
+                std::transform(mob.begin(), mob.end(), mob.begin(),
+                               [mult = this->inj_fc_multiplier_[perf] ](const auto val)
+                               { return val * mult; });
             }
         }
     }
@@ -1945,7 +1906,7 @@ namespace Opm
         const auto& summary_state = simulator.vanguard().summaryState();
 
         auto bhp_at_thp_limit = computeBhpAtThpLimitProdWithAlq(
-            simulator, summary_state, this->getALQ(well_state), deferred_logger, /*iterate_if_no_solution */ true);
+            simulator, summary_state, this->getALQ(well_state), deferred_logger, /*iterate_if_no_solution */ false);
         if (bhp_at_thp_limit) {
             std::vector<Scalar> rates(this->number_of_phases_, 0.0);
             if (thp_update_iterations) {

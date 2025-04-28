@@ -41,7 +41,8 @@ public:
     using ModelParameters = typename WellInterfaceFluidSystem<FluidSystem>::ModelParameters;
 
     int flowPhaseToModelCompIdx(const int phaseIdx) const;
-    int modelCompIdxToFlowCompIdx(const unsigned compIdx) const;
+    int modelCompIdxToFlowCompIdx(const int compIdx) const;
+    int flowPhaseToModelPhaseIdx(const int phaseIdx) const;
     Scalar scalingFactor(const int phaseIdx) const;
 
     template <class EvalWell>

@@ -78,7 +78,7 @@ flowPhaseToModelCompIdx(const int phaseIdx) const
 template<class FluidSystem, class Indices>
 int
 WellInterfaceIndices<FluidSystem,Indices>::
-modelCompIdxToFlowCompIdx(const unsigned compIdx) const
+modelCompIdxToFlowCompIdx(const int compIdx) const
 {
     const auto& pu = this->phaseUsage();
     if (FluidSystem::phaseIsActive(FluidSystem::waterPhaseIdx) && Indices::canonicalToActiveComponentIndex(FluidSystem::waterCompIdx) == compIdx)
@@ -91,6 +91,25 @@ modelCompIdxToFlowCompIdx(const unsigned compIdx) const
     // for other phases return the index
     return compIdx;
 }
+
+
+template<typename FluidSystem, class Indices>
+int
+WellInterfaceIndices<FluidSystem, Indices>::
+flowPhaseToModelPhaseIdx(const int phaseIdx) const
+{
+    const auto& pu = this->phaseUsage();
+    if (FluidSystem::phaseIsActive(FluidSystem::waterPhaseIdx) && pu.phase_pos[Water] == phaseIdx)
+        return FluidSystem::waterPhaseIdx;
+    if (FluidSystem::phaseIsActive(FluidSystem::oilPhaseIdx) && pu.phase_pos[Oil] == phaseIdx)
+        return FluidSystem::oilPhaseIdx;
+    if (FluidSystem::phaseIsActive(FluidSystem::gasPhaseIdx) && pu.phase_pos[Gas] == phaseIdx)
+        return FluidSystem::gasPhaseIdx;
+
+    // for other phases return the index
+    return phaseIdx;
+}
+
 
 template<class FluidSystem, class Indices>
 typename WellInterfaceIndices<FluidSystem,Indices>::Scalar

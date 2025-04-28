@@ -46,10 +46,14 @@ maybeDoGasLiftOptimize(const Simulator& simulator,
                        DeferredLogger& deferred_logger)
 {
     OPM_TIMEFUNCTION();
+    const auto& glo = simulator.vanguard().schedule().glo(simulator.episodeIndex());
+    if(!glo.active()) {
+        return false;
+    }
     bool do_glift_optimization = false;
     int num_wells_changed = 0;
     const double simulation_time = simulator.time();
-    const Scalar min_wait = simulator.vanguard().schedule().glo(simulator.episodeIndex()).min_wait();
+    const Scalar min_wait = glo.min_wait();
     // We only optimize if a min_wait time has past.
     // If all_newton is true we still want to optimize several times pr timestep
     // i.e. we also optimize if check simulation_time == last_glift_opt_time_
@@ -114,9 +118,10 @@ maybeDoGasLiftOptimize(const Simulator& simulator,
         if constexpr (glift_debug) {
             std::vector<WellInterfaceGeneric<Scalar>*> wc;
             wc.reserve(well_container.size());
-            for (const auto& w : well_container) {
-                wc.push_back(static_cast<WellInterfaceGeneric<Scalar>*>(w.get()));
-            }
+            std::transform(well_container.begin(), well_container.end(),
+                           std::back_inserter(wc),
+                           [](const auto& w)
+                           { return static_cast<WellInterfaceGeneric<Scalar>*>(w.get()); });
             this->gliftDebugShowALQ(wc,
                                     wellState,
                                     deferred_logger);
@@ -224,7 +229,7 @@ gasLiftOptimizationStage1(const Simulator& simulator,
             }
 #if HAVE_MPI
             Parallel::MpiSerializer ser(comm);
-            ser.broadcast(i, group_indexes, group_oil_rates,
+            ser.broadcast(Parallel::RootRank{i}, group_indexes, group_oil_rates,
                           group_gas_rates, group_water_rates, group_alq_rates);
 #endif
             if (comm.rank() != i) {

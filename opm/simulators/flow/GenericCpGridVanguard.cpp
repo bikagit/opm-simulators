@@ -158,11 +158,20 @@ doLoadBalance_(const Dune::EdgeWeightMethod             edgeWeightsMethod,
                const int                                numJacobiBlocks,
                const bool                               enableEclOutput)
 {
-    if ((partitionMethod == Dune::PartitionMethod::zoltan
-         || partitionMethod == Dune::PartitionMethod::zoltanGoG) && !this->zoltanParams().empty())
-        this->grid_->setPartitioningParams(setupZoltanParams(this->zoltanParams()));
-    if (partitionMethod == Dune::PartitionMethod::metis && !this->metisParams().empty())
-        this->grid_->setPartitioningParams(setupMetisParams(this->metisParams()));
+    if (((partitionMethod == Dune::PartitionMethod::zoltan) ||
+         (partitionMethod == Dune::PartitionMethod::zoltanGoG)) &&
+        !this->zoltanParams().empty())
+    {
+        this->grid_->setPartitioningParams
+            (setupZoltanParams(this->zoltanParams(),
+                               this->zoltanPhgEdgeSizeThreshold()));
+    }
+    else if ((partitionMethod == Dune::PartitionMethod::metis) &&
+        !this->metisParams().empty())
+    {
+        this->grid_->setPartitioningParams
+            (setupMetisParams(this->metisParams()));
+    }
 
     const auto mpiSize = this->grid_->comm().size();
 
@@ -461,17 +470,21 @@ void GenericCpGridVanguard<ElementMapper,GridView,Scalar>::doCreateGrids_(Eclips
     if (isRoot) {
         const auto& active_porv = eclState.fieldProps().porv(false);
         const auto& unit_system = eclState.getUnits();
-        const auto& volume_unit = unit_system.name( UnitSystem::measure::volume);
-        double total_pore_volume = unit_system.from_si( UnitSystem::measure::volume, std::accumulate(active_porv.begin(), active_porv.end(), 0.0));
-        OpmLog::info(fmt::format("Total number of active cells: {} / total pore volume: {:0.0f} {}", grid_->numCells(), total_pore_volume , volume_unit));
+        const auto& volume_unit = unit_system.name(UnitSystem::measure::volume);
+        double total_pore_volume = unit_system.from_si(UnitSystem::measure::volume,
+                                                       std::accumulate(active_porv.begin(), active_porv.end(), 0.0));
+        OpmLog::info(fmt::format("Total number of active cells: {} / total pore volume: {:0.0f} {}",
+                                 grid_->numCells(), total_pore_volume , volume_unit));
 
-        double removed_pore_volume = 0;
-        for (const auto& global_index : removed_cells)
-            removed_pore_volume += active_porv[ eclState.getInputGrid().activeIndex(global_index) ];
+        double removed_pore_volume =
+            std::accumulate(removed_cells.begin(), removed_cells.end(), 0.0,
+                            [&active_porv, &eclState](const auto acc, const auto global_index)
+                            { return acc + active_porv[eclState.getInputGrid().activeIndex(global_index)]; });
 
         if (removed_pore_volume > 0) {
-            removed_pore_volume = unit_system.from_si( UnitSystem::measure::volume, removed_pore_volume );
-            OpmLog::info(fmt::format("Removed {} cells with a pore volume of {:0.0f} {} ({:5.3f} %) due to MINPV/MINPVV",
+            removed_pore_volume = unit_system.from_si(UnitSystem::measure::volume, removed_pore_volume);
+            OpmLog::info(fmt::format("Removed {} cells with a pore volume of {:0.0f} "
+                                     "{} ({:5.3f} %) due to MINPV/MINPVV",
                                      removed_cells.size(),
                                      removed_pore_volume,
                                      volume_unit,
@@ -481,15 +494,6 @@ void GenericCpGridVanguard<ElementMapper,GridView,Scalar>::doCreateGrids_(Eclips
 
     cartesianIndexMapper_ = std::make_unique<CartesianIndexMapper>(*grid_);
 
-    // --- Add LGRs and update Leaf Grid View ---
-    // Check if input file contains Lgrs.
-    //
-    // If there are lgrs, create the grid with them, and update the leaf grid view.
-    if (const auto& lgrs = eclState.getLgrs(); lgrs.size() > 0) {
-        OpmLog::info("\nAdding LGRs to the grid and updating its leaf grid view");
-        this->addLgrsUpdateLeafView(lgrs, lgrs.size(), *this->grid_);
-    }
-
 #if HAVE_MPI
     if (this->grid_->comm().size() > 1) {
         // Numerical aquifers generate new NNCs during grid processing.  We
@@ -498,7 +502,7 @@ void GenericCpGridVanguard<ElementMapper,GridView,Scalar>::doCreateGrids_(Eclips
         if (eclState.aquifer().hasNumericalAquifer()) {
             auto nnc_input = eclState.getInputNNC();
             Parallel::MpiSerializer ser(this->grid_->comm());
-            ser.broadcast(nnc_input);
+            ser.broadcast(Parallel::RootRank{0}, nnc_input);
 
             if (! isRoot) {
                 eclState.setInputNNC(nnc_input);
@@ -511,7 +515,7 @@ void GenericCpGridVanguard<ElementMapper,GridView,Scalar>::doCreateGrids_(Eclips
         if (hasPinchNnc) {
             auto pinch_nnc = eclState.getPinchNNC();
             Parallel::MpiSerializer ser(this->grid_->comm());
-            ser.broadcast(pinch_nnc);
+            ser.broadcast(Parallel::RootRank{0}, pinch_nnc);
 
             if (! isRoot) {
                 eclState.setPinchNNC(std::move(pinch_nnc));
@@ -520,7 +524,7 @@ void GenericCpGridVanguard<ElementMapper,GridView,Scalar>::doCreateGrids_(Eclips
     }
 #endif
 
-    // --- Copy grid with LGRs to equilGrid_ ---
+    // --- Copy grid to equilGrid_ ---
     // We use separate grid objects: one for the calculation of the initial
     // condition via EQUIL and one for the actual simulation. The reason is
     // that the EQUIL code is allergic to distributed grids and the

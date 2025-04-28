@@ -46,12 +46,10 @@ namespace Opm {
 ReservoirCouplingSpawnSlaves::
 ReservoirCouplingSpawnSlaves(
     ReservoirCouplingMaster &master,
-    const ReservoirCoupling::CouplingInfo &rescoup,
-    const int report_step
+    const ReservoirCoupling::CouplingInfo &rescoup
 ) :
     master_{master},
     rescoup_{rescoup},
-    report_step_{report_step},
     comm_{master.getComm()}
 {
 }
@@ -263,9 +261,7 @@ serializeStrings_(std::vector<std::string> data) const
     std::size_t total_size = 0;
     std::vector<char> serialized_data;
     for (const auto& str: data) {
-        for (const auto& c: str) {
-            serialized_data.push_back(c);
-        }
+        std::copy(str.begin(), str.end(), std::back_inserter(serialized_data));
         serialized_data.push_back('\0');
         total_size += str.size() + 1;
     }

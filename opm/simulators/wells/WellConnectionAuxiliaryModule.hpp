@@ -72,7 +72,7 @@ public:
 #if HAVE_MPI
         // Communicate Map to other processes, since it is only available on rank 0
         Parallel::MpiSerializer ser(lin_comm_);
-        ser.broadcast(possibleFutureConnections);
+        ser.broadcast(Parallel::RootRank{0}, possibleFutureConnections);
 #endif
         // initialize the additional cell connections introduced by wells.
         for (const auto& well : schedule_wells)
@@ -116,6 +116,7 @@ public:
                          SparseMatrixAdapter& jacobian,
                          GlobalEqVector& res)
     {
+        OPM_TIMEBLOCK(wellLinearizeDomain);
         // Note: no point in trying to do a parallel gathering
         // try/catch here, as this function is not called in
         // parallel but for each individual domain of each rank.

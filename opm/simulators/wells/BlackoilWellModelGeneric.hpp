@@ -32,7 +32,6 @@
 #include <opm/input/eclipse/Schedule/Well/WellTestState.hpp>
 
 #include <opm/simulators/utils/DeferredLoggingErrorHelpers.hpp>
-
 #include <opm/simulators/wells/BlackoilWellModelWBP.hpp>
 #include <opm/simulators/wells/ConnectionIndexMap.hpp>
 #include <opm/simulators/wells/ParallelPAvgDynamicSourceData.hpp>
@@ -40,6 +39,7 @@
 #include <opm/simulators/wells/PerforationData.hpp>
 #include <opm/simulators/wells/WellFilterCake.hpp>
 #include <opm/simulators/wells/WellProdIndexCalculator.hpp>
+#include <opm/simulators/wells/WellTracerRate.hpp>
 #include <opm/simulators/wells/WGState.hpp>
 
 #include <cstddef>
@@ -154,8 +154,8 @@ public:
     }
 
     /*
-      Will return the currently active nupcolWellState; must initialize
-      the internal nupcol wellstate with initNupcolWellState() first.
+      Will return the currently active nupcolWellState; must update
+      the internal nupcol wellstate with updateNupcolWGState() first.
     */
     const WellState<Scalar>& nupcolWellState() const
     {
@@ -192,12 +192,10 @@ public:
     void commitWGState()
     {
         this->last_valid_wgstate_ = this->active_wgstate_;
+        this->last_valid_node_pressures_ = this->node_pressures_;
     }
 
     data::GroupAndNetworkValues groupAndNetworkData(const int reportStepIdx) const;
-
-    /// Return true if any well has a THP constraint.
-    bool hasTHPConstraints() const;
 
     /// Checks if network is active (at least one network well on prediction).
     void updateNetworkActiveState(const int report_step);
@@ -226,6 +224,7 @@ public:
 
     const std::map<std::string, double>& wellOpenTimes() const { return well_open_times_; }
     const std::map<std::string, double>& wellCloseTimes() const { return well_close_times_; }
+    const WellGroupEvents& reportStepStartEvents() const { return report_step_start_events_; }
 
     std::vector<int> getCellsForConnections(const Well& well) const;
 
@@ -252,6 +251,7 @@ public:
         serializer(closed_this_step_);
         serializer(guideRate_);
         serializer(node_pressures_);
+        serializer(last_valid_node_pressures_);
         serializer(prev_inj_multipliers_);
         serializer(active_wgstate_);
         serializer(last_valid_wgstate_);
@@ -284,19 +284,19 @@ protected:
           try again with a smaller timestep we need to recover the last
           valid wellstate. This is maintained with the
           last_valid_well_state_ member and the functions
-          commitWellState() and resetWellState().
+          commitWGState() and resetWellState().
 
         3. For the NUPCOL functionality we should either use the
            currently active wellstate or a wellstate frozen at max
            nupcol iterations. This is handled with the member
-           nupcol_well_state_ and the initNupcolWellState() function.
+           nupcol_well_state_ and the updateNupcolWGState() function.
     */
 
     /*
       Will return the last good wellstate. This is typcially used when
       initializing a new report step where the Schedule object might
       have introduced new wells. The wellstate returned by
-      prevWellState() must have been stored with the commitWellState()
+      prevWellState() must have been stored with the commitWGState()
       function first.
     */
     const WellState<Scalar>& prevWellState() const
@@ -327,6 +327,7 @@ protected:
     void resetWGState()
     {
         this->active_wgstate_ = this->last_valid_wgstate_;
+        this->node_pressures_ = this->last_valid_node_pressures_;
     }
 
     /*
@@ -449,12 +450,16 @@ protected:
     std::vector<std::string> getWellsForTesting(const int timeStepIdx,
                                                 const double simulationTime);
 
-    using WellTracerRates = std::map<std::pair<std::string, std::string>, Scalar>;
+    using WellTracerRates = std::unordered_map<int, std::vector<WellTracerRate<Scalar>>>;
     void assignWellTracerRates(data::Wells& wsrpt,
-                               const WellTracerRates& wellTracerRates) const;
-    using MswTracerRates = std::map<std::tuple<std::string, std::string, std::size_t>, Scalar>;
+                               const WellTracerRates& wellTracerRates,
+                               const unsigned reportStep) const;
+
+    using MswTracerRates = std::unordered_map<int, std::vector<MSWellTracerRate<Scalar>>>;
     void assignMswTracerRates(data::Wells& wsrpt,
-                              const MswTracerRates& mswTracerRates) const;
+                              const MswTracerRates& mswTracerRates,
+                              const unsigned reportStep) const;
+
     void assignMassGasRate(data::Wells& wsrpt,
                            const Scalar& gasDensity) const;
 
@@ -502,7 +507,11 @@ protected:
 
     GuideRate guideRate_;
     std::unique_ptr<VFPProperties<Scalar>> vfp_properties_{};
-    std::map<std::string, Scalar> node_pressures_; // Storing network pressures for output.
+
+    // Network pressures for output and initialization
+    std::map<std::string, Scalar> node_pressures_;
+    // Valid network pressures for output and initialization for safe restart after failed iterations
+    std::map<std::string, Scalar> last_valid_node_pressures_;
 
     // previous injection multiplier, it is used in the injection multiplier calculation for WINJMULT keyword
     std::unordered_map<std::string, std::vector<Scalar>> prev_inj_multipliers_;
@@ -514,11 +523,12 @@ protected:
       The various wellState members should be accessed and modified
       through the accessor functions wellState(), prevWellState(),
       commitWellState(), resetWellState(), nupcolWellState() and
-      updateNupcolWellState().
+      updateNupcolWGState().
     */
     WGState<Scalar> active_wgstate_;
     WGState<Scalar> last_valid_wgstate_;
     WGState<Scalar> nupcol_wgstate_;
+    WellGroupEvents report_step_start_events_; //!< Well group events at start of report step
 
     bool wellStructureChangedDynamically_{false};
 

@@ -46,6 +46,47 @@ add_test_compare_parallel_simulation(CASENAME msw-simple
                                      MPI_PROCS 4
                                      TEST_ARGS --solver-max-time-step-in-days=15 --allow-distributed-wells=true)
 
+# A test for distributed multisegment wells with one shut perforation at the process border. We load distribute only along the z-axis
+add_test_compare_parallel_simulation(CASENAME msw-simple-1-shut-perforation-border
+                                     FILENAME MSW-SIMPLE-1-SHUT-PERFORATION-BORDER # this file contains one Multisegment well without branches that is distributed across several processes
+                                     DIR msw
+                                     SIMULATOR flow_distribute_z
+                                     ABS_TOL 1e4 # the absolute tolerance is pretty high here, yet in this case, we are only interested in the relative tolerance
+                                     REL_TOL 1e-5
+                                     MPI_PROCS 4
+                                     TEST_ARGS --solver-max-time-step-in-days=15 --allow-distributed-wells=true)
+
+
+# A test for distributed multisegment wells with only one open perforation. We load distribute only along the z-axis
+add_test_compare_parallel_simulation(CASENAME msw-simple-shut-perforations
+                                     FILENAME MSW-SIMPLE-SHUT-PERFORATIONS # this file contains one Multisegment well without branches that is distributed across several processes
+                                     DIR msw
+                                     SIMULATOR flow_distribute_z
+                                     ABS_TOL 1e4 # the absolute tolerance is pretty high here, yet in this case, we are only interested in the relative tolerance
+                                     REL_TOL 1e-5
+                                     MPI_PROCS 4
+                                     TEST_ARGS --solver-max-time-step-in-days=15 --allow-distributed-wells=true)
+
+# A test for distributed multisegment wells with only shut perforations on rank 0, where the well is distributed across ranks 0 and 1. We load distribute only along the z-axis
+add_test_compare_parallel_simulation(CASENAME msw-simple-5-shut-perforations
+                                     FILENAME MSW-SIMPLE-5-SHUT-PERFORATIONS # this file contains one Multisegment well without branches that is distributed across several processes
+                                     DIR msw
+                                     SIMULATOR flow_distribute_z
+                                     ABS_TOL 1e4 # the absolute tolerance is pretty high here, yet in this case, we are only interested in the relative tolerance
+                                     REL_TOL 1e-5
+                                     MPI_PROCS 4
+                                     TEST_ARGS --solver-max-time-step-in-days=10 --allow-distributed-wells=true)
+
+# A test for distributed multisegment wells with only shut perforations on rank 1, where the well is distributed across ranks 0 and 1. We load distribute only along the z-axis
+add_test_compare_parallel_simulation(CASENAME msw-simple-7-shut-perforations
+                                     FILENAME MSW-SIMPLE-7-SHUT-PERFORATIONS # this file contains one Multisegment well without branches that is distributed across several processes
+                                     DIR msw
+                                     SIMULATOR flow_distribute_z
+                                     ABS_TOL 1e4 # the absolute tolerance is pretty high here, yet in this case, we are only interested in the relative tolerance
+                                     REL_TOL 1e-5
+                                     MPI_PROCS 4
+                                     TEST_ARGS --solver-max-time-step-in-days=15 --allow-distributed-wells=true)
+
 add_test_compare_parallel_simulation(CASENAME msw-3d
                                      FILENAME MSW-3D # this file contains one Multisegment well with branches that is distributed across several processes
                                      DIR msw
@@ -64,6 +105,15 @@ add_test_compare_parallel_simulation(CASENAME msw-3d-two-producers
                                      MPI_PROCS 4
                                      TEST_ARGS --allow-distributed-wells=true)
 
+add_test_compare_parallel_simulation(CASENAME msw-model-1-short
+                                     FILENAME MSW_MODEL_1_SHORT
+                                     DIR model1
+                                     SIMULATOR flow_distribute_z
+                                     ABS_TOL 1e4 # the absolute tolerance is pretty high here, yet in this case, we are only interested in the relative tolerance
+                                     REL_TOL 1e-4
+                                     MPI_PROCS 4
+                                     TEST_ARGS --allow-distributed-wells=true)
+
 add_test_compare_parallel_simulation(CASENAME spe9group
                                      FILENAME SPE9_CP_GROUP
                                      SIMULATOR flow
@@ -76,7 +126,7 @@ add_test_compare_parallel_simulation(CASENAME spe3
                                      SIMULATOR flow
                                      ABS_TOL ${abs_tol_parallel}
                                      REL_TOL ${coarse_rel_tol_parallel}
-                                     TEST_ARGS --linear-solver-reduction=1e-7 --tolerance-cnv=5e-6 --tolerance-mb=1e-8 --tolerance-wells=1e-7)
+                                     TEST_ARGS --linear-solver-reduction=1e-7 --tolerance-cnv=5e-6 --tolerance-mb=1e-8 --tolerance-wells=1e-7 --partition-method=1)
 
 add_test_compare_parallel_simulation(CASENAME spe3_partition_method_3
                                      FILENAME SPE3CASE1

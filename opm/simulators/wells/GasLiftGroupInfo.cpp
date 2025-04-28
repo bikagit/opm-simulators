@@ -418,10 +418,10 @@ checkNewtonIterationIdxOk_(const std::string& well_name)
                 "LIFTOPT item4 == YES, it = {}, nupcol = {} -->  GLIFT optimize = {}",
                 this->iteration_idx_,
                 nupcol,
-                ((this->iteration_idx_ <= nupcol) ? "TRUE" : "FALSE"));
+                ((this->iteration_idx_ < nupcol) ? "TRUE" : "FALSE"));
             displayDebugMessage_(msg, well_name);
         }
-        return this->iteration_idx_ <= nupcol;
+        return this->iteration_idx_ < nupcol;
     }
     else {
         if (this->debug) {
@@ -687,9 +687,9 @@ initializeWell2GroupMapRecursive_(const Group& group,
 {
     Scalar gfac = group.getGroupEfficiencyFactor();
     cur_efficiency = gfac * cur_efficiency;
-    for (auto &item : group_efficiency) {
-        item *= gfac;
-    }
+    std::transform(group_efficiency.begin(), group_efficiency.end(),
+                   group_efficiency.begin(),
+                   [gfac](const auto& item) { return item * gfac; });
     if (this->group_rate_map_.count(group.name()) == 1) {
         // extract the subset of groups that has limits or targets that can affect
         //   gas lift optimization.

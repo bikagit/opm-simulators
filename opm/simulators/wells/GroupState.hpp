@@ -52,7 +52,10 @@ public:
     bool has_production_rates(const std::string& gname) const;
     void update_production_rates(const std::string& gname,
                                  const std::vector<Scalar>& rates);
+    void update_network_leaf_node_production_rates(const std::string& gname,
+                                 const std::vector<Scalar>& rates);
     const std::vector<Scalar>& production_rates(const std::string& gname) const;
+    const std::vector<Scalar>& network_leaf_node_production_rates(const std::string& gname) const;
 
     void update_well_group_thp(const std::string& gname, const double& thp);
     Scalar well_group_thp(const std::string& gname) const;
@@ -130,6 +133,7 @@ public:
 
         auto forAllGroupData = [&](auto& func) {
             iterateContainer(m_production_rates, func);
+            iterateContainer(m_network_leaf_node_production_rates, func);
             iterateContainer(prod_red_rates, func);
             iterateContainer(inj_red_rates, func);
             iterateContainer(inj_resv_rates, func);
@@ -151,13 +155,13 @@ public:
 
         // That the collect function mutates the vector v is an artifact for
         // testing.
-        auto collect = [&data, &pos](auto& v) {
+        auto doCollect = [&data, &pos](auto& v) {
             for (auto& x : v) {
                 data[pos++] = x;
                 x = -1;
             }
         };
-        forAllGroupData(collect);
+        forAllGroupData(doCollect);
         for (const auto& x : this->inj_vrep_rate) {
             data[pos++] = x.second;
         }
@@ -169,12 +173,11 @@ public:
 
         // Distribute the summed vector to the data items.
         pos = 0;
-        auto distribute = [&data, &pos](auto& v) {
-            for (auto& x : v) {
-                x = data[pos++];
-            }
+        auto doDistribute = [&data, &pos](auto& v) {
+            std::copy_n(data.begin() + pos, v.size(), v.begin());
+            pos += v.size();
         };
-        forAllGroupData(distribute);
+        forAllGroupData(doDistribute);
         for (auto& x : this->inj_vrep_rate) {
             x.second = data[pos++];
         }
@@ -187,6 +190,7 @@ public:
     {
         serializer(num_phases);
         serializer(m_production_rates);
+        serializer(m_network_leaf_node_production_rates);
         serializer(production_controls);
         serializer(group_thp);
         serializer(prod_red_rates);
@@ -205,6 +209,7 @@ public:
 private:
     std::size_t num_phases{};
     std::map<std::string, std::vector<Scalar>> m_production_rates;
+    std::map<std::string, std::vector<Scalar>> m_network_leaf_node_production_rates;
     std::map<std::string, Group::ProductionCMode> production_controls;
     std::map<std::string, std::vector<Scalar>> prod_red_rates;
     std::map<std::string, std::vector<Scalar>> inj_red_rates;
