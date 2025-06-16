@@ -238,7 +238,7 @@ public:
             relpermDiagnostics.diagnosis(simulator.vanguard().eclState(),
                                          simulator.vanguard().levelCartesianIndexMapper());
         }
-        auto pathml = std::filesystem::current_path() / "mlhyst/oldmodelkrnw.model" ;
+        auto pathml = std::filesystem::current_path() / "mlhyst/models/oldmodelkrnw.model" ;
         OPM_ERROR_IF(!modelml_.loadModel(pathml), "Failed to load model");
     }
 
