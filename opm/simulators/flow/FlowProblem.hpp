@@ -794,33 +794,79 @@ public:
             const auto& materialParams = materialLawParams(globalSpaceIdx);
             MaterialLaw::relativePermeabilities(mobility, materialParams, fluidState);
             Valgrind::CheckDefined(mobility);
-
            
             if (activatemodelml_) {
 
                 Opm::ML::Tensor<Evaluation> inkrn{2};
 
-                auto maxsatgas = std::max(fluidState.saturation(gasPhaseIdx).value(), maxGasSaturation(globalSpaceIdx));
+                if (FluidSystem::phaseIsActive(oilPhaseIdx)) {
+                    auto maxsatoil = std::max(fluidState.saturation(oilPhaseIdx).value(), maxOilSaturation(globalSpaceIdx));
                 
-                inkrn.data_ = {fluidState.saturation(gasPhaseIdx).value(), maxsatgas};
+                    inkrn.data_ = {fluidState.saturation(oilPhaseIdx).value(), maxsatoil};
+    
+                    Opm::ML::Tensor<Evaluation> outkrn{1};
+                    outkrn.data_ = {0.00e-03};
+                    OPM_ERROR_IF(!modelml_.apply(inkrn, outkrn), "Failed to apply");
+                    auto ml_krn = fabs(outkrn(0).value());
+                    auto errorkrn = fabs(ml_krn - mobility[2].value());    
+                //                     if (ml_krn < 1e-3){
+                    // if (errorkrn < 1e-3){
+                        // ml_krn = 0.0;
+                    // }
+                // }
+                // std::cout<<"pred "<< ml_krn<<" groundtruth "<<mobility[2].value()<<" errorkrn "<<errorkrn<<std::endl;
+                // std::cout<<"pred "<< ml_krn<<" <mobility[0].value() "<<mobility[0].value()<<" satu0   water"<<fluidState.saturation(waterPhaseIdx).value()<<std::endl;
+                // std::cout<<"pred "<< ml_krn<<" <mobility[1].value() "<<mobility[1].value()<<" satu1 oil  "<<fluidState.saturation(oilPhaseIdx).value()<<std::endl;
 
-                Opm::ML::Tensor<Evaluation> outkrn{1};
-                outkrn.data_ = {0.00e-03};
-                OPM_ERROR_IF(!modelml_.apply(inkrn, outkrn), "Failed to apply");
-                auto ml_krn = fabs(outkrn(0).value());
-                auto errorkrn = fabs(ml_krn - mobility[2].value());
+            // if (errorkrn < 1e-4){
+
+                mobility[1] = ml_krn;          
+                  }
+                else if (FluidSystem::phaseIsActive(gasPhaseIdx)) {
+                    auto maxsatgas = std::max(fluidState.saturation(gasPhaseIdx).value(), maxGasSaturation(globalSpaceIdx));
+                
+                    inkrn.data_ = {fluidState.saturation(gasPhaseIdx).value(), maxsatgas};
+    
+                    Opm::ML::Tensor<Evaluation> outkrn{1};
+                    outkrn.data_ = {0.00e-03};
+                    OPM_ERROR_IF(!modelml_.apply(inkrn, outkrn), "Failed to apply");
+                    auto ml_krn = fabs(outkrn(0).value());
+                    auto errorkrn = fabs(ml_krn - mobility[2].value());
+                    if (ml_krn < 1e-3){
+                        // if (errorkrn < 1e-3){
+                            ml_krn = 0.0;
+                        // }
+                    }
+
+                    // std::cout<<"GAS Phase Active  test prompt "<<errorkrn<<std::endl;
+
+                    
+                // if (errorkrn < 1e-4){
+    
+                    mobility[2] = ml_krn;        
+                }
+                else
+                {
+                    // if no oil or gas phase is active, we set the mobility to zero
+                    std::cout<<"ELSE "<<std::endl;
+                }
+            
+
+
+
+                // auto maxsatgas = std::max(fluidState.saturation(gasPhaseIdx).value(), maxGasSaturation(globalSpaceIdx));
+                
+                // inkrn.data_ = {fluidState.saturation(gasPhaseIdx).value(), maxsatgas};
+
+                // Opm::ML::Tensor<Evaluation> outkrn{1};
+                // outkrn.data_ = {0.00e-03};
+                // OPM_ERROR_IF(!modelml_.apply(inkrn, outkrn), "Failed to apply");
+                // auto ml_krn = fabs(outkrn(0).value());
+                // auto errorkrn = fabs(ml_krn - mobility[2].value());
 
                 // std::cout<<"pred "<< ml_krn<<" groundtruth "<<mobility[2].value()<<" errorkrn "<<errorkrn<<std::endl;
 
-                if (ml_krn < 1e-3){
-                    // if (errorkrn < 1e-3){
-                        ml_krn = 0.0;
-                    // }
-                }
-                
-            // if (errorkrn < 1e-4){
 
-                mobility[2] = ml_krn;
             // }
             }
 

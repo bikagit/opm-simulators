@@ -1563,7 +1563,7 @@ protected:
         const bool invalidateFromHyst = this->updateHysteresis_();
         const bool invalidateFromMaxOilSat = this->updateMaxOilSaturation_();
 
-        const bool invalidateFromMaxGasSat = this->updateMaxGasSaturation_();
+        // const bool invalidateFromMaxGasSat = this->updateMaxGasSaturation_();
 
         // deal with DRSDT and DRVDT
         const bool invalidateDRDT = !first_step_after_restart && this->updateCompositionChangeLimits_();
