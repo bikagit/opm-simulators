@@ -818,6 +818,7 @@ public:
                 // std::cout<<"pred "<< ml_krn<<" <mobility[0].value() "<<mobility[0].value()<<" satu0   water"<<fluidState.saturation(waterPhaseIdx).value()<<std::endl;
                 // std::cout<<"pred "<< ml_krn<<" <mobility[1].value() "<<mobility[1].value()<<" satu1 oil  "<<fluidState.saturation(oilPhaseIdx).value()<<std::endl;
 
+                
             // if (errorkrn < 1e-4){
 
                 mobility[1] = ml_krn;          
