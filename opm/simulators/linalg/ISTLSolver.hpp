@@ -60,6 +60,12 @@
 #include <tuple>
 #include <vector>
 
+#include <opm/ml/ml_model.hpp>
+
+using namespace Opm;
+typedef Opm::DenseAd::Evaluation<double, 1> Evaluation;
+
+
 namespace Opm::Properties {
 
 namespace TTag {
@@ -89,6 +95,39 @@ public:
 
 namespace Opm
 {
+
+     class EisenstatWalkerStrategy
+    {
+    protected:
+      const double etaMax_ = 0.99;
+      const double gamma_ = 0.05;
+      mutable double previousEta_ = -1.0;
+      mutable double previousResidual_ = -1.0;
+      mutable double newtonTolerance_;
+
+    public:
+      /** constructor
+       *  \param[in]  newtonTolerance      the absolute tolerance of the Newton method
+      */
+      EisenstatWalkerStrategy(const double newtonTolerance) : newtonTolerance_(newtonTolerance) {}
+      double nextLinearTolerance(const double currentResidual, const double gammaval = 0.5) const
+      {
+        double eta = etaMax_;
+        // First call previousEta_ is negative
+        if (previousEta_ >= 0.0)
+        {
+          const double etaA = gammaval * currentResidual * currentResidual / (previousResidual_ * previousResidual_);
+          const double indicator = gammaval * previousEta_ * previousEta_;
+          const double etaC = indicator < 0.1 ? std::min(etaA, etaMax_) : std::min(etaMax_, std::max(etaA, indicator));
+          eta = std::min(etaMax_, std::max(etaC, 0.5 * newtonTolerance_ / currentResidual));
+        }
+        previousResidual_ = currentResidual;
+        previousEta_ = eta;
+        return eta;
+      }
+      void setTolerance(const double newtonTolerance) { newtonTolerance_ = newtonTolerance; }
+    };
+
 
 
 namespace detail
@@ -146,6 +185,8 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
     class ISTLSolver : public AbstractISTLSolver<TypeTag>
     {
     protected:
+                using FluidSystem = GetPropType<TypeTag, Properties::FluidSystem>;
+
         using GridView = GetPropType<TypeTag, Properties::GridView>;
         using Scalar = GetPropType<TypeTag, Properties::Scalar>;
         using SparseMatrixAdapter = GetPropType<TypeTag, Properties::SparseMatrixAdapter>;
@@ -162,6 +203,8 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
         using WellModelOperator = WellModelAsLinearOperator<WellModel, Vector, Vector>;
         using ElementMapper = GetPropType<TypeTag, Properties::ElementMapper>;
         constexpr static std::size_t pressureIndex = GetPropType<TypeTag, Properties::Indices>::pressureSwitchIdx;
+        
+        static constexpr int numEq = Indices::numEq;
 
         enum { enablePolymerMolarWeight = getPropValue<TypeTag, Properties::EnablePolymerMW>() };
         constexpr static bool isIncompatibleWithCprw = enablePolymerMolarWeight;
@@ -194,6 +237,12 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
               iterations_( 0 ),
               matrix_(nullptr),
               parameters_{parameters},
+                            // new
+              currentresidual_(0.),
+              cnv_resid_oil_(0.),
+              cnv_resid_water_(0.),
+              cnv_resid_gas_(0.),
+              eisenstatWalker_( parameters_[0].linear_solver_reduction_  ),
               forceSerial_(forceSerial)
         {
             initialize();
@@ -205,12 +254,19 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
             : simulator_(simulator),
               iterations_( 0 ),
               solveCount_(0),
+                            // new
+                stepCount_(0),
+                iterCount_(0),
+              currentresidual_(0.),
+              eisenstatWalker_ ( 1e-5 ),
               matrix_(nullptr)
         {
             parameters_.resize(1);
             parameters_[0].init(simulator_.vanguard().eclState().getSimulationConfig().useCPR());
             initialize();
         }
+
+        EisenstatWalkerStrategy& eisenstatWalker () { return eisenstatWalker_; }
 
         void initialize()
         {
@@ -398,6 +454,10 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
             solveCount_ = 0;
         }
 
+        void resetIterCount() {
+            iterCount_ = 0;
+        }
+
         bool solve(Vector& x) override
         {
             OPM_TIMEBLOCK(istlSolverSolve);
@@ -411,14 +471,176 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
                                     *rhs_,
                                     comm_.get());
             }
+            std::vector<Scalar> B_avg(numEq, 0.0);
+            std::vector<Scalar> maxCoeff(numEq, std::numeric_limits<Scalar>::lowest());
 
+            auto tempresid = simulator_.model().linearizer().residual();
+            auto global_nc_ = detail::countGlobalCells(simulator_.vanguard().grid());
+
+
+            ElementContext elemCtx(simulator_);
+            const auto& gridView = simulator_.gridView();
+            for (const auto& elem : elements(gridView, Dune::Partitions::interior)) {
+                elemCtx.updatePrimaryStencil(elem);
+                            elemCtx.updatePrimaryIntensiveQuantities(/*timeIdx=*/0);
+                const unsigned cell_idx = elemCtx.globalSpaceIndex(/*spaceIdx=*/0, /*timeIdx=*/0);
+                const auto& intQuants = elemCtx.intensiveQuantities(/*spaceIdx=*/0, /*timeIdx=*/0);
+                const auto& fs = intQuants.fluidState();
+
+
+                const auto pvValue = simulator_.problem().referencePorosity(cell_idx, /*timeIdx=*/0) *
+                                     simulator_.model().dofTotalVolume(cell_idx);
+
+            for (unsigned phaseIdx = 0; phaseIdx < FluidSystem::numPhases; ++phaseIdx)
+            {
+                if (!FluidSystem::phaseIsActive(phaseIdx)) {
+                    continue;
+                }
+                const unsigned compIdx = Indices::canonicalToActiveComponentIndex(FluidSystem::solventComponentIndex(phaseIdx));
+
+                B_avg[compIdx] += 1.0 / fs.invB(phaseIdx).value();
+                const auto R2 = tempresid[cell_idx][compIdx];
+                const Scalar Rval = std::abs(R2) / pvValue;
+                     
+                if (Rval > maxCoeff[compIdx]) {
+                    maxCoeff[compIdx] = Rval;
+
+                }
+                  }
+
+            }
+           
+
+            for (unsigned phaseIdx = 0; phaseIdx < FluidSystem::numPhases; ++phaseIdx)
+            {
+                const unsigned compIdx = Indices::canonicalToActiveComponentIndex(FluidSystem::solventComponentIndex(phaseIdx));
+                
+                // oil
+                cnv_resid_oil_ = B_avg[0]/Scalar( global_nc_) * simulator_.timeStepSize() *  maxCoeff[0];
+                // std::cout<<"resid_oil: "<<resid_oil<<std::endl;
+                
+                //  water
+                cnv_resid_water_ = B_avg[1]/Scalar( global_nc_) * simulator_.timeStepSize() *  maxCoeff[1];
+                // std::cout<<"resid_water: "<<resid_water<<std::endl;
+
+                // Gas
+                cnv_resid_gas_ = B_avg[2]/Scalar( global_nc_) * simulator_.timeStepSize() *  maxCoeff[2];
+                // std::cout<<"resid_gas: "<<resid_gas<<std::endl;
+
+                currentresidual_ = max(cnv_resid_oil_,max(cnv_resid_water_,cnv_resid_gas_));
+            }
+
+
+            auto newTol = 5e-3;
+            
+            if (parameters_[0].use_besthpath_){ 
+                if (iterCount_ == 0 && simulator_.episodeIndex() == 0){
+                    auto output = this->simulator_.vanguard().eclState().getIOConfig().fullBasePath();
+                    auto path = output.substr(0, output.size()-22);
+                    if (parameters_[0].use_eisenstat_)
+                         path +=  "bestpatheisen.csv";
+                    else
+                         path += "bestpath.csv";
+
+                    std::string data(path);
+                    std::ifstream in(data.c_str());
+                    std::string line;
+                    while (getline(in, line))
+                    {
+                        std::stringstream ss(line);
+                        std::string substr;
+                        while (std::getline(ss, substr, '[') && !ss.eof());
+                        std::stringstream int_ss(substr);
+                        std::vector<Scalar> nums;
+                        Scalar num;
+                        while (int_ss >> num) {
+                            nums.push_back(num);
+                            if (int_ss.peek() == ',') {
+                                int_ss.ignore();
+                            }
+                        }
+                        bestpaths_.push_back(nums);
+                    }
+                }
+                Scalar reduction = bestpaths_[stepCount_][1];
+                if (stepCount_ < simulator_.episodeIndex()){
+                    ++stepCount_;
+                    resetIterCount();
+                }
+                if (iterCount_ < bestpaths_[stepCount_].size() - 2)
+                    reduction = bestpaths_[stepCount_][iterCount_ + 2];
+                else
+                    reduction = bestpaths_[stepCount_][1];
+
+                newTol = reduction;
+            }
+
+            if (parameters_[0].use_ml_methods_&& parameters_[0].use_resid_){ 
+                 ML::Tensor<Evaluation> in{7};
+                auto tstepDays = simulator_.episodeLength()/86400;
+                in.data_ = {tstepDays,5.00e-03,currentresidual_,cnv_resid_oil_,cnv_resid_water_,cnv_resid_gas_,iterCount_};
+
+                ML::Tensor<Evaluation> out{1};
+                out.data_ = {5.00e-03};
+
+                ML::NNModel<Evaluation> model;
+                auto output_mlfile = this->simulator_.vanguard().eclState().getIOConfig().fullBasePath();
+                auto pathml = output_mlfile.substr(0, output_mlfile.size()-22);
+                pathml +=  "../mlfolder/linredNN.model";
+
+                OPM_ERROR_IF(!model.loadModel(pathml), "Failed to load model");
+                ML::Tensor<Evaluation> predict = out;
+                OPM_ERROR_IF(!model.apply(in, out), "Failed to apply");
+                auto ml_linredval = fabs(out(0).value());
+
+                newTol = ml_linredval;
+            }
+
+            if (parameters_[0].use_ml_methods_ && parameters_[0].use_eisenstat_){ 
+                ML::Tensor<Evaluation> in{7};
+                auto tstepDays = simulator_.episodeLength()/86400;
+                
+                in.data_ = {tstepDays,0.013018454378766364,currentresidual_,cnv_resid_oil_,cnv_resid_water_,cnv_resid_gas_,iterCount_};
+
+                ML::Tensor<Evaluation> out{1};
+                out.data_ = {5.00e-03};
+
+                ML::NNModel<Evaluation> model;
+                auto output_mleisenfile = this->simulator_.vanguard().eclState().getIOConfig().fullBasePath();
+                auto pathmleisen = output_mleisenfile.substr(0, output_mleisenfile.size()-22);
+                pathmleisen +=  "../mlfolder/eisenNN.model";
+                OPM_ERROR_IF(!model.loadModel(pathmleisen), "Failed to load model");
+                ML::Tensor<Evaluation> predict = out;
+                OPM_ERROR_IF(!model.apply(in, out), "Failed to apply");
+                auto ml_linredval = fabs(out(0).value());
+
+                // newTol = ml_linredval;
+                newTol = eisenstatWalker_.nextLinearTolerance( currentresidual_, ml_linredval);
+            }
+            
+            if (!parameters_[0].use_ml_methods_ && parameters_[0].use_eisenstat_){ 
+                newTol = eisenstatWalker_.nextLinearTolerance( currentresidual_, parameters_[0].tol_eisenstat_);
+            }
+
+            if (!parameters_[0].use_ml_methods_ && parameters_[0].use_resid_){ 
+                newTol = parameters_[0].linear_solver_reduction_ ;
+            }
+            
             // Solve system.
             Dune::InverseOperatorResult result;
             {
+
                 OPM_TIMEBLOCK(flexibleSolverApply);
                 assert(flexibleSolver_[activeSolverNum_].solver_);
-                flexibleSolver_[activeSolverNum_].solver_->apply(x, *rhs_, result);
+                // flexibleSolver_[activeSolverNum_].solver_->apply(x, *rhs_, result);
+                if (parameters_[0].use_ml_methods_ || parameters_[0].use_eisenstat_ || parameters_[0].use_besthpath_ || parameters_[0].use_resid_){ 
+                     flexibleSolver_[activeSolverNum_].solver_->apply(x, *rhs_, newTol, result);
+                }
+                else
+                    flexibleSolver_[activeSolverNum_].solver_->apply(x, *rhs_, result);
+
             }
+            ++iterCount_;
 
             iterations_ = result.iterations;
 
@@ -633,6 +855,16 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
         mutable int iterations_;
         mutable int solveCount_;
         std::any parallelInformation_;
+        mutable int stepCount_;
+        mutable int iterCount_;
+
+        mutable double currentresidual_;
+        mutable double cnv_resid_oil_;
+        mutable double cnv_resid_water_;
+        mutable double cnv_resid_gas_;
+
+        EisenstatWalkerStrategy eisenstatWalker_;
+
 
         // non-const to be able to scale the linear system
         Matrix* matrix_;
@@ -650,6 +882,8 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
         std::vector<FlowLinearSolverParameters> parameters_;
         bool forceSerial_ = false;
         std::vector<PropertyTree> prm_;
+
+        std::vector<std::vector<Scalar>> bestpaths_;
 
         std::shared_ptr< CommunicationType > comm_;
     }; // end ISTLSolver
