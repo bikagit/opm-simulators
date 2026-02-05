@@ -47,8 +47,9 @@
 #include <opm/input/eclipse/Schedule/Action/State.hpp>
 #include <opm/input/eclipse/Schedule/GasLiftOpt.hpp>
 #include <opm/input/eclipse/Schedule/Group/GConSale.hpp>
-#include <opm/input/eclipse/Schedule/Group/GroupEconProductionLimits.hpp>
 #include <opm/input/eclipse/Schedule/Group/GConSump.hpp>
+#include <opm/input/eclipse/Schedule/Group/GroupEconProductionLimits.hpp>
+#include <opm/input/eclipse/Schedule/Group/GroupSatelliteInjection.hpp>
 #include <opm/input/eclipse/Schedule/Group/GSatProd.hpp>
 #include <opm/input/eclipse/Schedule/Group/GuideRateConfig.hpp>
 #include <opm/input/eclipse/Schedule/Network/Balance.hpp>
@@ -134,6 +135,7 @@ FlowGenericVanguard::FlowGenericVanguard(SimulationModelParams&& params)
 #endif // HAVE_OPENCL || HAVE_ROCSPARSE || HAVE_CUDA
 
     ownersFirst_ = Parameters::Get<Parameters::OwnerCellsFirst>();
+    edgeConformal_ = Parameters::Get<Parameters::EdgeConformal>();
 
 #if HAVE_MPI
     numOverlap_ = Parameters::Get<Parameters::NumOverlap>();
@@ -340,7 +342,7 @@ void FlowGenericVanguard::init()
     if(!comm_){
         FlowGenericVanguard::setCommunication(std::make_unique<Parallel::Communication>());
     }
-    
+
     // set eclState if not already set as in opm flow
     // it means that setParams is called
     if(!eclState_){
@@ -348,7 +350,7 @@ void FlowGenericVanguard::init()
         this->defineSimulationModel(std::move(this->modelParams_));
     }
 
-    
+
     if (!this->summaryState_) {
         this->summaryState_ = std::make_unique<SummaryState>
             (TimeService::from_time_t(this->eclSchedule_->getStartTime()),
@@ -487,6 +489,9 @@ void FlowGenericVanguard::registerParameters_()
 
     Parameters::Register<Parameters::OwnerCellsFirst>
         ("Order cells owned by rank before ghost/overlap cells.");
+    Parameters::Register<Parameters::EdgeConformal>
+        ("Edge conformal cornerpoint processing.");
+
 #if HAVE_MPI
     Parameters::Register<Parameters::AddCorners>
         ("Add corners to partition.");

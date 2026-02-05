@@ -18,17 +18,19 @@
 */
 #ifndef OPM_GPUSPARSEMATRIX_HPP
 #define OPM_GPUSPARSEMATRIX_HPP
-#include <cusparse.h>
-#include <iostream>
-#include <memory>
-#include <stdexcept>
-#include <type_traits>
+
 #include <opm/common/ErrorMacros.hpp>
-#include <opm/simulators/linalg/gpuistl/GpuVector.hpp>
 #include <opm/simulators/linalg/gpuistl/detail/CuMatrixDescription.hpp>
 #include <opm/simulators/linalg/gpuistl/detail/CuSparseHandle.hpp>
 #include <opm/simulators/linalg/gpuistl/detail/safe_conversion.hpp>
-#include <vector>
+#include <opm/simulators/linalg/gpuistl/GpuVector.hpp>
+#include <opm/simulators/linalg/gpuistl/GpuSparseMatrixGeneric.hpp>
+
+#include <cstddef>
+#include <cusparse.h>
+#include <memory>
+#include <stdexcept>
+#include <type_traits>
 
 namespace Opm::gpuistl
 {
@@ -44,6 +46,14 @@ namespace Opm::gpuistl
  * @note we only support square matrices.
  *
  * @note We only support Block Compressed Sparse Row Format (BSR) for now.
+
+ * @note This class uses the legacy cuSPARSE API, to be compatible with CuSparse's ilu0 preconditioner. However,
+ *       this preconditioner is deprecated and will be removed in future versions of CuSparse. So we should migrate
+ *       to the new cuSPARSE generic API in the future.
+ *
+ * @note To also support block size 1, we use the GpuSparseMatrixGeneric class which uses the new cuSPARSE generic API.
+ *       This is a temporary solution, and we should migrate to the new API for all block sizes in the future by
+ *       replacing this class with GpuSparseMatrixGeneric.
  */
 template <typename T>
 class GpuSparseMatrix
@@ -51,17 +61,17 @@ class GpuSparseMatrix
 {
 public:
     using field_type = T;
-    
+
     /**
     * @brief Maximum block size supported by this implementation.
-    * 
+    *
     * This constant defines an upper bound on the block size to ensure reasonable compilation times.
-    * While this class itself could support larger values, functions that call dispatchOnBlocksize() 
+    * While this class itself could support larger values, functions that call dispatchOnBlocksize()
     * might have limitations. This value can be increased if needed, but will increase compilation time
     * due to template instantiations.
     */
     static constexpr int max_block_size = 6;
-    
+
     //! Create the sparse matrix specified by the raw data.
     //!
     //! \note Prefer to use the constructor taking a const reference to a matrix instead.
@@ -69,7 +79,7 @@ public:
     //! \param[in] nonZeroElements the non-zero values of the matrix
     //! \param[in] rowIndices      the row indices of the non-zero elements
     //! \param[in] columnIndices   the column indices of the non-zero elements
-    //! \param[in] numberOfNonzeroElements number of nonzero elements
+    //! \param[in] numberOfNonzeroBlocks number of nonzero elements
     //! \param[in] blockSize size of each block matrix (typically 3)
     //! \param[in] numberOfRows the number of rows
     //!
@@ -78,9 +88,9 @@ public:
     GpuSparseMatrix(const T* nonZeroElements,
                    const int* rowIndices,
                    const int* columnIndices,
-                   size_t numberOfNonzeroBlocks,
-                   size_t blockSize,
-                   size_t numberOfRows);
+                   std::size_t numberOfNonzeroBlocks,
+                   std::size_t blockSize,
+                   std::size_t numberOfRows);
 
     //! Create a sparse matrix by copying the sparsity structure of another matrix, not filling in the values
     //!
@@ -94,11 +104,11 @@ public:
     //!       restrictions in the current version of cusparse. This might change in future versions.
     GpuSparseMatrix(const GpuVector<int>& rowIndices,
                    const GpuVector<int>& columnIndices,
-                   size_t blockSize);
+                   std::size_t blockSize);
 
     GpuSparseMatrix(const GpuSparseMatrix&);
 
-    // We want to have this as non-mutable as possible, that is we do not want 
+    // We want to have this as non-mutable as possible, that is we do not want
     // to deal with changing matrix sizes and sparsity patterns.
     GpuSparseMatrix& operator=(const GpuSparseMatrix&) = delete;
 
@@ -140,7 +150,7 @@ public:
     /**
      * @brief N returns the number of rows (which is equal to the number of columns)
      */
-    size_t N() const
+    std::size_t N() const
     {
         // Technically this safe conversion is not needed since we enforce these to be
         // non-negative in the constructor, but keeping them for added sanity for now.
@@ -154,7 +164,7 @@ public:
      * @brief nonzeroes behaves as the Dune::BCRSMatrix::nonzeros() function and returns the number of non zero blocks
      * @return number of non zero blocks.
      */
-    size_t nonzeroes() const
+    std::size_t nonzeroes() const
     {
         // Technically this safe conversion is not needed since we enforce these to be
         // non-negative in the constructor, but keeping them for added sanity for now.
@@ -171,6 +181,9 @@ public:
      */
     GpuVector<T>& getNonZeroValues()
     {
+        if (m_genericMatrixForBlockSize1) {
+            return m_genericMatrixForBlockSize1->getNonZeroValues();
+        }
         return m_nonZeroElements;
     }
 
@@ -181,6 +194,9 @@ public:
      */
     const GpuVector<T>& getNonZeroValues() const
     {
+        if (m_genericMatrixForBlockSize1) {
+            return m_genericMatrixForBlockSize1->getNonZeroValues();
+        }
         return m_nonZeroElements;
     }
 
@@ -191,6 +207,9 @@ public:
      */
     GpuVector<int>& getRowIndices()
     {
+        if (m_genericMatrixForBlockSize1) {
+            return m_genericMatrixForBlockSize1->getRowIndices();
+        }
         return m_rowIndices;
     }
 
@@ -201,6 +220,9 @@ public:
      */
     const GpuVector<int>& getRowIndices() const
     {
+        if (m_genericMatrixForBlockSize1) {
+            return m_genericMatrixForBlockSize1->getRowIndices();
+        }
         return m_rowIndices;
     }
 
@@ -211,6 +233,9 @@ public:
      */
     GpuVector<int>& getColumnIndices()
     {
+        if (m_genericMatrixForBlockSize1) {
+            return m_genericMatrixForBlockSize1->getColumnIndices();
+        }
         return m_columnIndices;
     }
 
@@ -221,6 +246,9 @@ public:
      */
     const GpuVector<int>& getColumnIndices() const
     {
+        if (m_genericMatrixForBlockSize1) {
+            return m_genericMatrixForBlockSize1->getColumnIndices();
+        }
         return m_columnIndices;
     }
 
@@ -230,7 +258,7 @@ public:
      * This is equivalent to matrix.N() * matrix.blockSize()
      * @return matrix.N() * matrix.blockSize()
      */
-    size_t dim() const
+    std::size_t dim() const
     {
         // Technically this safe conversion is not needed since we enforce these to be
         // non-negative in the constructor, but keeping them for added sanity for now.
@@ -243,7 +271,7 @@ public:
     /**
      * @brief blockSize size of the blocks
      */
-    size_t blockSize() const
+    std::size_t blockSize() const
     {
         // Technically this safe conversion is not needed since we enforce these to be
         // non-negative in the constructor, but keeping them for added sanity for now.
@@ -267,8 +295,6 @@ public:
      * @brief mv performs matrix vector multiply y = Ax
      * @param[in] x the vector to multiply the matrix with
      * @param[out] y the output vector
-     *
-     * @note Due to limitations of CuSparse, this is only supported for block sizes greater than 1.
      */
     virtual void mv(const GpuVector<T>& x, GpuVector<T>& y) const;
 
@@ -276,18 +302,15 @@ public:
      * @brief umv computes y=Ax+y
      * @param[in] x the vector to multiply with A
      * @param[inout] y the vector to add and store the output in
-     *
-     * @note Due to limitations of CuSparse, this is only supported for block sizes greater than 1.
      */
     virtual void umv(const GpuVector<T>& x, GpuVector<T>& y) const;
 
 
     /**
      * @brief umv computes y=alpha * Ax + y
+     * @param[in] alpha The scaling factor for the matrix-vector product
      * @param[in] x the vector to multiply with A
      * @param[inout] y the vector to add and store the output in
-     *
-     * @note Due to limitations of CuSparse, this is only supported for block sizes greater than 1.
      */
     virtual void usmv(T alpha, const GpuVector<T>& x, GpuVector<T>& y) const;
 
@@ -311,15 +334,21 @@ public:
      */
      void updateNonzeroValues(const GpuSparseMatrix<T>& matrix);
 
-     
+    /**
+     * @brief updateNonzeroValues updates the non-zero values by using the non-zero values of the supplied matrix
+     * @param matrix the GpuSparseMatrixGeneric to extract the non-zero values from
+     * @note This assumes the given matrix has the same sparsity pattern.
+     */
+     void updateNonzeroValues(const GpuSparseMatrixGeneric<T>& matrix);
+
     /**
      * @brief Dispatches a function based on the block size of the matrix.
-     * 
+     *
      * This method allows executing different code paths depending on the block size
      * of the matrix, up to the maximum block size specified by max_block_size.
      *
      * Use this function if you need the block size to be known at compile time.
-     * 
+     *
      * @tparam FunctionType Type of the function to be dispatched
      * @param function The function to be executed based on the block size
      * @return The result of the function execution
@@ -354,6 +383,9 @@ private:
     detail::GpuSparseMatrixDescriptionPtr m_matrixDescription;
     detail::CuSparseHandle& m_cusparseHandle;
 
+    // For blockSize == 1, we use the generic API
+    std::unique_ptr<GpuSparseMatrixGeneric<T>> m_genericMatrixForBlockSize1;
+
     template <class VectorType>
     void assertSameSize(const VectorType& vector) const;
 
@@ -371,5 +403,7 @@ private:
         }
     }
 };
+
 } // namespace Opm::gpuistl
+
 #endif

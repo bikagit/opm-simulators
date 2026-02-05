@@ -131,11 +131,9 @@ BOOST_AUTO_TEST_CASE(TestStandardWellInput) {
     using RateConverterType = Opm::RateConverter::
         SurfaceToReservoirVoidage<FluidSystem, std::vector<int> >;
     // Compute reservoir volumes for RESV controls.
-    Opm::PhaseUsage phaseUsage;
     std::unique_ptr<RateConverterType> rateConverter;
     // Compute reservoir volumes for RESV controls.
-    rateConverter.reset(new RateConverterType (phaseUsage,
-                                     std::vector<int>(10, 0)));
+    rateConverter.reset(new RateConverterType (std::vector<int>(10, 0)));
 
     Opm::PerforationData<double> dummy;
     std::vector<Opm::PerforationData<double>> pdata(well.getConnections().size(), dummy);
@@ -166,11 +164,9 @@ BOOST_AUTO_TEST_CASE(TestBehavoir) {
             // Compute reservoir volumes for RESV controls.
             // TODO: not sure why for this class the initlizer list does not work
             // otherwise we should make a meaningful const PhaseUsage here.
-            Opm::PhaseUsage phaseUsage;
             std::unique_ptr<RateConverterType> rateConverter;
             // Compute reservoir volumes for RESV controls.
-            rateConverter.reset(new RateConverterType (phaseUsage,
-                                             std::vector<int>(10, 0)));
+            rateConverter.reset(new RateConverterType (std::vector<int>(10, 0)));
             Opm::PerforationData<double> dummy;
             std::vector<Opm::PerforationData<double>> pdata(wells_ecl[w].getConnections().size(), dummy);
             for (auto c = 0*pdata.size(); c < pdata.size(); ++c) {
@@ -197,6 +193,6 @@ BOOST_AUTO_TEST_CASE(TestBehavoir) {
         BOOST_CHECK_EQUAL(well->name(), "INJE1");
         BOOST_CHECK(well->isInjector());
         BOOST_CHECK(StandardWell::Indices::numEq == 3);
-        BOOST_CHECK(well->numStaticWellEq== 4);      
+        BOOST_CHECK(well->numStaticWellEq== 4);
     }
 }

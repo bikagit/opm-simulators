@@ -187,8 +187,8 @@ struct EnableMech<TypeTag, TTag::FlowExpCompProblem<NumComp, EnableWater>> {
 };
 
 template<class TypeTag, int NumComp, bool EnableWater>
-struct EnableDisgasInWater<TypeTag, TTag::FlowExpCompProblem<NumComp, EnableWater>> { 
-    static constexpr bool value = false; 
+struct EnableDisgasInWater<TypeTag, TTag::FlowExpCompProblem<NumComp, EnableWater>> {
+    static constexpr bool value = false;
 };
 
 template<class TypeTag, int NumComp, bool EnableWater>
@@ -204,11 +204,6 @@ public:
 
 template<class TypeTag, int NumComp, bool EnableWater>
 struct EnableApiTracking<TypeTag, TTag::FlowExpCompProblem<NumComp, EnableWater>> {
-    static constexpr bool value = false;
-};
-
-template<class TypeTag, int NumComp, bool EnableWater>
-struct EnableTemperature<TypeTag, TTag::FlowExpCompProblem<NumComp, EnableWater>> {
     static constexpr bool value = false;
 };
 
@@ -245,10 +240,6 @@ struct EnableSolvent<TypeTag, TTag::FlowExpCompProblem<NumComp, EnableWater>> {
     static constexpr bool value = false;
 };
 template<class TypeTag, int NumComp, bool EnableWater>
-struct EnableEnergy<TypeTag, TTag::FlowExpCompProblem<NumComp, EnableWater>> {
-    static constexpr bool value = false;
-};
-template<class TypeTag, int NumComp, bool EnableWater>
 struct EnableFoam<TypeTag, TTag::FlowExpCompProblem<NumComp, EnableWater>> {
     static constexpr bool value = false;
 };
@@ -257,7 +248,7 @@ struct EnableExtbo<TypeTag, TTag::FlowExpCompProblem<NumComp, EnableWater>> {
     static constexpr bool value = false;
 };
 template<class TypeTag, int NumComp, bool EnableWater>
-struct EnableMICP<TypeTag, TTag::FlowExpCompProblem<NumComp, EnableWater>> {
+struct EnableBioeffects<TypeTag, TTag::FlowExpCompProblem<NumComp, EnableWater>> {
     static constexpr bool value = false;
 };
 

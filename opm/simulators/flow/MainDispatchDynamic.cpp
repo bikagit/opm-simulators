@@ -24,8 +24,11 @@
 
 #include <opm/simulators/flow/Main.hpp>
 
+#include <flow/flow_biofilm.hpp>
 #include <flow/flow_blackoil.hpp>
 #include <flow/flow_blackoil_legacyassembly.hpp>
+#include <flow/flow_blackoil_nohyst.hpp>
+#include <flow/flow_blackoil_temp.hpp>
 #include <flow/flow_brine.hpp>
 #include <flow/flow_brine_precsalt_vapwat.hpp>
 #include <flow/flow_brine_saltprecipitation.hpp>
@@ -73,6 +76,7 @@ int Opm::Main::dispatchDynamic_()
     // TODO: make sure that no illegal combinations like thermal and
     //       twophase are requested.
     const bool thermal = eclipseState_->getSimulationConfig().isThermal();
+    const bool temp = eclipseState_->getSimulationConfig().isTemp();
 
     // Single-phase case
     if (rspec.micp()) {
@@ -87,6 +91,11 @@ int Opm::Main::dispatchDynamic_()
     // water-only case with energy
     else if (phases.size() == 2 && phases.active(Phase::WATER) && thermal) {
         return this->runWaterOnlyEnergy(phases);
+    }
+
+    // Biofilm case
+    else if (rspec.biof()) {
+        return this->runBiofilm(phases);
     }
 
     // Twophase cases
@@ -122,6 +131,11 @@ int Opm::Main::dispatchDynamic_()
     // Energy case
     else if (thermal) {
         return this->runThermal(phases);
+    }
+
+    // Blackoil case with temperature
+    else if (phases.size() == 4 && temp) {
+        return this->runBlackOilTemp();
     }
 
     // Blackoil case
@@ -219,6 +233,23 @@ int Opm::Main::runTwoPhase(const Phases& phases)
         return EXIT_FAILURE;
     }
 }
+
+
+int Opm::Main::runBiofilm(const Phases& phases)
+    {
+        if (!(phases.active(Phase::WATER) && phases.active(Phase::GAS)) || (phases.size() != 2)) {
+            if (outputCout_) {
+                std::cerr << "Biofilm option can only be used for two-phase water/gas "
+                          << "model (i.e. in combination with WATER and GAS)." << std::endl;
+            }
+
+            return EXIT_FAILURE;
+        }
+        return flowBiofilmMain(this->argc_,
+                        this->argv_,
+                        this->outputCout_,
+                        this->outputFiles_);
+    }
 
 int Opm::Main::runPolymer(const Phases& phases)
 {
@@ -400,6 +431,17 @@ int Opm::Main::runBlackOil()
         // support the diffusion module yet.
         return flowBlackoilMain(argc_, argv_, outputCout_, outputFiles_);
     }
+    if (this->eclipseState_->runspec().hysterPar().active()) {
+        return flowBlackoilTpfaMain(argc_, argv_, outputCout_, outputFiles_);
+    } else {
+        // Use variant without hysteresis support to save memory.
+        return flowBlackoilTpfaNohystMain(argc_, argv_, outputCout_, outputFiles_);
+    }
+}
 
-    return flowBlackoilTpfaMain(argc_, argv_, outputCout_, outputFiles_);
+int Opm::Main::runBlackOilTemp()
+{
+    // TEMP is used. Energy equation is solved seperatly
+    // Only 3p-blackoil supported with TEMP option
+    return flowBlackoilTempMain(argc_, argv_, outputCout_, outputFiles_);
 }

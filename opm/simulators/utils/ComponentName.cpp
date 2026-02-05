@@ -44,7 +44,7 @@ ComponentName<FluidSystem,Indices>::ComponentName()
         }
 
         const unsigned canonicalCompIdx = FluidSystem::solventComponentIndex(phaseIdx);
-        names_[Indices::canonicalToActiveComponentIndex(canonicalCompIdx)]
+        names_[FluidSystem::canonicalToActiveCompIdx(canonicalCompIdx)]
             = FluidSystem::componentName(canonicalCompIdx);
     }
 
@@ -65,7 +65,7 @@ ComponentName<FluidSystem,Indices>::ComponentName()
         names_[Indices::polymerMoleWeightIdx] = "MolecularWeightP";
     }
 
-    if constexpr (Indices::enableEnergy) {
+    if constexpr (Indices::enableFullyImplicitThermal) {
         names_[Indices::temperatureIdx] = "Energy";
     }
 
@@ -81,8 +81,13 @@ ComponentName<FluidSystem,Indices>::ComponentName()
         names_[Indices::microbialConcentrationIdx] = "Microbes";
         names_[Indices::oxygenConcentrationIdx] = "Oxygen";
         names_[Indices::ureaConcentrationIdx] = "Urea";
-        names_[Indices::biofilmConcentrationIdx] = "Biofilm";
-        names_[Indices::calciteConcentrationIdx] = "Calcite";
+        names_[Indices::biofilmVolumeFractionIdx] = "Biofilm";
+        names_[Indices::calciteVolumeFractionIdx] = "Calcite";
+    }
+
+    if constexpr (Indices::enableBiofilm) {
+        names_[Indices::microbialConcentrationIdx] = "Microbes";
+        names_[Indices::biofilmVolumeFractionIdx] = "Biofilm";
     }
 }
 

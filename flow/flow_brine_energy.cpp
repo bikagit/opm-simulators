@@ -15,7 +15,11 @@
   along with OPM.  If not, see <http://www.gnu.org/licenses/>.
 */
 #include "config.h"
+
+#include <opm/models/blackoil/blackoillocalresidualtpfa.hh>
+#include <opm/models/discretization/common/tpfalinearizer.hh>
 #include <opm/simulators/flow/Main.hpp>
+#include <opm/material/thermal/EnergyModuleType.hpp>
 
 namespace Opm {
 namespace Properties {
@@ -24,14 +28,24 @@ struct FlowBrineEnergyProblem {
     using InheritsFrom = std::tuple<FlowProblem>;
 };
 }
+
 template<class TypeTag>
 struct EnableBrine<TypeTag, TTag::FlowBrineEnergyProblem> {
     static constexpr bool value = true;
 };
+
 template<class TypeTag>
-struct EnableEnergy<TypeTag, TTag::FlowBrineEnergyProblem> {
-    static constexpr bool value = true;
+struct Linearizer<TypeTag, TTag::FlowBrineEnergyProblem> {
+    using type = TpfaLinearizer<TypeTag>;
 };
+
+template<class TypeTag>
+struct LocalResidual<TypeTag, TTag::FlowBrineEnergyProblem> {
+    using type = BlackOilLocalResidualTPFA<TypeTag>;
+};
+template<class TypeTag>
+struct EnergyModuleType<TypeTag, TTag::FlowBrineEnergyProblem>
+{ static constexpr EnergyModules value = EnergyModules::FullyImplicitThermal; };
 }
 
 int flowBrineEnergyMain(int argc, char** argv)

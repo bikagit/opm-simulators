@@ -208,9 +208,11 @@ enableSolTracers() const
 
 template<class Grid, class GridView, class DofMapper, class Stencil, class FluidSystem, class Scalar>
 Scalar GenericTracerModel<Grid,GridView,DofMapper,Stencil,FluidSystem,Scalar>::
-currentConcentration_(const Well& eclWell, const std::string& name) const
+currentConcentration_(const Well& eclWell, const std::string& trName, const SummaryState& summaryState) const
 {
-    return eclWell.getTracerProperties().getConcentration(name);
+    return eclWell.getTracerProperties().getConcentration(WellTracerProperties::Well { eclWell.name() },
+                                                          WellTracerProperties::Tracer { trName },
+                                                          summaryState);
 }
 
 template<class Grid, class GridView, class DofMapper, class Stencil, class FluidSystem, class Scalar>
@@ -282,7 +284,7 @@ doInit(bool rst, std::size_t numGridDof,
                     free_tvdp.evaluate("TRACER_CONCENTRATION",
                                        centroids_(globalDofIdx)[2]);
             }
-        } 
+        }
         else {
             OpmLog::warning(fmt::format("No TBLKF or TVDPF given for free tracer {}. "
                                         "Initial values set to zero. ", tracer.name));
@@ -293,8 +295,8 @@ doInit(bool rst, std::size_t numGridDof,
         }
 
         // Solution tracer initialization only needed for gas/oil tracers with DISGAS/VAPOIL active
-        if (tracer.phase != Phase::WATER && 
-            ((tracer.phase == Phase::GAS && FluidSystem::enableDissolvedGas()) || 
+        if (tracer.phase != Phase::WATER &&
+            ((tracer.phase == Phase::GAS && FluidSystem::enableDissolvedGas()) ||
              (tracer.phase == Phase::OIL && FluidSystem::enableVaporizedOil()))) {
             // TBLKS keyword
             if (tracer.solution_concentration.has_value()){
@@ -322,7 +324,7 @@ doInit(bool rst, std::size_t numGridDof,
                         solution_tvdp.evaluate("TRACER_CONCENTRATION",
                                             centroids_(globalDofIdx)[2]);
                 }
-            } 
+            }
             else {
                 // No solution tracers, default to zero
                 enableSolTracers_[tracerIdx] = false;

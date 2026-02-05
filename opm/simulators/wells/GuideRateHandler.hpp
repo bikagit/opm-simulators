@@ -20,18 +20,10 @@
 #ifndef OPM_GUIDERATE_HANDLER_HPP
 #define OPM_GUIDERATE_HANDLER_HPP
 
-#if HAVE_MPI
-#define RESERVOIR_COUPLING_ENABLED
-#endif
-#ifdef RESERVOIR_COUPLING_ENABLED
-#include <opm/simulators/flow/ReservoirCoupling.hpp>
-#include <opm/simulators/flow/ReservoirCouplingMaster.hpp>
-#include <opm/simulators/flow/ReservoirCouplingSlave.hpp>
-#endif
+#include <opm/simulators/wells/rescoup/RescoupProxy.hpp>
 #include <opm/input/eclipse/Schedule/Group/GuideRate.hpp>
 #include <opm/output/data/Groups.hpp>
 #include <opm/output/data/GuideRateValue.hpp>
-#include <opm/simulators/utils/BlackoilPhases.hpp>
 #include <opm/simulators/utils/DeferredLogger.hpp>
 #include <opm/simulators/wells/BlackoilWellModelGeneric.hpp>
 #include <opm/simulators/wells/BlackoilWellModelGuideRates.hpp>
@@ -50,11 +42,12 @@ namespace Opm {
  *
  * @tparam Scalar The scalar type (e.g., float or double) used in computations.
  */
-template<class Scalar>
+template<typename Scalar, typename IndexTraits>
 class GuideRateHandler {
 public:
+
 #ifdef RESERVOIR_COUPLING_ENABLED
-    using Potentials = ReservoirCoupling::Potentials;
+    using Potentials = ReservoirCoupling::Potentials<Scalar>;
 #endif
 
     /**
@@ -66,7 +59,7 @@ public:
     class GuideRateDumper {
     public:
         GuideRateDumper(
-            GuideRateHandler<Scalar> &parent, const int report_step_idx, const double sim_time
+            GuideRateHandler<Scalar, IndexTraits> &parent, const int report_step_idx, const double sim_time
         );
 
         DeferredLogger &deferredLogger() { return this->parent_.deferredLogger(); }
@@ -97,10 +90,10 @@ public:
         void printFooter_();
         void printWellGuideRates_(const Well& well, int level);
 
-        GuideRateHandler<Scalar> &parent_;
+        GuideRateHandler<Scalar, IndexTraits> &parent_;
         const int report_step_idx_;
         const double sim_time_;
-        const BlackoilWellModelGeneric<Scalar>& well_model_;
+        const BlackoilWellModelGeneric<Scalar, IndexTraits>& well_model_;
         const Schedule& schedule_;
         const Parallel::Communication& comm_;
         std::unordered_map<std::string, data::GuideRateValue> well_guide_rates_;
@@ -117,24 +110,22 @@ public:
     class UpdateGuideRates {
     public:
         UpdateGuideRates(
-            GuideRateHandler<Scalar> &parent,
+            GuideRateHandler<Scalar, IndexTraits> &parent,
             const int report_step_idx,
             const double sim_time,
-            const WellState<Scalar> &well_state,
+            const WellState<Scalar, IndexTraits> &well_state,
             GroupState<Scalar> &group_state,
             const int num_phases
         );
 
-#ifdef RESERVOIR_COUPLING_ENABLED
         bool isReservoirCouplingMaster() const { return this->parent_.isReservoirCouplingMaster(); }
-        ReservoirCouplingMaster& reservoirCouplingMaster() {
+        ReservoirCouplingMaster<Scalar>& reservoirCouplingMaster() {
             return this->parent_.reservoirCouplingMaster();
         }
-#endif
-       const Parallel::Communication &comm() const { return this->parent_.comm_; }
+        const Parallel::Communication &comm() const { return this->parent_.comm_; }
         DeferredLogger &deferredLogger() { return this->parent_.deferredLogger(); }
         GuideRate &guideRate() { return this->parent_.guide_rate_; }
-        const PhaseUsage &phaseUsage() const { return this->parent_.phase_usage_; }
+        const PhaseUsageInfo<IndexTraits>& phaseUsage() const { return this->parent_.phaseUsage(); }
         const SummaryState &summaryState() const { return this->parent_.summary_state_; }
         const Schedule &schedule() const { return this->parent_.schedule_; }
         /**
@@ -162,41 +153,44 @@ public:
         void updateProductionGroupPotentialFromSubGroups(
             const Group& group, std::vector<Scalar>& pot);
 
-        GuideRateHandler<Scalar> &parent_;
+        GuideRateHandler<Scalar, IndexTraits> &parent_;
         const int report_step_idx_;
         const double sim_time_;
-        const WellState<Scalar> &well_state_;
+        const WellState<Scalar, IndexTraits> &well_state_;
         GroupState<Scalar> &group_state_;
         const int num_phases_;
         const UnitSystem& unit_system_;
     };
 
     GuideRateHandler(
-        BlackoilWellModelGeneric<Scalar>& well_model,
+        BlackoilWellModelGeneric<Scalar, IndexTraits>& well_model,
         const Schedule& schedule,
         const SummaryState& summary_state,
         const Parallel::Communication& comm
     );
 
+    // === Reservoir Coupling ===
+
+    /// @brief Get the reservoir coupling proxy
+    ReservoirCoupling::Proxy<Scalar>& rescoup() { return rescoup_; }
+    const ReservoirCoupling::Proxy<Scalar>& rescoup() const { return rescoup_; }
+
+    bool isReservoirCouplingMaster() const { return rescoup_.isMaster(); }
+    bool isReservoirCouplingSlave() const { return rescoup_.isSlave(); }
+
+    ReservoirCouplingMaster<Scalar>& reservoirCouplingMaster() { return rescoup_.master(); }
+    ReservoirCouplingSlave<Scalar>& reservoirCouplingSlave() { return rescoup_.slave(); }
+
 #ifdef RESERVOIR_COUPLING_ENABLED
-    bool isReservoirCouplingMaster() const {
-        return this->reservoir_coupling_master_ != nullptr;
-    }
-    bool isReservoirCouplingSlave() const {
-        return this->reservoir_coupling_slave_ != nullptr;
-    }
-    void receiveMasterGroupPotentialsFromSlaves();
-    ReservoirCouplingMaster& reservoirCouplingMaster() { return *(this->reservoir_coupling_master_); }
-    ReservoirCouplingSlave& reservoirCouplingSlave() { return *(this->reservoir_coupling_slave_); }
     void sendSlaveGroupPotentialsToMaster(const GroupState<Scalar>& group_state);
-    void setReservoirCouplingMaster(ReservoirCouplingMaster *reservoir_coupling_master) {
-        this->reservoir_coupling_master_ = reservoir_coupling_master;
+    void setReservoirCouplingMaster(ReservoirCouplingMaster<Scalar>* master) {
+        rescoup_.setMaster(master);
     }
-    void setReservoirCouplingSlave(ReservoirCouplingSlave *reservoir_coupling_slave) {
-        this->reservoir_coupling_slave_ = reservoir_coupling_slave;
+    void setReservoirCouplingSlave(ReservoirCouplingSlave<Scalar>* slave) {
+        rescoup_.setSlave(slave);
     }
 #endif
-    DeferredLogger& deferredLogger();
+    DeferredLogger& deferredLogger() const { return this->well_model_.groupStateHelper().deferredLogger(); }
     /**
      * @brief Dumps guide rate information to the logger in a readable format.
      *
@@ -207,8 +201,10 @@ public:
      */
     void debugDumpGuideRates(const int report_step_idx, const double sim_time);
     const Parallel::Communication& getComm() const { return comm_; }
-    void setLogger(DeferredLogger *deferred_logger);
+    const GuideRate& guideRate() { return guide_rate_; }
+    const PhaseUsageInfo<IndexTraits>& phaseUsage() const { return well_model_.phaseUsage(); }
     const Schedule& schedule() const { return schedule_; }
+    const SummaryState& summaryState() const { return summary_state_; }
     /**
      * @brief Updates guide rates for the current simulation step.
      *
@@ -219,24 +215,19 @@ public:
      */
     void updateGuideRates(const int report_step_idx,
                           const double sim_time,
-                          const WellState<Scalar>& well_state,
+                          const WellState<Scalar, IndexTraits>& well_state,
                           GroupState<Scalar>& group_state);
 
-    const BlackoilWellModelGeneric<Scalar>& wellModel() const { return well_model_; }
-
+    const BlackoilWellModelGeneric<Scalar, IndexTraits>& wellModel() const { return well_model_; }
+    BlackoilWellModelGeneric<Scalar, IndexTraits>& wellModel() { return well_model_; }
 private:
     void debugDumpGuideRatesRecursive_(const Group& group) const;
-    BlackoilWellModelGeneric<Scalar>& well_model_;
+    BlackoilWellModelGeneric<Scalar, IndexTraits>& well_model_;
     const Schedule& schedule_;
     const SummaryState& summary_state_;
     const Parallel::Communication& comm_;
-    const PhaseUsage& phase_usage_;
     GuideRate& guide_rate_;
-    DeferredLogger *deferred_logger_ = nullptr;
-#ifdef RESERVOIR_COUPLING_ENABLED
-    ReservoirCouplingMaster *reservoir_coupling_master_ = nullptr;
-    ReservoirCouplingSlave *reservoir_coupling_slave_ = nullptr;
-#endif
+    ReservoirCoupling::Proxy<Scalar> rescoup_{};
 };
 
 } // namespace Opm

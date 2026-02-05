@@ -78,9 +78,9 @@ void amgclSolverBackend<Scalar,block_size>::solve_cuda(Scalar* b)
     template void amgclSolverBackend<T,3>::solve_cuda(T*); \
     template void amgclSolverBackend<T,4>::solve_cuda(T*); \
     template void amgclSolverBackend<T,5>::solve_cuda(T*); \
-    template void amgclSolverBackend<T,6>::solve_cuda(T*);
+    template void amgclSolverBackend<T,6>::solve_cuda(T*); \
+    template void amgclSolverBackend<T,7>::solve_cuda(T*);
 
 INSTANTIATE_TYPE(double)
 
 } // namespace Opm::Accelerator
-

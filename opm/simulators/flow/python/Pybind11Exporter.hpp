@@ -9,8 +9,9 @@
 namespace py = pybind11;
 
 namespace Opm::Pybind {
-    void export_all(py::module& m);
     void export_PyBlackOilSimulator(py::module& m);
+    void export_PyGasWaterSimulator(py::module& m);
+    void export_PyOnePhaseSimulator(py::module& m);
 }
 
 #endif //OPM_PYBIND11_EXPORTER_HEADER_INCLUDED

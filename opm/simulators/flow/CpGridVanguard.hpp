@@ -30,8 +30,8 @@
 #include <opm/common/TimingMacros.hpp>
 
 #include <opm/models/common/multiphasebaseproperties.hh>
+#include <opm/models/blackoil/blackoilenergymodules.hh>
 #include <opm/models/blackoil/blackoilproperties.hh>
-
 #include <opm/simulators/flow/FemCpGridCompat.hpp>
 #include <opm/simulators/flow/FlowBaseVanguard.hpp>
 #include <opm/simulators/flow/GenericCpGridVanguard.hpp>
@@ -127,7 +127,7 @@ public:
         const auto& lgr_dim = this->grid().currentData()[lgr_level]->logicalCartesianSize();
         const auto lgr_cartesian_index = (lgr_ijk[2]*lgr_dim[0]*lgr_dim[1]) + (lgr_ijk[1]*lgr_dim[0]) + (lgr_ijk[0]);
         return ParentType::lgrMappers_.value()[lgr_level].at(lgr_cartesian_index);
-    }   
+    }
     /*!
      * Checking consistency of simulator
      */
@@ -139,11 +139,11 @@ public:
 
         // check for correct module setup
         if (config.isThermal()) {
-            if (getPropValue<TypeTag, Properties::EnableEnergy>() == false) {
+            if (getPropValue<TypeTag, Properties::EnergyModuleType>() != EnergyModules::FullyImplicitThermal) {
                 throw std::runtime_error("Input specifies energy while simulator has disabled it, try xxx_energy");
             }
         } else {
-            if (getPropValue<TypeTag, Properties::EnableEnergy>() == true) {
+            if (getPropValue<TypeTag, Properties::EnergyModuleType>() == EnergyModules::FullyImplicitThermal) {
                 throw std::runtime_error("Input specifies no energy while simulator has energy, try run without _energy");
             }
         }
@@ -155,8 +155,14 @@ public:
         }
 
         if (runspec.micp()) {
-            if (getPropValue<TypeTag, Properties::EnableMICP>() == false) {
+            if (getPropValue<TypeTag, Properties::EnableBioeffects>() == false) {
                 throw std::runtime_error("Input specifies MICP while simulator has it disabled");
+            }
+        }
+
+        if (runspec.biof()) {
+            if (getPropValue<TypeTag, Properties::EnableBioeffects>() == false) {
+                throw std::runtime_error("Input specifies Biofilm while simulator has it disabled");
             }
         }
 
@@ -314,7 +320,7 @@ public:
 protected:
     void createGrids_()
     {
-        this->doCreateGrids_(this->eclState());
+        this->doCreateGrids_(this->edgeConformal(), this->eclState());
     }
 
     void allocTrans() override
@@ -325,7 +331,8 @@ protected:
                                                     this->cartesianIndexMapper(),
                                                     this->grid(),
                                                     this->cellCentroids(),
-                                                    getPropValue<TypeTag, Properties::EnableEnergy>(),
+                                                    getPropValue<TypeTag, Properties::EnergyModuleType>() == EnergyModules::FullyImplicitThermal ||
+                                                    getPropValue<TypeTag, Properties::EnergyModuleType>() == EnergyModules::SequentialImplicitThermal,
                                                     getPropValue<TypeTag, Properties::EnableDiffusion>(),
                                                     getPropValue<TypeTag, Properties::EnableDispersion>()));
         globalTrans_->update(false, TransmissibilityType::TransUpdateQuantities::Trans);

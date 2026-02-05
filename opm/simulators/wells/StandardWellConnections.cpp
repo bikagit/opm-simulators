@@ -29,7 +29,6 @@
 #include <opm/models/blackoil/blackoilonephaseindices.hh>
 #include <opm/models/blackoil/blackoiltwophaseindices.hh>
 
-#include <opm/simulators/utils/BlackoilPhases.hpp>
 #include <opm/simulators/utils/DeferredLoggingErrorHelpers.hpp>
 
 #include <opm/simulators/wells/ParallelWellInfo.hpp>
@@ -43,6 +42,7 @@
 #include <functional>
 #include <limits>
 #include <numeric>
+#include <optional>
 #include <stdexcept>
 #include <string_view>
 #include <tuple>
@@ -156,22 +156,55 @@ namespace {
         }
     }
 
+    template <typename Ix>
+    std::optional<Ix>
+    preferredPhaseIndex(const bool isInjector,
+                        const Opm::Well& well,
+                        const Ix opos,
+                        const Ix gpos,
+                        const Ix wpos)
+    {
+        if (isInjector) {
+            switch (well.injectorType()) {
+                case Opm::InjectorType::WATER:
+                    return {wpos};
+                case Opm::InjectorType::OIL:
+                    return {opos};
+                case Opm::InjectorType::GAS:
+                    return {gpos};
+                default:
+                    return {};
+            }
+        } else {
+            switch (well.getPreferredPhase()) {
+                case Opm::Phase::WATER:
+                    return {wpos};
+                case Opm::Phase::OIL:
+                    return {opos};
+                case Opm::Phase::GAS:
+                    return {gpos};
+                default:
+                    return {};
+            }
+        }
+    }
+
 } // Anonymous namespace
 
 namespace Opm
 {
 
-template<class FluidSystem, class Indices>
-StandardWellConnections<FluidSystem,Indices>::
-StandardWellConnections(const WellInterfaceIndices<FluidSystem,Indices>& well)
+template<typename FluidSystem, typename Indices>
+StandardWellConnections<FluidSystem, Indices>::
+StandardWellConnections(const WellInterfaceIndices<FluidSystem, Indices>& well)
     : well_(well)
     , perf_densities_(well.numLocalPerfs())
     , perf_pressure_diffs_(well.numLocalPerfs())
 {
 }
 
-template<class FluidSystem, class Indices>
-void StandardWellConnections<FluidSystem,Indices>::
+template<typename FluidSystem, typename Indices>
+void StandardWellConnections<FluidSystem, Indices>::
 computePressureDelta()
 {
     // Algorithm:
@@ -206,8 +239,8 @@ computePressureDelta()
     well_.parallelWellInfo().partialSumPerfValues(beg, end);
 }
 
-template<class FluidSystem, class Indices>
-void StandardWellConnections<FluidSystem,Indices>::
+template<typename FluidSystem, typename Indices>
+void StandardWellConnections<FluidSystem, Indices>::
 computeDensities(const std::vector<Scalar>& perfComponentRates,
                  const Properties& props,
                  DeferredLogger& deferred_logger)
@@ -222,19 +255,19 @@ computeDensities(const std::vector<Scalar>& perfComponentRates,
     // Therefore, it's safe to have -1 (== numeric_limits<size_t>::max()) be
     // their value in that case.
     const auto gaspos = activeGas
-        ? static_cast<Ix>(Indices::canonicalToActiveComponentIndex(FluidSystem::gasCompIdx))
+        ? static_cast<Ix>(FluidSystem::canonicalToActiveCompIdx(FluidSystem::gasCompIdx))
         : static_cast<Ix>(-1);
 
     const auto oilpos = activeOil
-        ? static_cast<Ix>(Indices::canonicalToActiveComponentIndex(FluidSystem::oilCompIdx))
+        ? static_cast<Ix>(FluidSystem::canonicalToActiveCompIdx(FluidSystem::oilCompIdx))
         : static_cast<Ix>(-1);
 
     const auto waterpos = activeWater
-        ? static_cast<Ix>(Indices::canonicalToActiveComponentIndex(FluidSystem::waterCompIdx))
+        ? static_cast<Ix>(FluidSystem::canonicalToActiveCompIdx(FluidSystem::waterCompIdx))
         : static_cast<Ix>(-1);
 
     const int nperf    = this->well_.numLocalPerfs();
-    const int num_comp = this->well_.numComponents();
+    const int num_quantities = this->well_.numConservationQuantities();
 
     // 1. Compute the flow (in surface volume units for each component)
     //    exiting up the wellbore from each perforation, taking into account
@@ -246,11 +279,18 @@ computeDensities(const std::vector<Scalar>& perfComponentRates,
     //    volume ratios (formation factors) for each perforation.  Finally
     //    compute densities for the segments associated with each
     //    perforation.
-    auto componentMixture = std::vector<Scalar>(num_comp, Scalar{0});
-    auto phaseMixture     = std::vector<Scalar>(num_comp, Scalar{0});
+    auto componentMixture = std::vector<Scalar>(num_quantities, Scalar{0});
+    auto phaseMixture     = std::vector<Scalar>(num_quantities, Scalar{0});
+
+    const auto preferredPhaseIdx =
+            preferredPhaseIndex(this->well_.isInjector(),
+                                this->well_.wellEcl(),
+                                oilpos, gaspos, waterpos);
 
     for (int perf = 0; perf < nperf; ++perf) {
-        this->initialiseConnectionMixture(num_comp, perf,
+        this->initialiseConnectionMixture(num_quantities,
+                                          perf,
+                                          preferredPhaseIdx,
                                           q_out_perf,
                                           phaseMixture,
                                           componentMixture);
@@ -276,13 +316,13 @@ computeDensities(const std::vector<Scalar>& perfComponentRates,
 
         // Compute connection level mixture density as a weighted average of
         // phase densities.
-        const auto* const rho_s = &props.surf_dens_perf[perf*num_comp + 0];
-        const auto* const b     = &props.b_perf        [perf*num_comp + 0];
+        const auto* const rho_s = &props.surf_dens_perf[perf * num_quantities + 0];
+        const auto* const b     = &props.b_perf        [perf * num_quantities + 0];
 
         auto& rho = this->perf_densities_[perf];
 
         auto volrat = rho = Scalar{0};
-        for (auto comp = 0*num_comp; comp < num_comp; ++comp) {
+        for (auto comp = 0 * num_quantities; comp < num_quantities; ++comp) {
             rho    += componentMixture[comp] * rho_s[comp];
             volrat += phaseMixture    [comp] / b    [comp];
         }
@@ -291,15 +331,15 @@ computeDensities(const std::vector<Scalar>& perfComponentRates,
     }
 }
 
-template <class FluidSystem, class Indices>
-std::vector<typename StandardWellConnections<FluidSystem, Indices>::Scalar>
+template<typename FluidSystem, typename Indices>
+std::vector<typename FluidSystem::Scalar>
 StandardWellConnections<FluidSystem, Indices>::
 calculatePerforationOutflow(const std::vector<Scalar>& perfComponentRates) const
 {
     const int nperf    = this->well_.numLocalPerfs();
-    const int num_comp = this->well_.numComponents();
+    const int num_quantities = this->well_.numConservationQuantities();
 
-    auto q_out_perf = std::vector<Scalar>(nperf * num_comp, Scalar{0});
+    auto q_out_perf = std::vector<Scalar>(nperf * num_quantities, Scalar{0});
 
     // Component flow rates depend on the order of the perforations.  Thus,
     // we must use the global view of the well's perforation to get an
@@ -308,17 +348,17 @@ calculatePerforationOutflow(const std::vector<Scalar>& perfComponentRates) const
     const auto& factory = this->well_.parallelWellInfo()
         .getGlobalPerfContainerFactory();
 
-    auto global_q_out_perf = factory.createGlobal(q_out_perf, num_comp);
+    auto global_q_out_perf = factory.createGlobal(q_out_perf, num_quantities);
 
     const auto global_perf_comp_rates = factory
-        .createGlobal(perfComponentRates, num_comp);
+        .createGlobal(perfComponentRates, num_quantities);
 
     // TODO: Investigate whether we should use the following techniques to
     // calcuate the composition of flows in the wellbore.  Iterate over well
     // perforations from bottom to top.
     for (int perf = factory.numGlobalPerfs() - 1; perf >= 0; --perf) {
-        for (int component = 0; component < num_comp; ++component) {
-            const auto index = perf*num_comp + component;
+        for (int component = 0; component < num_quantities; ++component) {
+            const auto index = perf * num_quantities + component;
             auto& q_out = global_q_out_perf[index];
 
             // Initialise current perforation's component flow rate to that
@@ -326,7 +366,7 @@ calculatePerforationOutflow(const std::vector<Scalar>& perfComponentRates) const
             // component rate.
             q_out = (perf == factory.numGlobalPerfs() - 1)
                 ? Scalar{0}
-                : global_q_out_perf[index + num_comp];
+                : global_q_out_perf[index + num_quantities];
 
             // Subtract outflow through perforation.
             q_out -= global_perf_comp_rates[index];
@@ -334,104 +374,61 @@ calculatePerforationOutflow(const std::vector<Scalar>& perfComponentRates) const
     }
 
     // Copy the data back to local view.
-    factory.copyGlobalToLocal(global_q_out_perf, q_out_perf, num_comp);
+    factory.copyGlobalToLocal(global_q_out_perf, q_out_perf, num_quantities);
 
     return q_out_perf;
 }
 
-template <class FluidSystem, class Indices>
+template<typename FluidSystem, typename Indices>
+template <typename Ix>
 void StandardWellConnections<FluidSystem, Indices>::
-initialiseConnectionMixture(const int                  num_comp,
+initialiseConnectionMixture(const int                  num_quantities,
                             const int                  perf,
+                            const std::optional<Ix>    preferredPhaseIdx,
                             const std::vector<Scalar>& q_out_perf,
                             const std::vector<Scalar>& phaseMixture,
                             std::vector<Scalar>&       componentMixture) const
 {
     // Find component mix.
     const auto tot_surf_rate =
-        std::accumulate(q_out_perf.begin() + num_comp*(perf + 0),
-                        q_out_perf.begin() + num_comp*(perf + 1), Scalar{0});
+        std::accumulate(q_out_perf.begin() + num_quantities * (perf + 0),
+                        q_out_perf.begin() + num_quantities * (perf + 1), Scalar{0});
 
     if (tot_surf_rate != Scalar{0}) {
-        const auto* const qo = &q_out_perf[perf*num_comp + 0];
+        const auto* const qo = &q_out_perf[perf * num_quantities + 0];
 
-        for (int component = 0; component < num_comp; ++component) {
+        for (int component = 0; component < num_quantities; ++component) {
             componentMixture[component] = std::abs(qo[component] / tot_surf_rate);
         }
     }
-    else if (num_comp == 1) {
-        componentMixture[num_comp - 1] = Scalar{1};
+    else if (num_quantities == 1) {
+        componentMixture[num_quantities - 1] = Scalar{1};
     }
     else {
         std::fill(componentMixture.begin(), componentMixture.end(), Scalar{0});
 
         // No flow => use fractions defined at well level for componentMixture.
-        if (this->well_.isInjector()) {
-            switch (this->well_.wellEcl().injectorType()) {
-            case InjectorType::WATER:
-                componentMixture[FluidSystem::waterCompIdx] = Scalar{1};
-                break;
-
-            case InjectorType::GAS:
-                componentMixture[FluidSystem::gasCompIdx] = Scalar{1};
-                break;
-
-            case InjectorType::OIL:
-                componentMixture[FluidSystem::oilCompIdx] = Scalar{1};
-                break;
-
-            case InjectorType::MULTI:
-                // Not supported.
-                // deferred_logger.warning("MULTI_PHASE_INJECTOR_NOT_SUPPORTED",
-                //                         "Multi phase injectors are not supported, requested for well " + name());
-                break;
-            }
-        }
-        else {
-            assert(this->well_.isProducer());
-
-            if (perf == 0) {
-                // For the first perforation without flow we use the
-                // preferred phase to decide the componentMixture initialization.
-
-                switch (this->well_.wellEcl().getPreferredPhase()) {
-                case Phase::OIL:
-                    componentMixture[FluidSystem::oilCompIdx] = Scalar{1};
-                    break;
-
-                case Phase::GAS:
-                    componentMixture[FluidSystem::gasCompIdx] = Scalar{1};
-                    break;
-
-                case Phase::WATER:
-                    componentMixture[FluidSystem::waterCompIdx] = Scalar{1};
-                    break;
-
-                default:
-                    // No others supported.
-                    break;
-                }
-            }
-            else {
-                // For the rest of the perforations without flow we use the
-                // componentMixture from the perforation above.
-                componentMixture = phaseMixture;
-            }
+        if ( (this->well_.isInjector() || (perf == 0)) &&  preferredPhaseIdx.has_value()) {
+            componentMixture[*preferredPhaseIdx] = Scalar{1};
+        } else if (!this->well_.isInjector() && (perf != 0)) {
+            // For the rest of the perforations without flow we use the
+            // componentMixture from the perforation above.
+            componentMixture = phaseMixture;
         }
     }
 }
 
-template <class FluidSystem, class Indices>
+template<typename FluidSystem, typename Indices>
 void StandardWellConnections<FluidSystem, Indices>::
 computeDensitiesForStoppedProducer(const DensityPropertyFunctions& prop_func)
 {
     const auto np = this->well_.numPhases();
 
-    const auto modPhIx = [this, np]() {
+    const auto modPhIx = [np]() {
         auto phIx = std::vector<int>(np);
 
         for (auto p = 0*np; p < np; ++p) {
-            phIx[p] = this->well_.flowPhaseToModelPhaseIdx(p);
+            phIx[p] = FluidSystem::activeToCanonicalPhaseIdx(p);
         }
 
         return phIx;
@@ -459,29 +456,24 @@ computeDensitiesForStoppedProducer(const DensityPropertyFunctions& prop_func)
     }
 }
 
-template<class FluidSystem, class Indices>
+template<typename FluidSystem, typename Indices>
 typename StandardWellConnections<FluidSystem, Indices>::Properties
-StandardWellConnections<FluidSystem,Indices>::
-computePropertiesForPressures(const WellState<Scalar>&         well_state,
+StandardWellConnections<FluidSystem, Indices>::
+computePropertiesForPressures(const WellState<Scalar, IndexTraits>&         well_state,
                               const PressurePropertyFunctions& prop_func) const
 {
     auto props = Properties{};
 
     const int nperf = well_.numLocalPerfs();
-    const PhaseUsage& pu = well_.phaseUsage();
 
-    props.b_perf        .resize(nperf * this->well_.numComponents());
-    props.surf_dens_perf.resize(nperf * this->well_.numComponents());
+    props.b_perf        .resize(nperf * this->well_.numConservationQuantities());
+    props.surf_dens_perf.resize(nperf * this->well_.numConservationQuantities());
 
     const auto& ws = well_state.well(this->well_.indexOfWell());
 
-    static constexpr int Water = BlackoilPhases::Aqua;
-    static constexpr int Oil = BlackoilPhases::Liquid;
-    static constexpr int Gas = BlackoilPhases::Vapour;
-
-    const bool waterPresent = FluidSystem::phaseIsActive(FluidSystem::waterPhaseIdx);
-    const bool oilPresent = FluidSystem::phaseIsActive(FluidSystem::oilPhaseIdx);
-    const bool gasPresent = FluidSystem::phaseIsActive(FluidSystem::gasPhaseIdx);
+    const bool waterPresent = FluidSystem::phaseIsActive(IndexTraits::waterPhaseIdx);
+    const bool oilPresent = FluidSystem::phaseIsActive(IndexTraits::oilPhaseIdx);
+    const bool gasPresent = FluidSystem::phaseIsActive(IndexTraits::gasPhaseIdx);
 
     // Rs/Rv are used only if both oil and gas are present.
     if (oilPresent && gasPresent) {
@@ -504,20 +496,22 @@ computePropertiesForPressures(const WellState<Scalar>&         well_state,
         const int cell_idx = well_.cells()[perf];
 
         const Scalar p_avg = (perf_press[perf] + p_above[perf])/2;
-        const Scalar temperature = prop_func.getTemperature(cell_idx, FluidSystem::oilPhaseIdx);
+        const Scalar temperature = prop_func.getTemperature(cell_idx, IndexTraits::oilPhaseIdx);
         const Scalar saltConcentration = prop_func.getSaltConcentration(cell_idx);
         const int region_idx = prop_func.pvtRegionIdx(cell_idx);
 
         if (waterPresent) {
-            const unsigned waterCompIdx = Indices::canonicalToActiveComponentIndex(FluidSystem::waterCompIdx);
+            const unsigned waterCompIdx = FluidSystem::canonicalToActiveCompIdx(IndexTraits::waterCompIdx);
             Scalar rsw = 0.0;
             if (FluidSystem::enableDissolvedGasInWater()) {
                 // TODO support mutual solubility in water and oil
                 assert(!FluidSystem::phaseIsActive(FluidSystem::oilPhaseIdx));
-                const Scalar waterrate = std::abs(ws.surface_rates[pu.phase_pos[Water]]);
+                const int water_pos = FluidSystem::canonicalToActivePhaseIdx(FluidSystem::waterPhaseIdx);
+                const Scalar waterrate = std::abs(ws.surface_rates[water_pos]);
                 props.rswmax_perf[perf] = FluidSystem::waterPvt().saturatedGasDissolutionFactor(region_idx, temperature, p_avg, saltConcentration);
                 if (waterrate > 0) {
-                    const Scalar gasrate = std::abs(ws.surface_rates[pu.phase_pos[Gas]]) - (Indices::enableSolvent ? ws.sum_solvent_rates() : 0.0);
+                    const int gas_pos = FluidSystem::canonicalToActivePhaseIdx(FluidSystem::gasPhaseIdx);
+                    const Scalar gasrate = std::abs(ws.surface_rates[gas_pos]) - (Indices::enableSolvent ? ws.sum_solvent_rates() : 0.0);
                     if (gasrate > 0) {
                         rsw = gasrate / waterrate;
                     }
@@ -525,24 +519,26 @@ computePropertiesForPressures(const WellState<Scalar>&         well_state,
                 }
             }
 
-            props.b_perf[waterCompIdx + perf * well_.numComponents()] = FluidSystem::waterPvt()
+            props.b_perf[waterCompIdx + perf * well_.numConservationQuantities()] = FluidSystem::waterPvt()
                 .inverseFormationVolumeFactor(region_idx, temperature, p_avg, rsw, saltConcentration);
         }
 
         if (gasPresent) {
-            const unsigned gasCompIdx = Indices::canonicalToActiveComponentIndex(FluidSystem::gasCompIdx);
-            const int gaspos = gasCompIdx + perf * well_.numComponents();
+            const unsigned gasCompIdx = FluidSystem::canonicalToActiveCompIdx(FluidSystem::gasCompIdx);
+            const int gaspos = gasCompIdx + perf * well_.numConservationQuantities();
 
             Scalar rvw = 0.0;
             Scalar rv = 0.0;
             if (oilPresent) {
                 // in order to handle negative rates in producers
-                const Scalar oilrate = std::abs(ws.surface_rates[pu.phase_pos[Oil]]);
+                const int oil_pos = FluidSystem::canonicalToActivePhaseIdx(FluidSystem::oilPhaseIdx);
+                const Scalar oilrate = std::abs(ws.surface_rates[oil_pos]);
                 props.rvmax_perf[perf] = FluidSystem::gasPvt()
                     .saturatedOilVaporizationFactor(region_idx, temperature, p_avg);
 
                 if (oilrate > 0) {
-                    const Scalar gasrate = std::abs(ws.surface_rates[pu.phase_pos[Gas]]) - (Indices::enableSolvent ? ws.sum_solvent_rates() : 0.0);
+                    const int gas_pos = FluidSystem::canonicalToActivePhaseIdx(FluidSystem::gasPhaseIdx);
+                    const Scalar gasrate = std::abs(ws.surface_rates[gas_pos]) - (Indices::enableSolvent ? ws.sum_solvent_rates() : 0.0);
                     if (gasrate > 0) {
                         rv = oilrate / gasrate;
                     }
@@ -552,12 +548,14 @@ computePropertiesForPressures(const WellState<Scalar>&         well_state,
 
             if (waterPresent) {
                 // in order to handle negative rates in producers
-                const Scalar waterrate = std::abs(ws.surface_rates[pu.phase_pos[Water]]);
+                const int water_pos = FluidSystem::canonicalToActivePhaseIdx(FluidSystem::waterPhaseIdx);
+                const Scalar waterrate = std::abs(ws.surface_rates[water_pos]);
                 props.rvwmax_perf[perf] = FluidSystem::gasPvt()
                     .saturatedWaterVaporizationFactor(region_idx, temperature, p_avg);
 
                 if (waterrate > 0) {
-                    const Scalar gasrate = std::abs(ws.surface_rates[pu.phase_pos[Gas]])
+                    const int gas_pos = FluidSystem::canonicalToActivePhaseIdx(FluidSystem::gasPhaseIdx);
+                    const Scalar gasrate = std::abs(ws.surface_rates[gas_pos])
                         - (Indices::enableSolvent ? ws.sum_solvent_rates() : 0.0);
 
                     if (gasrate > 0) {
@@ -573,19 +571,21 @@ computePropertiesForPressures(const WellState<Scalar>&         well_state,
         }
 
         if (oilPresent) {
-            const unsigned oilCompIdx = Indices::canonicalToActiveComponentIndex(FluidSystem::oilCompIdx);
-            const int oilpos = oilCompIdx + perf * well_.numComponents();
+            const unsigned oilCompIdx = FluidSystem::canonicalToActiveCompIdx(FluidSystem::oilCompIdx);
+            const int oilpos = oilCompIdx + perf * well_.numConservationQuantities();
 
             Scalar rs = 0.0;
             if (gasPresent) {
                 props.rsmax_perf[perf] = FluidSystem::oilPvt()
                     .saturatedGasDissolutionFactor(region_idx, temperature, p_avg);
 
-                const Scalar gasrate = std::abs(ws.surface_rates[pu.phase_pos[Gas]])
+                const int gas_pos = FluidSystem::canonicalToActivePhaseIdx(FluidSystem::gasPhaseIdx);
+                const Scalar gasrate = std::abs(ws.surface_rates[gas_pos])
                     - (Indices::enableSolvent ? ws.sum_solvent_rates() : 0.0);
 
                 if (gasrate > 0) {
-                    const Scalar oilrate = std::abs(ws.surface_rates[pu.phase_pos[Oil]]);
+                    const int oil_pos = FluidSystem::canonicalToActivePhaseIdx(FluidSystem::oilPhaseIdx);
+                    const Scalar oilrate = std::abs(ws.surface_rates[oil_pos]);
                     if (oilrate > 0) {
                         rs = gasrate / oilrate;
                     }
@@ -603,17 +603,17 @@ computePropertiesForPressures(const WellState<Scalar>&         well_state,
                 continue;
             }
 
-            const unsigned compIdx = Indices::canonicalToActiveComponentIndex(FluidSystem::solventComponentIndex(phaseIdx));
-            props.surf_dens_perf[well_.numComponents() * perf  + compIdx] =
+            const unsigned compIdx = FluidSystem::canonicalToActiveCompIdx(FluidSystem::solventComponentIndex(phaseIdx));
+            props.surf_dens_perf[well_.numConservationQuantities() * perf + compIdx] =
                 FluidSystem::referenceDensity( phaseIdx, region_idx );
         }
 
         // We use cell values for solvent injector
         if constexpr (Indices::enableSolvent) {
-            props.b_perf[well_.numComponents() * perf + Indices::contiSolventEqIdx] =
+            props.b_perf[well_.numConservationQuantities() * perf + Indices::contiSolventEqIdx] =
                 prop_func.solventInverseFormationVolumeFactor(cell_idx);
 
-            props.surf_dens_perf[well_.numComponents() * perf + Indices::contiSolventEqIdx] =
+            props.surf_dens_perf[well_.numConservationQuantities() * perf + Indices::contiSolventEqIdx] =
                 prop_func.solventRefDensity(cell_idx);
         }
     }
@@ -621,8 +621,8 @@ computePropertiesForPressures(const WellState<Scalar>&         well_state,
     return props;
 }
 
-template <class FluidSystem, class Indices>
-std::vector<typename StandardWellConnections<FluidSystem, Indices>::Scalar>
+template<typename FluidSystem, typename Indices>
+std::vector<typename FluidSystem::Scalar>
 StandardWellConnections<FluidSystem, Indices>::
 copyInPerforationRates(const Properties&       props,
                        const PerfData<Scalar>& perf_data) const
@@ -631,13 +631,14 @@ copyInPerforationRates(const Properties&       props,
 
     const int nperf = this->well_.numLocalPerfs();
     const int np    = this->well_.numPhases();
-    const int nc    = this->well_.numComponents();
+    const int nc    = this->well_.numConservationQuantities();
 
-    const auto srcIx = [this, np]() {
+    const auto srcIx = [np]() {
         auto ix = std::vector<int>(np);
 
         for (auto comp = 0; comp < np; ++comp) {
-            ix[comp] = this->well_.modelCompIdxToFlowCompIdx(comp);
+            // TODO: it might be a mixed up of components and phases in multiple ways
+            ix[comp] = FluidSystem::activeCompToActivePhaseIdx(comp);
         }
 
         return ix;
@@ -663,10 +664,10 @@ copyInPerforationRates(const Properties&       props,
     return perfRates;
 }
 
-template<class FluidSystem, class Indices>
-void StandardWellConnections<FluidSystem,Indices>::
+template<typename FluidSystem, typename Indices>
+void StandardWellConnections<FluidSystem, Indices>::
 computeProperties(const bool                      stopped_or_zero_rate_target,
-                  const WellState<Scalar>&        well_state,
+                  const WellState<Scalar, IndexTraits>&        well_state,
                   const DensityPropertyFunctions& prop_func,
                   const Properties&               props,
                   DeferredLogger&                 deferred_logger)
@@ -689,16 +690,16 @@ computeProperties(const bool                      stopped_or_zero_rate_target,
     this->computePressureDelta();
 }
 
-template<class FluidSystem, class Indices>
-typename StandardWellConnections<FluidSystem,Indices>::Eval
-StandardWellConnections<FluidSystem,Indices>::
+template<typename FluidSystem, typename Indices>
+typename StandardWellConnections<FluidSystem, Indices>::Eval
+StandardWellConnections<FluidSystem, Indices>::
 connectionRateBrine(Scalar& rate,
                     const Scalar vap_wat_rate,
                     const std::vector<EvalWell>& cq_s,
                     const std::variant<Scalar,EvalWell>& saltConcentration) const
 {
     // TODO: the application of well efficiency factor has not been tested with an example yet
-    const unsigned waterCompIdx = Indices::canonicalToActiveComponentIndex(FluidSystem::waterCompIdx);
+    const unsigned waterCompIdx = FluidSystem::canonicalToActiveCompIdx(FluidSystem::waterCompIdx);
     // Correction salt rate; evaporated water does not contain salt
     EvalWell cq_s_sm = cq_s[waterCompIdx] - vap_wat_rate;
     if (well_.isInjector()) {
@@ -714,26 +715,26 @@ connectionRateBrine(Scalar& rate,
     return well_.restrictEval(cq_s_sm);
 }
 
-template<class FluidSystem, class Indices>
-typename StandardWellConnections<FluidSystem,Indices>::Eval
-StandardWellConnections<FluidSystem,Indices>::
+template<typename FluidSystem, typename Indices>
+typename StandardWellConnections<FluidSystem, Indices>::Eval
+StandardWellConnections<FluidSystem, Indices>::
 connectionRateFoam(const std::vector<EvalWell>& cq_s,
-                    const std::variant<Scalar,EvalWell>& foamConcentration,
-                    const Phase transportPhase,
-                    DeferredLogger& deferred_logger) const
+                   const std::variant<Scalar,EvalWell>& foamConcentration,
+                   const Phase transportPhase,
+                   DeferredLogger& deferred_logger) const
 {
     // TODO: the application of well efficiency factor has not been tested with an example yet
     auto getFoamTransportIdx = [&deferred_logger,transportPhase] {
         switch (transportPhase) {
             case Phase::WATER: {
-                return Indices::canonicalToActiveComponentIndex(FluidSystem::waterCompIdx);
+                return FluidSystem::canonicalToActiveCompIdx(FluidSystem::waterCompIdx);
             }
             case Phase::GAS: {
-                return Indices::canonicalToActiveComponentIndex(FluidSystem::gasCompIdx);
+                return FluidSystem::canonicalToActiveCompIdx(FluidSystem::gasCompIdx);
             }
             case Phase::SOLVENT: {
                 if constexpr (Indices::enableSolvent)
-                    return Indices::contiSolventEqIdx;
+                    return static_cast<short>(Indices::contiSolventEqIdx);
                 else
                     OPM_DEFLOG_THROW(std::runtime_error, "Foam transport phase is SOLVENT but SOLVENT is not activated.", deferred_logger);
             }
@@ -754,10 +755,31 @@ connectionRateFoam(const std::vector<EvalWell>& cq_s,
 }
 
 template<class FluidSystem, class Indices>
-std::tuple<typename StandardWellConnections<FluidSystem,Indices>::Eval,
-           typename StandardWellConnections<FluidSystem,Indices>::Eval,
-           typename StandardWellConnections<FluidSystem,Indices>::Eval>
+typename StandardWellConnections<FluidSystem,Indices>::Eval
 StandardWellConnections<FluidSystem,Indices>::
+connectionRateBioeffects(Scalar& rate,
+                         const Scalar vap_wat_rate,
+                         const std::vector<EvalWell>& cq_s,
+                         const std::variant<Scalar,EvalWell>& microbialConcentration) const
+{
+    // TODO: the application of well efficiency factor has not been tested with an example yet
+    const unsigned waterCompIdx = FluidSystem::canonicalToActiveCompIdx(FluidSystem::waterCompIdx);
+    // Correction microbial rate; evaporated water does not contain microbes
+    EvalWell cq_s_bm = cq_s[waterCompIdx] - vap_wat_rate;
+    cq_s_bm *= std::get<EvalWell>(microbialConcentration);
+
+    // Note. Efficiency factor is handled in the output layer
+    rate = cq_s_bm.value();
+
+    cq_s_bm *= well_.wellEfficiencyFactor();
+    return well_.restrictEval(cq_s_bm);
+}
+
+template<typename FluidSystem, typename Indices>
+std::tuple<typename StandardWellConnections<FluidSystem, Indices>::Eval,
+           typename StandardWellConnections<FluidSystem, Indices>::Eval,
+           typename StandardWellConnections<FluidSystem, Indices>::Eval>
+StandardWellConnections<FluidSystem, Indices>::
 connectionRatesMICP(Scalar& rate_m,
                     Scalar& rate_o,
                     Scalar& rate_u,
@@ -766,7 +788,7 @@ connectionRatesMICP(Scalar& rate_m,
                     const std::variant<Scalar,EvalWell>& oxygenConcentration,
                     const std::variant<Scalar,EvalWell>& ureaConcentration) const
 {
-    const unsigned waterCompIdx = Indices::canonicalToActiveComponentIndex(FluidSystem::waterCompIdx);
+    const unsigned waterCompIdx = FluidSystem::canonicalToActiveCompIdx(FluidSystem::waterCompIdx);
     EvalWell cq_s_microbe = cq_s[waterCompIdx];
     if (well_.isInjector()) {
         cq_s_microbe *= std::get<Scalar>(microbialConcentration);
@@ -799,16 +821,16 @@ connectionRatesMICP(Scalar& rate_m,
             well_.restrictEval(cq_s_urea)};
 }
 
-template<class FluidSystem, class Indices>
-std::tuple<typename StandardWellConnections<FluidSystem,Indices>::Eval,
-           typename StandardWellConnections<FluidSystem,Indices>::EvalWell>
-StandardWellConnections<FluidSystem,Indices>::
+template<typename FluidSystem, typename Indices>
+std::tuple<typename StandardWellConnections<FluidSystem, Indices>::Eval,
+           typename StandardWellConnections<FluidSystem, Indices>::EvalWell>
+StandardWellConnections<FluidSystem, Indices>::
 connectionRatePolymer(Scalar& rate,
                       const std::vector<EvalWell>& cq_s,
                       const std::variant<Scalar,EvalWell>& polymerConcentration) const
 {
     // TODO: the application of well efficiency factor has not been tested with an example yet
-    const unsigned waterCompIdx = Indices::canonicalToActiveComponentIndex(FluidSystem::waterCompIdx);
+    const unsigned waterCompIdx = FluidSystem::canonicalToActiveCompIdx(FluidSystem::waterCompIdx);
     EvalWell cq_s_poly = cq_s[waterCompIdx];
     if (well_.isInjector()) {
         cq_s_poly *= std::get<Scalar>(polymerConcentration);
@@ -823,17 +845,17 @@ connectionRatePolymer(Scalar& rate,
     return {well_.restrictEval(cq_s_poly), cq_s_poly};
 }
 
-template<class FluidSystem, class Indices>
-std::tuple<typename StandardWellConnections<FluidSystem,Indices>::Eval,
-           typename StandardWellConnections<FluidSystem,Indices>::EvalWell>
-StandardWellConnections<FluidSystem,Indices>::
+template<typename FluidSystem, typename Indices>
+std::tuple<typename StandardWellConnections<FluidSystem, Indices>::Eval,
+           typename StandardWellConnections<FluidSystem, Indices>::EvalWell>
+StandardWellConnections<FluidSystem, Indices>::
 connectionRatezFraction(Scalar& rate,
                         const Scalar dis_gas_rate,
                         const std::vector<EvalWell>& cq_s,
                         const std::variant<Scalar, std::array<EvalWell,2>>& solventConcentration) const
 {
     // TODO: the application of well efficiency factor has not been tested with an example yet
-    const unsigned gasCompIdx = Indices::canonicalToActiveComponentIndex(FluidSystem::gasCompIdx);
+    const unsigned gasCompIdx = FluidSystem::canonicalToActiveCompIdx(FluidSystem::gasCompIdx);
     EvalWell cq_s_zfrac_effective = cq_s[gasCompIdx];
     if (well_.isInjector()) {
         cq_s_zfrac_effective *= std::get<Scalar>(solventConcentration);

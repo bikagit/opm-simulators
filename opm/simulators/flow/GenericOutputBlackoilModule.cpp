@@ -128,7 +128,7 @@ GenericOutputBlackoilModule(const EclipseState& eclState,
                             RSTConv::LocalToGlobalCellFunc globalCell,
                             const Parallel::Communication& comm,
                             bool enableEnergy,
-                            bool enableTemperature,
+                            bool constantTemperature,
                             bool enableMech,
                             bool enableSolvent,
                             bool enablePolymer,
@@ -136,7 +136,7 @@ GenericOutputBlackoilModule(const EclipseState& eclState,
                             bool enableBrine,
                             bool enableSaltPrecipitation,
                             bool enableExtbo,
-                            bool enableMICP)
+                            bool enableBioeffects)
     : eclState_(eclState)
     , schedule_(schedule)
     , summaryState_(summaryState)
@@ -146,7 +146,7 @@ GenericOutputBlackoilModule(const EclipseState& eclState,
                         declaredMaxRegionID(eclState.runspec()))
     , logOutput_(eclState, schedule, summaryState, moduleVersion)
     , enableEnergy_(enableEnergy)
-    , enableTemperature_(enableTemperature)
+    , constantTemperature_(constantTemperature)
     , enableMech_(enableMech)
     , enableSolvent_(enableSolvent)
     , enablePolymer_(enablePolymer)
@@ -154,11 +154,11 @@ GenericOutputBlackoilModule(const EclipseState& eclState,
     , enableBrine_(enableBrine)
     , enableSaltPrecipitation_(enableSaltPrecipitation)
     , enableExtbo_(enableExtbo)
-    , enableMICP_(enableMICP)
+    , enableBioeffects_(enableBioeffects)
     , flowsC_(schedule, summaryConfig)
     , rftC_(eclState_, schedule_,
-            [this](const std::string& wname)
-            { return this->isOwnedByCurrentRank(wname); })
+            [this](const std::string& wname) { return this->isOwnedByCurrentRank(wname); },
+            [this](const std::string& wname) { return this->isOnCurrentRank(wname); })
     , rst_conv_(std::move(globalCell), comm)
     , local_data_valid_(false)
 {
@@ -280,7 +280,7 @@ calc_inplace(std::map<std::string, double>& miscSummaryData,
              const Parallel::Communication& comm)
 {
     auto inplace = this->accumulateRegionSums(comm);
-    
+
     if (comm.rank() != 0)
         return inplace;
 
@@ -288,13 +288,14 @@ calc_inplace(std::map<std::string, double>& miscSummaryData,
                               miscSummaryData,
                               regionData);
 
-    
+
     return inplace;
 }
 
 template<class FluidSystem>
 void GenericOutputBlackoilModule<FluidSystem>::
 outputWellspecReport(const std::vector<std::string>& changedWells,
+                     const bool                      changedWellLists,
                      const std::size_t               reportStepNum,
                      const double                    elapsed,
                      boost::posix_time::ptime        currentDate) const
@@ -302,7 +303,10 @@ outputWellspecReport(const std::vector<std::string>& changedWells,
     this->logOutput_.timeStamp("WELSPECS", elapsed,
                                static_cast<int>(reportStepNum),
                                currentDate);
-    this->logOutput_.wellSpecification(changedWells, reportStepNum);
+
+    this->logOutput_.wellSpecification(changedWells,
+                                       changedWellLists,
+                                       reportStepNum);
 }
 
 template<class FluidSystem>
@@ -357,7 +361,7 @@ assignToSolution(data::Solution& sol)
     addEntry(baseSolutionVector, "PCOG",     UnitSystem::measure::pressure,                              pcog_);
     addEntry(baseSolutionVector, "PCOW",     UnitSystem::measure::pressure,                              pcow_);
     addEntry(baseSolutionVector, "PDEW",     UnitSystem::measure::pressure,                              dewPointPressure_);
-    addEntry(baseSolutionVector, "POLYMER",  UnitSystem::measure::identity,                              cPolymer_);
+    addEntry(baseSolutionVector, "POLYMER",  UnitSystem::measure::concentration,                         cPolymer_);
     addEntry(baseSolutionVector, "PPCW",     UnitSystem::measure::pressure,                              ppcw_);
     addEntry(baseSolutionVector, "PRESROCC", UnitSystem::measure::pressure,                              minimumOilPressure_);
     addEntry(baseSolutionVector, "PRESSURE", UnitSystem::measure::pressure,                              fluidPressure_);
@@ -366,7 +370,7 @@ assignToSolution(data::Solution& sol)
     addEntry(baseSolutionVector, "RSSAT",    UnitSystem::measure::gas_oil_ratio,                         gasDissolutionFactor_);
     addEntry(baseSolutionVector, "RV",       UnitSystem::measure::oil_gas_ratio,                         rv_);
     addEntry(baseSolutionVector, "RVSAT",    UnitSystem::measure::oil_gas_ratio,                         oilVaporizationFactor_);
-    addEntry(baseSolutionVector, "SALT",     UnitSystem::measure::salinity,                              cSalt_);
+    addEntry(baseSolutionVector, "SALT",     UnitSystem::measure::concentration,                         cSalt_);
     addEntry(baseSolutionVector, "SGMAX",    UnitSystem::measure::identity,                              sgmax_);
     addEntry(baseSolutionVector, "SHMAX",    UnitSystem::measure::identity,                              shmax_);
     addEntry(baseSolutionVector, "SOMAX",    UnitSystem::measure::identity,                              soMax_);
@@ -402,8 +406,9 @@ assignToSolution(data::Solution& sol)
 
     this->flowsC_.outputRestart(sol);
 
-    if (this->micpC_.allocated()) {
-        this->micpC_.outputRestart(sol);
+    if (this->bioeffectsC_.allocated()) {
+        // Biofilms for gas-water systems; MICP only for water systems
+        this->bioeffectsC_.outputRestart(sol, !FluidSystem::phaseIsActive(gasPhaseIdx));
     }
 
     for (auto& array : extendedSolutionArrays) {
@@ -435,41 +440,8 @@ assignToSolution(data::Solution& sol)
                    data::TargetType::RESTART_SOLUTION);
     }
 
-    if ((eclState_.runspec().co2Storage() || eclState_.runspec().h2Storage()) && !rsw_.empty()) {
-        auto mfrac = std::vector<double>(this->rsw_.size(), 0.0);
-
-        std::transform(this->rsw_.begin(), this->rsw_.end(),
-                       this->eclState_.fieldProps().get_int("PVTNUM").begin(),
-                       mfrac.begin(),
-            [](const auto& rsw, const int pvtReg)
-        {
-            const auto xwg = FluidSystem::convertRswToXwG(rsw, pvtReg - 1);
-            return FluidSystem::convertXwGToxwG(xwg, pvtReg - 1);
-        });
-
-        std::string moleFracName = eclState_.runspec().co2Storage() ? "XMFCO2" : "XMFH2";
-        sol.insert(moleFracName,
-                   UnitSystem::measure::identity,
-                   std::move(mfrac),
-                   data::TargetType::RESTART_OPM_EXTENDED);
-    }
-
-    if ((eclState_.runspec().co2Storage() || eclState_.runspec().h2Storage()) && !rvw_.empty()) {
-        auto mfrac = std::vector<double>(this->rvw_.size(), 0.0);
-
-        std::transform(this->rvw_.begin(), this->rvw_.end(),
-                       this->eclState_.fieldProps().get_int("PVTNUM").begin(),
-                       mfrac.begin(),
-            [](const auto& rvw, const int pvtReg)
-        {
-            const auto xgw = FluidSystem::convertRvwToXgW(rvw, pvtReg - 1);
-            return FluidSystem::convertXgWToxgW(xgw, pvtReg - 1);
-        });
-
-        sol.insert("YMFWAT",
-                   UnitSystem::measure::identity,
-                   std::move(mfrac),
-                   data::TargetType::RESTART_OPM_EXTENDED);
+    if (this->CO2H2C_.allocated()) {
+        this->CO2H2C_.outputRestart(sol);
     }
 
     if (FluidSystem::phaseIsActive(waterPhaseIdx) &&
@@ -571,8 +543,9 @@ setRestart(const data::Solution& sol,
                   [&assign](const auto& p)
                   { assign(p.first, *p.second); });
 
-    if (this->micpC_.allocated()) {
-        this->micpC_.readRestart(globalDofIndex, elemIdx, sol);
+    if (this->bioeffectsC_.allocated()) {
+        // Biofilms for gas-water systems; MICP only for water systems
+        this->bioeffectsC_.readRestart(globalDofIndex, elemIdx, sol, !FluidSystem::phaseIsActive(gasPhaseIdx));
     }
 }
 
@@ -750,7 +723,7 @@ doAllocBuffers(const unsigned bufferSize,
        Entry{&fluidPressure_,             "PRESSURE", true},
        // If TEMP is set in RPTRST we output temperature even if THERMAL
        // is not activated
-       Entry{&temperature_,                   "TEMP", enableEnergy_ || rstKeywords["TEMP"] > 0},
+       Entry{&temperature_,                   "TEMP", enableEnergy_ || (constantTemperature_ && rstKeywords["TEMP"] > 0)},
        Entry{&rs_,                              "RS", FluidSystem::enableDissolvedGas()},
        Entry{&rsw_,                            "RSW", FluidSystem::enableDissolvedGasInWater()},
        Entry{&rv_,                              "RV", FluidSystem::enableVaporizedOil()},
@@ -762,7 +735,7 @@ doAllocBuffers(const unsigned bufferSize,
        Entry{&cFoam_,                             "", enableFoam_},
        Entry{&cSalt_,                             "", enableBrine_},
        Entry{&pSalt_,                             "", enableSaltPrecipitation_},
-       Entry{&permFact_,                          "", enableSaltPrecipitation_ || enableMICP_},
+       Entry{&permFact_,                          "", enableSaltPrecipitation_ || enableBioeffects_},
        Entry{&soMax_,                             "", oilvap.getType() == OilVapP::VAPPARS},
        Entry{&soMax_,                             "", hysteresisConfig &&
                                                       hysteresisConfig->enableNonWettingHysteresis() &&
@@ -936,8 +909,13 @@ doAllocBuffers(const unsigned bufferSize,
         extboC_.allocate(bufferSize);
     }
 
-    if (enableMICP_) {
-        this->micpC_.allocate(bufferSize);
+    if (enableBioeffects_) {
+        // Biofilms for gas-water systems; MICP only for water systems
+        this->bioeffectsC_.allocate(bufferSize, !FluidSystem::phaseIsActive(gasPhaseIdx));
+    }
+
+    if ((eclState_.runspec().co2Storage() || eclState_.runspec().h2Storage()) && !rsw_.empty()) {
+        this->CO2H2C_.allocate(bufferSize, eclState_.runspec().co2Storage());
     }
 
     // tracers

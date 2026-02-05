@@ -76,16 +76,23 @@ void FlowLinearSolverParameters::init(bool cprRequestedInDataFile)
     }
 
     accelerator_mode_ = Parameters::Get<Parameters::AcceleratorMode>();
+    cpr_weights_thread_parallel_ = Parameters::Get<Parameters::CprWeightsThreadParallel>();
     gpu_device_id_ = Parameters::Get<Parameters::GpuDeviceId>();
     opencl_platform_id_ = Parameters::Get<Parameters::OpenclPlatformId>();
     opencl_ilu_parallel_ = Parameters::Get<Parameters::OpenclIluParallel>();
-    linear_solver_accelerator_ = Parameters::linearSolverAcceleratorTypeFromCLI();
+
+    // NLDD local solvers must use CPU accelerator because extractMatrix and other
+    // operations in the NLDD implementation are not GPU-compatible yet.
+    if (is_nldd_local_solver_) {
+        linear_solver_accelerator_ = Parameters::LinearSolverAcceleratorType::CPU;
+    } else {
+        linear_solver_accelerator_ = Parameters::linearSolverAcceleratorTypeFromCLI();
+    }
 
     if (linear_solver_accelerator_ == Parameters::LinearSolverAcceleratorType::GPU) {
         if (!Parameters::IsSet<Parameters::LinearSolver>()) {
-            // TODO: Once CPRW/CPR is implemented for GPU, we can remove this
-            // and use the same default as for CPU
-            linsolver_ = "ilu0";
+            // Since well operator is not implemented for GPU we can not use default cprw
+            linsolver_ = "cpr_trueimpes";
         }
     }
 }
@@ -137,7 +144,7 @@ void FlowLinearSolverParameters::registerParameters()
          "ILU preconditioner in spheres starting at an edge. "
          "If false the original ordering is preserved in each color. "
          "Otherwise why try to ensure D4 ordering (in a 2D structured grid, "
-         "the diagonal elements are consecutive).");
+         "the diagonal elements are consecutive)");
     Parameters::Register<Parameters::UseGmres>
         ("Use GMRES as the linear solver");
     Parameters::Register<Parameters::LinearSolverIgnoreConvergenceFailure>
@@ -150,14 +157,14 @@ void FlowLinearSolverParameters::registerParameters()
          "ilu0, dilu, cpr (an alias for cprw), cpr_quasiimpes, "
          "cpr_trueimpes, cpr_trueimpesanalytic, amg or hybrid (experimental). "
          "Alternatively, you can request a configuration to be read from a "
-         "JSON file by giving the filename here, ending with '.json.'");
+         "JSON file by giving the filename here, ending with '.json'");
     Parameters::Register<Parameters::NlddLocalLinearSolver>
         ("Configuration of NLDD local linear solver. Valid options are: ilu0 (default), "
-            "dilu, cpr_quasiimpes and amg. "
+            "dilu, cpr_quasiimpes, and amg. "
             "Alternatively, you can request a configuration to be read from a "
-            "JSON file by giving the filename here, ending with '.json.'");
+            "JSON file by giving the filename here, ending with '.json'");
     Parameters::Register<Parameters::LinearSolverPrintJsonDefinition>
-        ("Write the JSON definition of the linear solver setup to the DBG file.");
+        ("Write the JSON definition of the linear solver setup to the DBG file");
     Parameters::Register<Parameters::CprReuseSetup>
         ("Reuse preconditioner setup. Valid options are "
          "0: recreate the preconditioner for every linear solve, "
@@ -168,10 +175,10 @@ void FlowLinearSolverParameters::registerParameters()
     Parameters::Register<Parameters::CprReuseInterval>
         ("Reuse preconditioner interval. Used when CprReuseSetup is set to 4, "
          "then the preconditioner will be fully recreated instead of reused "
-         "every N linear solve, where N is this parameter.");
+         "every N linear solve, where N is this parameter");
     Parameters::Register<Parameters::AcceleratorMode>
-        ("Choose a linear solver, usage: "
-         "'--accelerator-mode=[none|cusparse|opencl|amgcl|rocalution|rocsparse]'");
+        ("Choose a linear solver. Valid options are: cusparse, opencl, amgcl, "
+         "rocalution, rocsparse, and none");
     Parameters::Register<Parameters::GpuDeviceId>
         ("Choose device ID for cusparseSolver or openclSolver, "
          "use 'nvidia-smi' or 'clinfo' to determine valid IDs");
@@ -181,22 +188,22 @@ void FlowLinearSolverParameters::registerParameters()
     Parameters::Register<Parameters::OpenclIluParallel>
         ("Parallelize ILU decomposition and application on GPU");
     Parameters::Register<Parameters::LinearSolverAccelerator>
-        ("Choose the backend for the linear solver, usage: "
-         "'--linear-solver-accelerator=[cpu|gpu]'.");
+        ("Choose the backend for the linear solver. Valid options are: cpu or gpu");
     Parameters::Register<Parameters::GpuAwareMpi>
         ("MPI communication use GPU aware MPI in the sense that "
             "it will use GPU direct communication. Setting this to true "
             " will require that the MPI implementation "
             "supports GPU direct communication. "
-            "If you are unsure, set this to false. "
-            "Usage: --gpu-aware-mpi=[true|false]. ");
+            "If you are unsure, set this to false");
     Parameters::Register<Parameters::VerifyGpuAwareMpi>
         ("Verify that the MPI implementation supports GPU aware MPI. "
             "If this is set to true *and* --gpu-aware-mpi=true, the simulation will fail if the "
             "MPI implementation does not support GPU aware MPI. "
             "Note that the verification is not exhaustive, "
-            "and some configurations will not verify, but will work in practice. "
-            "Usage: --verify-gpu-aware-mpi=[true|false]. ");
+            "and some configurations might not be verified, but will work in practice");
+    Parameters::Register<Parameters::CprWeightsThreadParallel>
+        ("Enable OpenMP thread parallelization of CPR weight calculation. "
+            "This can improve performance for large models but is disabled by default");
 
     Parameters::SetDefault<Parameters::LinearSolverVerbosity>(0);
 }
@@ -235,6 +242,7 @@ void FlowLinearSolverParameters::reset()
     linear_solver_accelerator_ = Parameters::LinearSolverAcceleratorType::CPU;
     gpu_aware_mpi_              = false;
     verify_gpu_aware_mpi_       = false;
+    cpr_weights_thread_parallel_ = false;
 }
 
 } // namespace Opm

@@ -88,6 +88,13 @@ template<class TypeTag>
 struct NumEq<TypeTag, TTag::MultiPhaseBaseModel>
 { static constexpr int value = GetPropType<TypeTag, Properties::Indices>::numEq; };
 
+//! For seqential implicit approches we may want to evaluate the intensive quantities with a larger number of derivaties
+// Default is a fully implicit approach where numDerivaties = numEq;
+template<class TypeTag>
+struct NumDerivatives<TypeTag, TTag::MultiPhaseBaseModel>
+{ static constexpr int value = GetPropType<TypeTag, Properties::Indices>::numEq; };
+
+
 //! The number of phases is determined by the fluid system
 template<class TypeTag>
 struct NumPhases<TypeTag, TTag::MultiPhaseBaseModel>
@@ -167,12 +174,9 @@ template <class TypeTag>
 class MultiPhaseBaseModel : public GetPropType<TypeTag, Properties::Discretization>
 {
     using ParentType = GetPropType<TypeTag, Properties::Discretization>;
-    using Implementation = GetPropType<TypeTag, Properties::Model>;
+    using Implementation = GetPropType<TypeTag, Properties::Problem>;
     using Simulator = GetPropType<TypeTag, Properties::Simulator>;
     using ThreadManager = GetPropType<TypeTag, Properties::ThreadManager>;
-    using Scalar = GetPropType<TypeTag, Properties::Scalar>;
-    using Indices = GetPropType<TypeTag, Properties::Indices>;
-    using FluidSystem = GetPropType<TypeTag, Properties::FluidSystem>;
     using ElementContext = GetPropType<TypeTag, Properties::ElementContext>;
     using EqVector = GetPropType<TypeTag, Properties::EqVector>;
     using GridView = GetPropType<TypeTag, Properties::GridView>;
@@ -181,7 +185,6 @@ class MultiPhaseBaseModel : public GetPropType<TypeTag, Properties::Discretizati
     using Element = typename GridView::template Codim<0>::Entity;
 
     enum { numPhases = getPropValue<TypeTag, Properties::NumPhases>() };
-    enum { numComponents = FluidSystem::numComponents };
 
 public:
     explicit MultiPhaseBaseModel(Simulator& simulator)

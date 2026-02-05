@@ -76,8 +76,8 @@ function(add_test_compareECLFiles)
                   -f ${PARAM_FILENAME}
                   -a ${PARAM_ABS_TOL}
                   -t ${PARAM_REL_TOL}
-                  -c ${COMPARE_ECL_COMMAND}
-                  -d ${RST_DECK_COMMAND})
+                  -c $<TARGET_FILE:compareECL>
+                  -d $<TARGET_FILE:rst_deck>)
   if(PARAM_RESTART_STEP)
     list(APPEND DRIVER_ARGS -s ${PARAM_RESTART_STEP})
   endif()
@@ -118,6 +118,9 @@ function(add_test_compareSeparateECLFiles)
   else()
     set(MPI_PROCS 1)
   endif()
+  if(NOT PARAM_DIR)
+    set(PARAM_DIR ${PARAM_CASENAME})
+  endif()
   set(RESULT_PATH ${BASE_RESULT_PATH}${PARAM_DIR_PREFIX}/${PARAM_SIMULATOR}+${PARAM_CASENAME})
   set(TEST_ARGS ${PARAM_TEST_ARGS})
   set(DRIVER_ARGS -i ${OPM_TESTS_ROOT}/${PARAM_DIR1}
@@ -128,7 +131,7 @@ function(add_test_compareSeparateECLFiles)
                   -b ${PROJECT_BINARY_DIR}/bin
                   -a ${PARAM_ABS_TOL}
                   -t ${PARAM_REL_TOL}
-                  -c ${COMPARE_ECL_COMMAND}
+                  -c $<TARGET_FILE:compareECL>
                   -n ${MPI_PROCS})
   if(PARAM_IGNORE_EXTRA_KW)
     list(APPEND DRIVER_ARGS -y ${PARAM_IGNORE_EXTRA_KW})
@@ -139,7 +142,8 @@ function(add_test_compareSeparateECLFiles)
                TEST_ARGS ${TEST_ARGS})
   set_tests_properties(${PARAM_PREFIX}_${PARAM_SIMULATOR}+${PARAM_CASENAME} PROPERTIES
                         DIRNAME ${PARAM_DIR}
-                        FILENAME ${PARAM_FILENAME}
+                        FILENAME1 ${PARAM_FILENAME1}
+                        FILENAME2 ${PARAM_FILENAME2}
                         SIMULATOR ${PARAM_SIMULATOR}
                         TESTNAME ${PARAM_CASENAME}
                         PROCESSORS ${MPI_PROCS})
@@ -181,8 +185,8 @@ function(add_test_compare_restarted_simulation)
                            -f ${PARAM_FILENAME}
                            -a ${PARAM_ABS_TOL}
                            -t ${PARAM_REL_TOL}
-                           -c ${COMPARE_ECL_COMMAND}
-                           -d ${RST_DECK_COMMAND}
+                           -c $<TARGET_FILE:compareECL>
+                           -d $<TARGET_FILE:rst_deck>
                            -s ${PARAM_RESTART_STEP}
                TEST_ARGS ${PARAM_TEST_ARGS})
 endfunction()
@@ -218,25 +222,28 @@ function(add_test_compare_parallel_simulation)
     set(MPI_PROCS 4)
   endif()
 
-  set(RESULT_PATH ${BASE_RESULT_PATH}/parallel/${PARAM_SIMULATOR}+${PARAM_CASENAME})
-  set(TEST_ARGS ${OPM_TESTS_ROOT}/${PARAM_DIR}/${PARAM_FILENAME} ${PARAM_TEST_ARGS})
+  if(MPIEXEC_MAX_NUMPROCS GREATER_EQUAL MPI_PROCS)
+    # Local computer system has at least ${MPI_PROCS} CPUs. Register test.
+    set(RESULT_PATH ${BASE_RESULT_PATH}/parallel/${PARAM_SIMULATOR}+${PARAM_CASENAME})
+    set(TEST_ARGS ${OPM_TESTS_ROOT}/${PARAM_DIR}/${PARAM_FILENAME} ${PARAM_TEST_ARGS})
 
-  set(DRIVER_ARGS -i ${OPM_TESTS_ROOT}/${PARAM_DIR}
-                  -r ${RESULT_PATH}
-                  -b ${PROJECT_BINARY_DIR}/bin
-                  -f ${PARAM_FILENAME}
-                  -a ${PARAM_ABS_TOL}
-                  -t ${PARAM_REL_TOL}
-                  -c ${COMPARE_ECL_COMMAND}
-                  -n ${MPI_PROCS})
+    set(DRIVER_ARGS -i ${OPM_TESTS_ROOT}/${PARAM_DIR}
+                    -r ${RESULT_PATH}
+                    -b ${PROJECT_BINARY_DIR}/bin
+                    -f ${PARAM_FILENAME}
+                    -a ${PARAM_ABS_TOL}
+                    -t ${PARAM_REL_TOL}
+                    -c $<TARGET_FILE:compareECL>
+                    -n ${MPI_PROCS})
 
-  # Add test that runs flow_mpi and outputs the results to file
-  opm_add_test(compareParallelSim_${PARAM_SIMULATOR}+${PARAM_FILENAME}${PARAM_POSTFIX} NO_COMPILE
-               EXE_NAME ${PARAM_SIMULATOR}
-               DRIVER_ARGS ${DRIVER_ARGS}
-               TEST_ARGS ${TEST_ARGS})
-  set_tests_properties(compareParallelSim_${PARAM_SIMULATOR}+${PARAM_FILENAME}${PARAM_POSTFIX}
-                       PROPERTIES PROCESSORS ${MPI_PROCS})
+    # Add test that runs flow_mpi and outputs the results to file
+    opm_add_test(compareParallelSim_${PARAM_SIMULATOR}+${PARAM_FILENAME}${PARAM_POSTFIX} NO_COMPILE
+                 EXE_NAME ${PARAM_SIMULATOR}
+                 DRIVER_ARGS ${DRIVER_ARGS}
+                 TEST_ARGS ${TEST_ARGS})
+    set_tests_properties(compareParallelSim_${PARAM_SIMULATOR}+${PARAM_FILENAME}${PARAM_POSTFIX}
+                         PROPERTIES PROCESSORS ${MPI_PROCS})
+  endif()
 endfunction()
 
 
@@ -271,23 +278,26 @@ function(add_test_compare_parallel_restarted_simulation)
     set(MPI_PROCS 4)
   endif()
 
-  set(RESULT_PATH ${BASE_RESULT_PATH}/parallelRestart/${PARAM_SIMULATOR}+${PARAM_CASENAME})
-  set(DRIVER_ARGS -i ${OPM_TESTS_ROOT}/${PARAM_DIR}
-                  -r ${RESULT_PATH}
-                  -b ${PROJECT_BINARY_DIR}/bin
-                  -f ${PARAM_FILENAME}
-                  -a ${PARAM_ABS_TOL}
-                  -t ${PARAM_REL_TOL}
-                  -c ${COMPARE_ECL_COMMAND}
-                  -s ${PARAM_RESTART_STEP}
-                  -d ${RST_DECK_COMMAND}
-                  -n ${MPI_PROCS})
+  if(MPIEXEC_MAX_NUMPROCS GREATER_EQUAL MPI_PROCS)
+    # Local computer system has at least ${MPI_PROCS} CPUs. Register test.
+    set(RESULT_PATH ${BASE_RESULT_PATH}/parallelRestart/${PARAM_SIMULATOR}+${PARAM_CASENAME})
+    set(DRIVER_ARGS -i ${OPM_TESTS_ROOT}/${PARAM_DIR}
+                    -r ${RESULT_PATH}
+                    -b ${PROJECT_BINARY_DIR}/bin
+                    -f ${PARAM_FILENAME}
+                    -a ${PARAM_ABS_TOL}
+                    -t ${PARAM_REL_TOL}
+                    -c $<TARGET_FILE:compareECL>
+                    -s ${PARAM_RESTART_STEP}
+                    -d $<TARGET_FILE:rst_deck>
+                    -n ${MPI_PROCS})
 
-  opm_add_test(${TEST_NAME} NO_COMPILE
-               EXE_NAME ${PARAM_SIMULATOR}
-               DRIVER_ARGS ${DRIVER_ARGS}
-               TEST_ARGS ${PARAM_TEST_ARGS})
-  set_tests_properties(${TEST_NAME} PROPERTIES PROCESSORS ${MPI_PROCS})
+    opm_add_test(${TEST_NAME} NO_COMPILE
+                 EXE_NAME ${PARAM_SIMULATOR}
+                 DRIVER_ARGS ${DRIVER_ARGS}
+                 TEST_ARGS ${PARAM_TEST_ARGS})
+    set_tests_properties(${TEST_NAME} PROPERTIES PROCESSORS ${MPI_PROCS})
+  endif()
 endfunction()
 
 
@@ -323,7 +333,7 @@ function(add_test_split_comm)
                   -f ${PARAM_FILENAME}
                   -a ${PARAM_ABS_TOL}
                   -t ${PARAM_REL_TOL}
-                  -c ${COMPARE_ECL_COMMAND}
+                  -c $<TARGET_FILE:compareECL>
                   -n ${MPI_PROCS})
 
   opm_add_test(compareParallelSplitComm_${PARAM_SIMULATOR}+${PARAM_FILENAME} NO_COMPILE
@@ -383,6 +393,42 @@ function(add_test_compareDamarisFiles)
                                     TESTNAME ${PARAM_CASENAME})
 endfunction()
 
+###########################################################################
+
+# Adds several tests cases with similar parameters
+# cases Variable name of list with test cases
+# prefix Prefix to use
+# argn Parameters for cases
+macro(add_multiple_tests cases prefix)
+  foreach(case ${${cases}})
+    string(TOLOWER ${case} test)
+    add_test_compareECLFiles(
+        CASENAME ${prefix}${test}
+        FILENAME ${case}
+        ${ARGN}
+    )
+  endforeach()
+endmacro()
+
+###########################################################################
+
+# Adds several tests cases in a numerical range with similar parameters
+# start Start of range
+# end End fof range
+# ftemplate File name template to use
+# prefix Prefix to use
+# argn Parameters for cases
+macro(add_multiple_test_range start end ftemplate prefix)
+    foreach(case RANGE ${start} ${end})
+      add_test_compareECLFiles(
+          CASENAME ${prefix}_${case}
+          FILENAME ${ftemplate}${case}
+          ${ARGN}
+      )
+    endforeach()
+endmacro()
+
+###########################################################################
 
 if(NOT TARGET test-suite)
   add_custom_target(test-suite)
@@ -406,7 +452,14 @@ add_test_runSimulator(CASENAME spe1case1_carfin
                       FILENAME SPE1CASE1_CARFIN
                       SIMULATOR flow
                       DIR lgr
-                      TEST_ARGS --parsing-strictness=low --enable-ecl-output=false --enable-vtk-output=true)
+                      TEST_ARGS --parsing-strictness=low --enable-ecl-output=true --enable-vtk-output=true)
+
+# Disabled for now as it causes oob memory access
+#add_test_runSimulator(CASENAME spe1case1_carfin_gr
+#                      FILENAME SPE1CASE1_CARFIN_GR
+#                      SIMULATOR flow
+#                      DIR lgr
+#                      TEST_ARGS --parsing-strictness=low --enable-ecl-output=true --enable-vtk-output=true)
 
 if(MPI_FOUND)
   add_test_runSimulator(CASENAME spe1case1_carfin_parallel
@@ -451,6 +504,7 @@ if (opm-common_EMBEDDED_PYTHON)
   include (${CMAKE_CURRENT_SOURCE_DIR}/pyactionActionXComparisons.cmake)
 endif ()
 include (${CMAKE_CURRENT_SOURCE_DIR}/regressionTests.cmake)
+include (${CMAKE_CURRENT_SOURCE_DIR}/comparisonTests.cmake)
 include (${CMAKE_CURRENT_SOURCE_DIR}/restartTests.cmake)
 
 # PORV test
@@ -466,13 +520,29 @@ add_test_compareECLFiles(CASENAME norne
 # Init tests
 opm_set_test_driver(${PROJECT_SOURCE_DIR}/tests/run-init-regressionTest.sh "")
 
-add_test_compareECLFiles(CASENAME norne
+add_test_compareECLFiles(CASENAME norne_init
                          FILENAME NORNE_ATW2013
                          SIMULATOR flow
                          ABS_TOL ${abs_tol}
                          REL_TOL ${rel_tol}
                          PREFIX compareECLInitFiles
+                         DIR norne
                          DIR_PREFIX /init)
+
+set(_operate_work_tests
+  OPERATE_ENDPOINTS-01
+  OPERATER_ENDPOINTS-01
+)
+
+add_multiple_tests(_operate_work_tests
+  "operate_work_"
+  SIMULATOR flow
+  ABS_TOL ${abs_tol}
+  REL_TOL ${rel_tol}
+  PREFIX compareECLInitFiles
+  DIR operate
+  DIR_PREFIX /init
+)
 
 # This is not a proper regression test; the test will load a norne case prepared
 # for restart and run one single timestep - of length one day. The results are not

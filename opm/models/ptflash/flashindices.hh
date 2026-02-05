@@ -74,12 +74,15 @@ public:
 
     //! Index of water saturation
     static constexpr int water0Idx = enableWater ? z0Idx + numComponents - 1 : -1000;
-    
+
     // equation indices
 
     //! Index of the mass conservation equation for the first
     //! component.
     static constexpr int conti0EqIdx = PVOffset;
+
+    //! MICP implementation is an extension of the black-oil model
+    static constexpr bool enableMICP = false;
 };
 
 } // namespace Opm

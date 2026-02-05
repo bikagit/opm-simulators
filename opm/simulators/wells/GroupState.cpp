@@ -135,14 +135,14 @@ GroupState<Scalar>::network_leaf_node_production_rates(const std::string& gname)
 
 template<class Scalar>
 void GroupState<Scalar>::
-GroupState::update_well_group_thp(const std::string& gname, const double& thp) 
+GroupState::update_well_group_thp(const std::string& gname, const double& thp)
 {
     this->group_thp[gname] = thp;
 }
 
 template<class Scalar>
 Scalar GroupState<Scalar>::
-GroupState::well_group_thp(const std::string& gname) const 
+GroupState::well_group_thp(const std::string& gname) const
 {
     auto group_iter = this->group_thp.find(gname);
     if (group_iter == this->group_thp.end())
@@ -360,6 +360,28 @@ has_grat_sales_target(const std::string& gname) const
 
 //-------------------------------------------------------------------------
 
+// For injector groups. We can have a control for each phase.
+template<class Scalar>
+bool GroupState<Scalar>::
+has_field_or_none_control(const std::string& gname, Phase injection_phase) const
+{
+    if (!this->has_injection_control(gname, injection_phase))
+        return false;
+    const auto control = this->injection_control(gname, injection_phase);
+    return (control == Group::InjectionCMode::FLD) || (control == Group::InjectionCMode::NONE);
+}
+
+// For production groups.
+template<class Scalar>
+bool GroupState<Scalar>::
+has_field_or_none_control(const std::string& gname) const
+{
+    if (!this->has_production_control(gname))
+        return false;
+    const auto control = this->production_control(gname);
+    return (control == Group::ProductionCMode::FLD) || (control == Group::ProductionCMode::NONE);
+}
+
 template<class Scalar>
 bool GroupState<Scalar>::
 has_production_control(const std::string& gname) const
@@ -388,6 +410,13 @@ GroupState<Scalar>::production_control(const std::string& gname) const
         throw std::logic_error("Could not find any control for production group: " + gname);
 
     return group_iter->second;
+}
+
+template<class Scalar>
+const std::map<std::string, Group::ProductionCMode>&
+GroupState<Scalar>::get_production_controls() const
+{
+    return this->production_controls;
 }
 
 //-------------------------------------------------------------------------
@@ -507,42 +536,38 @@ update_gconsump(const Schedule& schedule, const int report_step, const SummarySt
     const auto& gconsump = sched_state.gconsump();
     auto gcr_recursive =
         [this, &sched_state, &gconsump, &summary_state](auto self,
-                                                        const std::string& group_name,
-                                                        std::pair<Scalar, Scalar>& rates,
-                                                        const double parent_gefac = 1.0) -> bool
+                                                        const std::string& group_name) -> std::pair<Scalar, Scalar>
         {
-            // If group already has been computed, update parent rates and return true
-            const auto it = this->m_gconsump_rates.find(group_name);
-            if (it != this->m_gconsump_rates.end()) {
-                rates.first += static_cast<Scalar>(it->second.first * parent_gefac);
-                rates.second += static_cast<Scalar>(it->second.second * parent_gefac);
-                return true;
-            }
+            std::pair<Scalar, Scalar> group_rates{0.0, 0.0};
 
-            // Accumulate from sub-groups and keep track of any updates in 'has_values'
-            bool has_values = false;
+            // Accumulate from child groups (with child efficiency factors applied)
             if (sched_state.groups.has(group_name)) {
-                for (const auto& child_gname : sched_state.groups(group_name).groups()) {
-                    const auto gefac = sched_state.groups(child_gname).getGroupEfficiencyFactor();
-                    has_values = self(self, child_gname, rates, gefac) || has_values;
+                const auto& group = sched_state.groups(group_name);
+                for (const auto& child_gname : group.groups()) {
+                    const auto& child_group = sched_state.groups(child_gname);
+                    const auto child_gefac = child_group.getGroupEfficiencyFactor();
+
+                    // Get child's accumulated rates and apply child's efficiency factor
+                    const auto child_rates = self(self, child_gname);
+                    group_rates.first += static_cast<Scalar>(child_rates.first * child_gefac);
+                    group_rates.second += static_cast<Scalar>(child_rates.second * child_gefac);
                 }
             }
 
-            // Add consumption/import rates at current level
+            // Add this group's own GCONSUMP rates (WITHOUT own efficiency factor)
             if (gconsump.has(group_name)) {
                 const auto& group_gc = gconsump.get(group_name, summary_state);
-                rates.first += static_cast<Scalar>(group_gc.consumption_rate);
-                rates.second += static_cast<Scalar>(group_gc.import_rate);
-                has_values = true;
+                group_rates.first += static_cast<Scalar>(group_gc.consumption_rate);
+                group_rates.second += static_cast<Scalar>(group_gc.import_rate);
             }
 
-            // Update map if values are set
-            if (has_values) this->m_gconsump_rates.insert_or_assign(group_name, rates);
-            return has_values;
+            // Store the accumulated rates for this group
+            this->m_gconsump_rates.insert_or_assign(group_name, group_rates);
+            return group_rates;
         };
 
-    auto rates = std::pair { Scalar{0}, Scalar{0} };
-    gcr_recursive(gcr_recursive, "FIELD", rates);
+    // Start recursion from FIELD group
+    gcr_recursive(gcr_recursive, "FIELD");
 }
 
 template<class Scalar>
@@ -553,6 +578,13 @@ gconsump_rates(const std::string& gname) const {
         return it->second;
     }
     return zero_pair;
+}
+
+template<class Scalar>
+bool GroupState<Scalar>::has_production_group_potential(const std::string& gname) const
+{
+    auto group_iter = this->production_group_potentials.find(gname);
+    return (group_iter != this->production_group_potentials.end());
 }
 
 template<class Scalar>

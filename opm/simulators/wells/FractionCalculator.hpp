@@ -27,25 +27,26 @@
 
 namespace Opm {
 template<class Scalar> class GroupState;
-struct PhaseUsage;
 class Schedule;
-template<class Scalar> class WellState;
+template<typename Scalar, typename IndexTraits> class GroupStateHelper;
+template<typename Scalar, typename IndexTraits> class WellState;
 }
 
-namespace Opm::WGHelpers {
+namespace Opm::GroupStateHelpers
+ {
 
-template<class Scalar>
+template<typename Scalar, typename IndexTraits>
 class FractionCalculator
 {
 public:
+    using GroupStateHelperType = GroupStateHelper<Scalar, IndexTraits>;
+
     FractionCalculator(const Schedule& schedule,
-                       const WellState<Scalar>& well_state,
-                       const GroupState<Scalar>& group_state,
+                       const GroupStateHelperType& groupStateHelper,
                        const SummaryState& summary_state,
                        const int report_step,
                        const GuideRate* guide_rate,
                        const GuideRateModel::Target target,
-                       const PhaseUsage& pu,
                        const bool is_producer,
                        const Phase injection_phase);
     Scalar fraction(const std::string& name,
@@ -68,18 +69,19 @@ private:
     int groupControlledWells(const std::string& group_name,
                              const std::string& always_included_child);
     GuideRate::RateVector getGroupRateVector(const std::string& group_name);
+    const GroupStateHelperType& groupStateHelper() const { return groupStateHelper_; }
+
     const Schedule& schedule_;
-    const WellState<Scalar>& well_state_;
-    const GroupState<Scalar>& group_state_;
+    const GroupStateHelperType& groupStateHelper_;
     const SummaryState& summary_state_;
     int report_step_;
     const GuideRate* guide_rate_;
     GuideRateModel::Target target_;
-    const PhaseUsage& pu_;
     bool is_producer_;
     Phase injection_phase_;
 };
 
-} // namespace Opm::WGHelpers
+} // namespace Opm::GroupStateHelpers
+
 
 #endif // OPM_FRACTION_CALCULATOR_HEADER_INCLUDED

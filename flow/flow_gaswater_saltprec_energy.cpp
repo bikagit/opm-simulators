@@ -19,11 +19,14 @@
 #include <flow/flow_gaswater_saltprec_energy.hpp>
 
 #include <opm/material/common/ResetLocale.hpp>
+#include <opm/models/blackoil/blackoillocalresidualtpfa.hh>
 #include <opm/models/blackoil/blackoiltwophaseindices.hh>
+#include <opm/models/discretization/common/tpfalinearizer.hh>
 
 #include <opm/grid/CpGrid.hpp>
 #include <opm/simulators/flow/SimulatorFullyImplicitBlackoil.hpp>
 #include <opm/simulators/flow/Main.hpp>
+#include <opm/material/thermal/EnergyModuleType.hpp>
 
 namespace Opm {
 namespace Properties {
@@ -53,9 +56,17 @@ struct EnableDisgasInWater<TypeTag, TTag::FlowGasWaterSaltprecEnergyProblem> {
 };
 
 template<class TypeTag>
-struct EnableEnergy<TypeTag, TTag::FlowGasWaterSaltprecEnergyProblem> {
-    static constexpr bool value = true;
+struct Linearizer<TypeTag, TTag::FlowGasWaterSaltprecEnergyProblem> { 
+    using type = TpfaLinearizer<TypeTag>;
 };
+
+template<class TypeTag>
+struct LocalResidual<TypeTag, TTag::FlowGasWaterSaltprecEnergyProblem> {
+    using type = BlackOilLocalResidualTPFA<TypeTag>;
+};
+template<class TypeTag>
+struct EnergyModuleType<TypeTag, TTag::FlowGasWaterSaltprecEnergyProblem>
+{ static constexpr EnergyModules value = EnergyModules::FullyImplicitThermal; };
 
 //! The indices required by the model
 template<class TypeTag>
@@ -67,17 +78,20 @@ private:
     // messages unfortunately are *really* confusing and not really helpful.
     using BaseTypeTag = TTag::FlowProblem;
     using FluidSystem = GetPropType<BaseTypeTag, Properties::FluidSystem>;
-
+    static constexpr EnergyModules energyModuleType = getPropValue<TypeTag, Properties::EnergyModuleType>();
+    static constexpr int numEnergyVars = energyModuleType == EnergyModules::FullyImplicitThermal;
+    static constexpr bool enableSeqImpEnergy = energyModuleType == EnergyModules::SequentialImplicitThermal;
 public:
     using type = BlackOilTwoPhaseIndices<getPropValue<TypeTag, Properties::EnableSolvent>(),
                                          getPropValue<TypeTag, Properties::EnableExtbo>(),
                                          getPropValue<TypeTag, Properties::EnablePolymer>(),
-                                         getPropValue<TypeTag, Properties::EnableEnergy>(),
+                                         numEnergyVars,
+                                         enableSeqImpEnergy,
                                          getPropValue<TypeTag, Properties::EnableFoam>(),
                                          getPropValue<TypeTag, Properties::EnableBrine>(),
                                          /*PVOffset=*/0,
                                          /*disabledCompIdx=*/FluidSystem::oilCompIdx,
-                                         getPropValue<TypeTag, Properties::EnableMICP>()>;
+                                         getPropValue<TypeTag, Properties::EnableBioeffects>()>;
 };
 }}
 

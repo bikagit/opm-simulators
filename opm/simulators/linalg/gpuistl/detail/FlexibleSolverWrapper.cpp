@@ -24,7 +24,7 @@
 #include <dune/istl/schwarz.hh>
 
 #include <opm/simulators/linalg/FlexibleSolver.hpp>
-#include <opm/simulators/linalg/gpuistl/GpuSparseMatrix.hpp>
+#include <opm/simulators/linalg/gpuistl/GpuSparseMatrixWrapper.hpp>
 #include <opm/simulators/linalg/gpuistl/GpuOwnerOverlapCopy.hpp>
 
 namespace Opm::gpuistl::detail
@@ -35,7 +35,8 @@ namespace
     template <class Matrix, class Vector, class Comm>
     std::tuple<typename FlexibleSolverWrapper<Matrix, Vector, Comm>::AbstractOperatorPtrType,
                typename FlexibleSolverWrapper<Matrix, Vector, Comm>::AbstractSolverPtrType,
-               std::reference_wrapper<typename FlexibleSolverWrapper<Matrix, Vector, Comm>::AbstractPreconditionerType>>
+               std::reference_wrapper<typename FlexibleSolverWrapper<Matrix, Vector, Comm>::AbstractPreconditionerType>,
+               std::shared_ptr<typename FlexibleSolverWrapper<Matrix, Vector, Comm>::GpuCommunicationType>>
     createOperatorAndSolver(const Matrix& matrix,
                             [[maybe_unused]] bool parallel,
                             const PropertyTree& prm,
@@ -44,6 +45,7 @@ namespace
                             [[maybe_unused]] bool forceSerial,
                             [[maybe_unused]] const Comm* comm)
     {
+        using Wrapper = FlexibleSolverWrapper<Matrix, Vector, Comm>;
         if (!parallel || forceSerial) {
             // For now only matrix adapter is supported
             using OperatorType = Dune::MatrixAdapter<Matrix, Vector, Vector>;
@@ -54,19 +56,21 @@ namespace
             auto solverPtr = std::make_unique<SolverType>(*operatorPtr, prm, weightCalculator, pressureIndex);
             auto preconditioner = std::ref(solverPtr->preconditioner());
 
-            return std::make_tuple(std::move(operatorPtr), std::move(solverPtr), preconditioner);
-        } 
+            return std::make_tuple(std::move(operatorPtr), std::move(solverPtr), preconditioner,
+                                   std::shared_ptr<typename Wrapper::GpuCommunicationType>{});
+        }
 #if HAVE_MPI
         else {
             using real_type = typename Matrix::field_type;
-            using return_type = std::tuple<typename FlexibleSolverWrapper<Matrix, Vector, Comm>::AbstractOperatorPtrType,
-               typename FlexibleSolverWrapper<Matrix, Vector, Comm>::AbstractSolverPtrType,
-               std::reference_wrapper<typename FlexibleSolverWrapper<Matrix, Vector, Comm>::AbstractPreconditionerType>>;
-            
+            using return_type = std::tuple<typename Wrapper::AbstractOperatorPtrType,
+            typename Wrapper::AbstractSolverPtrType,
+            std::reference_wrapper<typename Wrapper::AbstractPreconditionerType>,
+            std::shared_ptr<typename Wrapper::GpuCommunicationType>>;
+
             // We need the block size at compile time to instantiate the correct types
             // hence we need to dispatch on the block size
             return matrix.dispatchOnBlocksize([&](auto blockSizeVal) -> return_type {
-                // Get the block size from the decltype of the blockSizeVal, 
+                // Get the block size from the decltype of the blockSizeVal,
                 // making it a compile time constant
                 constexpr int block_size = decltype(blockSizeVal)::value;
 
@@ -74,10 +78,10 @@ namespace
                 // time for GPU
                 using CudaCommunication = GpuOwnerOverlapCopy<real_type, Comm>;
                 using SchwarzOperator
-                    = Dune::OverlappingSchwarzOperator<GpuSparseMatrix<real_type>, Vector, Vector, CudaCommunication>;
-                
+                    = Dune::OverlappingSchwarzOperator<GpuSparseMatrixWrapper<real_type>, Vector, Vector, CudaCommunication>;
+
                 using SolverType = Dune::FlexibleSolver<SchwarzOperator>;
-                
+
                 // Create the communication object that will handle the GPU and MPI communication
                 auto cudaCommunication = makeGpuOwnerOverlapCopy<real_type, block_size, Comm>(*comm);
                 // Create the operator that will (through the communication object) handle the
@@ -87,7 +91,8 @@ namespace
                 auto preconditioner = std::ref(solverPtr->preconditioner());
 
                 return std::make_tuple(
-                    std::move(operatorPtr), std::move(solverPtr), preconditioner);
+                    std::move(operatorPtr), std::move(solverPtr), preconditioner,
+                    std::static_pointer_cast<typename Wrapper::GpuCommunicationType>(cudaCommunication));
             });
         }
 #else
@@ -114,11 +119,12 @@ FlexibleSolverWrapper<Matrix, Vector, Comm>::FlexibleSolverWrapper(const Matrix&
 
 template <class Matrix, class Vector, class Comm>
 FlexibleSolverWrapper<Matrix, Vector, Comm>::FlexibleSolverWrapper(
-    std::tuple<AbstractOperatorPtrType, AbstractSolverPtrType, std::reference_wrapper<AbstractPreconditionerType>>&&
+    std::tuple<AbstractOperatorPtrType, AbstractSolverPtrType, std::reference_wrapper<AbstractPreconditionerType>, std::shared_ptr<GpuCommunicationType>>&&
         solverTuple)
     : m_operator(std::move(std::get<0>(solverTuple)))
     , m_solver(std::move(std::get<1>(solverTuple)))
     , m_preconditioner(std::get<2>(solverTuple))
+    , m_gpuCommunication(std::get<3>(solverTuple))
 {
 }
 
@@ -146,7 +152,7 @@ using CommunicationType = Dune::Communication<int>;
 #endif
 
 #define INSTANTIATE_FLEXIBLE_SOLVER_WRAPPER(real_type)                                                                 \
-    template class ::Opm::gpuistl::detail::FlexibleSolverWrapper<::Opm::gpuistl::GpuSparseMatrix<real_type>,           \
+    template class ::Opm::gpuistl::detail::FlexibleSolverWrapper<::Opm::gpuistl::GpuSparseMatrixWrapper<real_type>,           \
                                                                  ::Opm::gpuistl::GpuVector<real_type>,                 \
                                                                  CommunicationType>
 

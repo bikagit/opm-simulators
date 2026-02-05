@@ -263,7 +263,7 @@ analyzeHierarchy()
 
 template <class Scalar, unsigned int block_size>
 void CprCreation<Scalar, block_size>::
-analyzeAggregateMaps() 
+analyzeAggregateMaps()
 {
     PcolIndices.resize(num_levels - 1);
     Rmatrices.clear();
@@ -308,7 +308,8 @@ analyzeAggregateMaps()
     template class CprCreation<T,3>; \
     template class CprCreation<T,4>; \
     template class CprCreation<T,5>; \
-    template class CprCreation<T,6>;
+    template class CprCreation<T,6>; \
+    template class CprCreation<T,7>;
 
 INSTANTIATE_TYPE(double)
 
@@ -317,5 +318,3 @@ INSTANTIATE_TYPE(float)
 #endif
 
 } // namespace Opm
-
-

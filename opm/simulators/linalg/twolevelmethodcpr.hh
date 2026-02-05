@@ -106,7 +106,7 @@ public:
    * coarse level system and initialies the left hand side
    * of the coarse level system. These can afterwards be accessed
    * usinf getCoarseLevelRhs() and getCoarseLevelLhs().
-   * @param fineDefect The current residual of the fine level system.
+   * @param fineRhs The current residual of the fine level system.
    */
   virtual void moveToCoarseLevel(const FineRangeType& fineRhs)=0;
   /**
@@ -328,7 +328,7 @@ private:
     {
       return amg_.category();
     }
-    
+
     ~AMGInverseOperator()
     {
       if(!first_)
@@ -420,19 +420,17 @@ public:
    * @brief The type of the fine level smoother.
    */
   typedef S SmootherType;
-  
+
   /**
    * @brief Constructs a two level method.
    *
-   * @tparam CoarseSolverPolicy The policy for constructing the coarse
-   * solver, e.g. OneStepAMGCoarseSolverPolicy
    * @param op The fine level operator.
    * @param smoother The fine level smoother.
    * @param policy The level transfer policy.
    * @param coarsePolicy The policy for constructing the coarse level solver.
    * @param preSteps The number of smoothing steps to apply before the coarse
    * level correction.
-   * @param preSteps The number of smoothing steps to apply after the coarse
+   * @param postSteps The number of smoothing steps to apply after the coarse
    * level correction.
    */
   TwoLevelMethodCpr(const FineOperatorType& op,
@@ -440,7 +438,7 @@ public:
                     const LevelTransferPolicyCpr<FineOperatorType,
                                                  CoarseOperatorType>& policy,
                     CoarseLevelSolverPolicy& coarsePolicy,
-                    std::size_t preSteps=1, std::size_t postSteps=1)
+                    std::size_t preSteps = 1, std::size_t postSteps = 1)
     : operator_(&op), smoother_(smoother),
       preSteps_(preSteps), postSteps_(postSteps)
   {
@@ -488,6 +486,12 @@ public:
 
   void pre(FineDomainType& x, FineRangeType& b)
   {
+    if (x.dim() != u_.dim()) {
+      u_.resize(x.dim());
+    }
+    if (b.dim() != rhs_.dim()) {
+      rhs_.resize(b.dim());
+    }
     smoother_->pre(x,b);
   }
 
@@ -503,15 +507,15 @@ public:
 
   void apply(FineDomainType& v, const FineRangeType& d)
   {
-    FineDomainType u(v);
-    FineRangeType rhs(d);
+    u_ = v;
+    rhs_ = d;
     LevelContext context;
     SequentialInformation info;
     context.pinfo=&info;
-    context.lhs=&u;
+    context.lhs=&u_;
     context.update=&v;
     context.smoother=smoother_;
-    context.rhs=&rhs;
+    context.rhs=&rhs_;
     context.matrix=operator_;
     // Presmoothing
     presmooth(context, preSteps_);
@@ -576,6 +580,10 @@ private:
   std::size_t preSteps_;
   /** @brief The number of postsmoothing steps to apply. */
   std::size_t postSteps_;
+  /** @brief Temporary vector for the left-hand side. */
+  mutable FineDomainType u_;
+  /** @brief Temporary vector for the right-hand side. */
+  mutable FineRangeType rhs_;
 };
 }// end namespace Amg
 }// end namespace Dune

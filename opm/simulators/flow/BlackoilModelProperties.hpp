@@ -37,7 +37,7 @@ namespace Opm::Properties {
 namespace TTag {
 
 struct FlowIstlSolver;
-struct FlowBaseProblemBlackoil;  
+struct FlowBaseProblemBlackoil;
 struct FlowProblem { using InheritsFrom = std::tuple<FlowBaseProblemBlackoil, BlackOilModel>; };
 
 }
@@ -66,14 +66,6 @@ struct EnableSolvent<TypeTag, TTag::FlowProblem>
 { static constexpr bool value = false; };
 
 template<class TypeTag>
-struct EnableTemperature<TypeTag, TTag::FlowProblem>
-{ static constexpr bool value = true; };
-
-template<class TypeTag>
-struct EnableEnergy<TypeTag, TTag::FlowProblem>
-{ static constexpr bool value = false; };
-
-template<class TypeTag>
 struct EnableFoam<TypeTag, TTag::FlowProblem>
 { static constexpr bool value = false; };
 
@@ -86,7 +78,7 @@ struct EnableSaltPrecipitation<TypeTag, TTag::FlowProblem>
 { static constexpr bool value = false; };
 
 template<class TypeTag>
-struct EnableMICP<TypeTag, TTag::FlowProblem>
+struct EnableBioeffects<TypeTag, TTag::FlowProblem>
 { static constexpr bool value = false; };
 
 template<class TypeTag>

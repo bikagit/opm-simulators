@@ -22,6 +22,7 @@
 
 #include <opm/models/utils/propertysystem.hh>
 #include <opm/models/utils/parametersystem.hpp>
+#include <opm/models/blackoil/blackoilmodel.hh>
 #include <opm/models/discretization/common/fvbaseproperties.hh>
 #include <opm/simulators/wells/GasLiftSingleWellGeneric.hpp>
 #include <opm/simulators/wells/GasLiftGroupInfo.hpp>
@@ -33,33 +34,37 @@ namespace Opm {
 template<class TypeTag> class WellInterface;
 
 template<class TypeTag>
-class GasLiftSingleWell : public GasLiftSingleWellGeneric<GetPropType<TypeTag, Properties::Scalar>>
+class GasLiftSingleWell : public GasLiftSingleWellGeneric<GetPropType<TypeTag, Properties::Scalar>,
+                                         typename GetPropType<TypeTag, Properties::FluidSystem>::IndexTraitsType>
 {
     using Scalar = GetPropType<TypeTag, Properties::Scalar>;
     using Simulator = GetPropType<TypeTag, Properties::Simulator>;
-    using GLiftSyncGroups = typename GasLiftSingleWellGeneric<Scalar>::GLiftSyncGroups;
-    using BasicRates = typename GasLiftSingleWellGeneric<Scalar>::BasicRates;
+    using FluidSystem = GetPropType<TypeTag, Properties::FluidSystem>;
+    using IndexTraits = typename FluidSystem::IndexTraitsType;
+    using GLiftSyncGroups = typename GasLiftSingleWellGeneric<Scalar, IndexTraits>::GLiftSyncGroups;
+    using RatesAndBhp = typename GasLiftSingleWellGeneric<Scalar, IndexTraits>::RatesAndBhp;
 
 public:
-    GasLiftSingleWell(const WellInterface<TypeTag>& well,
+    GasLiftSingleWell(WellInterface<TypeTag>& well,
                       const Simulator& simulator,
                       const SummaryState& summary_state,
                       DeferredLogger& deferred_logger,
-                      WellState<Scalar>& well_state,
+                      WellState<Scalar, IndexTraits>& well_state,
                       const GroupState<Scalar>& group_state,
-                      GasLiftGroupInfo<Scalar>& group_info,
+                      GasLiftGroupInfo<Scalar, IndexTraits>& group_info,
                       GLiftSyncGroups& sync_groups,
                       const Parallel::Communication& comm,
                       bool glift_debug);
 
-    const WellInterfaceGeneric<Scalar>& getWell() const override { return well_; }
+    const WellInterfaceGeneric<Scalar, IndexTraits>& getWell() const override { return well_; }
 
 private:
     std::optional<Scalar>
     computeBhpAtThpLimit_(Scalar alq,
+                          Scalar bhp,
                           bool debug_ouput = true) const override;
 
-    BasicRates computeWellRates_(Scalar bhp,
+    RatesAndBhp computeWellRates_(Scalar bhp,
                                  bool bhp_is_limited,
                                  bool debug_output = true) const override;
 
@@ -68,7 +73,7 @@ private:
     bool checkThpControl_() const override;
 
     const Simulator& simulator_;
-    const WellInterface<TypeTag>& well_;
+    WellInterface<TypeTag>& well_;
 };
 
 } // namespace Opm

@@ -111,7 +111,7 @@ public:
     ///
     /// Throws an exception if no sub tree exists at given root.
     ///
-    /// \param[in] Property key.  Expected to be in hierarchical
+    /// \param[in] key Property key.  Expected to be in hierarchical
     /// notation for subtrees--i.e., using periods ('.') to separate
     /// hierarchy levels.
     ///
@@ -120,7 +120,7 @@ public:
 
     /// Retrieve copy of sub tree rooted at node.
     ///
-    /// \param[in] Property key.  Expected to be in hierarchical
+    /// \param[in] key Property key.  Expected to be in hierarchical
     /// notation for subtrees--i.e., using periods ('.') to separate
     /// hierarchy levels.
     ///
@@ -128,6 +128,11 @@ public:
     /// sub tree exists that is rooted at \p key.
     std::optional<PropertyTree>
     get_child_optional(const std::string& key) const;
+
+    /// Retrieve all child keys of this property tree node
+    ///
+    /// \return Vector of strings containing the names of all immediate children
+    std::vector<std::string> get_child_keys() const;
 
     /// Retrieve node items as linearised vector.
     ///

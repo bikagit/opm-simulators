@@ -47,6 +47,7 @@
 #include <opm/models/discretization/common/baseauxiliarymodule.hh>
 #include <opm/models/discretization/common/fvbaseproperties.hh>
 #include <opm/models/discretization/common/linearizationtype.hh>
+#include <opm/simulators/linalg/exportSystem.hpp>
 
 #include <cassert>
 #include <cstddef>
@@ -60,6 +61,23 @@
 #include <unordered_map>
 #include <vector>
 
+#include <fmt/format.h>
+
+#include <opm/common/utility/gpuDecorators.hpp>
+#if HAVE_CUDA
+#if USE_HIP
+#include <opm/simulators/linalg/gpuistl_hip/GpuBuffer.hpp>
+#include <opm/simulators/linalg/gpuistl_hip/GpuView.hpp>
+#include <opm/simulators/linalg/gpuistl_hip/MiniMatrix.hpp>
+#include <opm/simulators/linalg/gpuistl_hip/MiniVector.hpp>
+#else
+#include <opm/simulators/linalg/gpuistl/GpuBuffer.hpp>
+#include <opm/simulators/linalg/gpuistl/GpuView.hpp>
+#include <opm/simulators/linalg/gpuistl/MiniMatrix.hpp>
+#include <opm/simulators/linalg/gpuistl/MiniVector.hpp>
+#endif
+#endif
+
 namespace Opm::Parameters {
 
 struct SeparateSparseSourceTerms { static constexpr bool value = false; };
@@ -71,6 +89,91 @@ namespace Opm {
 // forward declarations
 template<class TypeTag>
 class EcfvDiscretization;
+
+// Moved these structs out of the class to make them visible in the GPU code.
+template<class Storage = std::vector<int>>
+struct FullDomain
+{
+    Storage cells;
+};
+
+#if HAVE_CUDA && OPM_IS_COMPILING_WITH_GPU_COMPILER
+    FullDomain<gpuistl::GpuBuffer<int>> copy_to_gpu(FullDomain<> CPUDomain)
+    {
+        if (CPUDomain.cells.size() == 0) {
+            OPM_THROW(std::runtime_error, "Cannot copy empty full domain to GPU.");
+        }
+        return FullDomain<gpuistl::GpuBuffer<int>>{
+            gpuistl::GpuBuffer<int>(CPUDomain.cells)
+        };
+    };
+
+    FullDomain<gpuistl::GpuView<int>> make_view(FullDomain<gpuistl::GpuBuffer<int>>& buffer)
+    {
+        if (buffer.cells.size() == 0) {
+            OPM_THROW(std::runtime_error, "Cannot make view of empty full domain buffer.");
+        }
+        return FullDomain<gpuistl::GpuView<int>>{
+            gpuistl::make_view(buffer.cells)
+        };
+    };
+#endif
+
+template <class ResidualNBInfoType,class BlockType>
+struct NeighborInfoStruct
+{
+    unsigned int neighbor;
+    ResidualNBInfoType res_nbinfo;
+    BlockType* matBlockAddress;
+
+    template <class OtherBlockType>
+    NeighborInfoStruct(const NeighborInfoStruct<ResidualNBInfoType,OtherBlockType>& other)
+        : neighbor(other.neighbor)
+        , res_nbinfo(other.res_nbinfo)
+        , matBlockAddress(nullptr)
+    {
+        if (other.matBlockAddress) {
+            matBlockAddress = reinterpret_cast<BlockType*>(other.matBlockAddress);
+        }
+    }
+
+    template <class PtrType>
+    NeighborInfoStruct(unsigned int n, const ResidualNBInfoType& r, PtrType ptr)
+        : neighbor(n)
+        , res_nbinfo(r)
+        , matBlockAddress(static_cast<BlockType*>(ptr))
+    {
+    }
+
+    // Add a default constructor
+    NeighborInfoStruct()
+        : neighbor(0)
+        , res_nbinfo()
+        , matBlockAddress(nullptr)
+    {
+    }
+};
+
+#if HAVE_CUDA && OPM_IS_COMPILING_WITH_GPU_COMPILER
+namespace  gpuistl {
+    template<class MiniMatrixType, class MatrixBlockType, class ResidualNBInfoType>
+    auto copy_to_gpu(const SparseTable<NeighborInfoStruct<ResidualNBInfoType, MatrixBlockType>>& cpuNeighborInfoTable)
+    {
+        // Convert the DUNE FieldMatrix/MatrixBlock to MiniMatrix types
+        using StructWithMinimatrix = NeighborInfoStruct<ResidualNBInfoType, MiniMatrixType>;
+        std::vector<StructWithMinimatrix> minimatrices(cpuNeighborInfoTable.dataSize());
+        size_t idx = 0;
+        for (auto e : cpuNeighborInfoTable.dataStorage()) {
+            minimatrices[idx++] = StructWithMinimatrix(e);
+        }
+
+        return SparseTable<StructWithMinimatrix, gpuistl::GpuBuffer>(
+            gpuistl::GpuBuffer<StructWithMinimatrix>(minimatrices),
+            gpuistl::GpuBuffer<int>(cpuNeighborInfoTable.rowStarts())
+        );
+    }
+}
+#endif
 
 /*!
  * \ingroup FiniteVolumeDiscretizations
@@ -100,6 +203,7 @@ class TpfaLinearizer
     using Stencil = GetPropType<TypeTag, Properties::Stencil>;
     using LocalResidual = GetPropType<TypeTag, Properties::LocalResidual>;
     using IntensiveQuantities = GetPropType<TypeTag, Properties::IntensiveQuantities>;
+    using Indices = GetPropType<TypeTag, Properties::Indices>;
 
     using Element = typename GridView::template Codim<0>::Entity;
     using ElementIterator = typename GridView::template Codim<0>::Iterator;
@@ -114,12 +218,17 @@ class TpfaLinearizer
     using VectorBlock = Dune::FieldVector<Scalar, numEq>;
     using ADVectorBlock = GetPropType<TypeTag, Properties::RateVector>;
 
+#if HAVE_CUDA && OPM_IS_COMPILING_WITH_GPU_COMPILER
+    using MatrixBlockGPU = gpuistl::MiniMatrix<Scalar, numEq * numEq>;
+    using VectorBlockGPU = gpuistl::MiniVector<Scalar, numEq>;
+#endif
+
     static constexpr bool linearizeNonLocalElements =
         getPropValue<TypeTag, Properties::LinearizeNonLocalElements>();
-    static constexpr bool enableEnergy = getPropValue<TypeTag, Properties::EnableEnergy>();
+    static constexpr bool enableFullyImplicitThermal = (getPropValue<TypeTag, Properties::EnergyModuleType>() == EnergyModules::FullyImplicitThermal);
     static constexpr bool enableDiffusion = getPropValue<TypeTag, Properties::EnableDiffusion>();
     static constexpr bool enableDispersion = getPropValue<TypeTag, Properties::EnableDispersion>();
-    static constexpr bool enableMICP = getPropValue<TypeTag, Properties::EnableMICP>();
+    static const bool enableBioeffects = getPropValue<TypeTag, Properties::EnableBioeffects>();
 
     // copying the linearizer is not a good idea
     TpfaLinearizer(const TpfaLinearizer&) = delete;
@@ -130,6 +239,8 @@ public:
     {
         simulatorPtr_ = nullptr;
         separateSparseSourceTerms_ = Parameters::Get<Parameters::SeparateSparseSourceTerms>();
+        exportIndex_=-1;
+        exportCount_=-1;
     }
 
     /*!
@@ -228,9 +339,12 @@ public:
      *
      * The current state of affairs (esp. the previous and the current solutions) is
      * represented by the model object.
+     *
+     * \param domain The subdomain to linearize.
+     * \param isNlddLocalSolve If true, indicates this is an NLDD local solve.
      */
     template <class SubDomainType>
-    void linearizeDomain(const SubDomainType& domain)
+    void linearizeDomain(const SubDomainType& domain, const bool isNlddLocalSolve = false)
     {
         OPM_TIMEBLOCK(linearizeDomain);
         // we defer the initialization of the Jacobian matrix until here because the
@@ -241,15 +355,14 @@ public:
         }
 
         // Called here because it is no longer called from linearize_().
-        if (domain.cells.size() == model_().numTotalDof()) {
-            // We are on the full domain.
-            resetSystem_();
-        }
-        else {
+        if (isNlddLocalSolve) {
             resetSystem_(domain);
         }
+        else {
+            resetSystem_();
+        }
 
-        linearize_(domain);
+        linearize_(domain, isNlddLocalSolve);
     }
 
     void finalize()
@@ -306,6 +419,24 @@ public:
     GlobalEqVector& residual()
     { return residual_; }
 
+    /*!
+     * \brief Export block sparse linear system.
+     */
+    void exportSystem(const int idx, std::string& tag, const char *path="export")
+    {
+        const bool export_sparsity = exportIndex_ == -1;
+
+        // increment indices and generate tag
+        exportCount_ = exportIndex_ == idx ? ++exportCount_ : 0;
+        exportIndex_ = idx;
+        tag = fmt::format("_{:03d}_{:02d}", exportIndex_, exportCount_);
+
+        fmt::print("index = {:d}\n", exportIndex_);
+        fmt::print("count = {:d}\n", exportCount_);
+
+        Opm::exportSystem(jacobian_->istlMatrix(), residual_, export_sparsity, tag.c_str(), path);
+    }
+
     void setLinearizationType(LinearizationType linearizationType)
     { linearizationType_ = linearizationType; }
 
@@ -335,6 +466,11 @@ public:
      */
     const auto& getVelocityInfo() const
     { return velocityInfo_; }
+
+    const auto& getNeighborInfo() const {
+        return neighborInfo_;
+    }
+
 
     void updateDiscretizationParameters()
     {
@@ -434,7 +570,7 @@ private:
         const Scalar gravity = problem_().gravity()[dimWorld - 1];
         unsigned numCells = model.numTotalDof();
         neighborInfo_.reserve(numCells, 6 * numCells);
-        std::vector<NeighborInfo> loc_nbinfo;
+        std::vector<NeighborInfoCPU> loc_nbinfo;
         for (const auto& elem : elements(gridView_())) {
             stencil.update(elem);
 
@@ -460,7 +596,7 @@ private:
                         auto faceDir = dirId < 0 ? FaceDir::DirEnum::Unknown
                                                  : FaceDir::FromIntersectionIndex(dirId);
                         ResidualNBInfo nbinfo{trans, area, thpres, dZg, faceDir, Vin, Vex, {}, {}, {}, {}};
-                        if constexpr (enableEnergy) {
+                        if constexpr (enableFullyImplicitThermal) {
                             nbinfo.inAlpha = problem_().thermalHalfTransmissibility(myIdx, neighborIdx);
                             nbinfo.outAlpha = problem_().thermalHalfTransmissibility(neighborIdx, myIdx);
                         }
@@ -470,7 +606,7 @@ private:
                         if constexpr (enableDispersion) {
                             nbinfo.dispersivity = problem_().dispersivity(myIdx, neighborIdx);
                         }
-                        loc_nbinfo[dofIdx - 1] = NeighborInfo{neighborIdx, nbinfo, nullptr};
+                        loc_nbinfo[dofIdx - 1] = NeighborInfoCPU{neighborIdx, nbinfo, nullptr};
                     }
                 }
                 neighborInfo_.appendRow(loc_nbinfo.begin(), loc_nbinfo.end());
@@ -546,7 +682,7 @@ private:
                               simulator_().problem().eclWriter().outputModule().getFlows().hasBlockFlows();
         const bool anyFlores = simulator_().problem().eclWriter().outputModule().getFlows().anyFlores();
         const bool dispersionActive = simulator_().vanguard().eclState().getSimulationConfig().rock_config().dispersion();
-        if (((!anyFlows || !flowsInfo_.empty()) && (!anyFlores || !floresInfo_.empty())) && (!dispersionActive && !enableMICP)) {
+        if (((!anyFlows || !flowsInfo_.empty()) && (!anyFlores || !floresInfo_.empty())) && (!dispersionActive && !enableBioeffects)) {
             return;
         }
         const auto& model = model_();
@@ -572,7 +708,7 @@ private:
         if (anyFlores) {
             floresInfo_.reserve(numCells, 6 * numCells);
         }
-        if (dispersionActive || enableMICP) {
+        if (dispersionActive || enableBioeffects) {
             velocityInfo_.reserve(numCells, 6 * numCells);
         }
 
@@ -604,7 +740,7 @@ private:
                         loc_flinfo[dofIdx - 1] = FlowInfo{faceId, flow, nncId};
                         loc_vlinfo[dofIdx - 1] = VelocityInfo{flow};
                     }
-                } 
+                }
 
                 for (unsigned bdfIdx = 0; bdfIdx < stencil.numBoundaryFaces(); ++bdfIdx) {
                     const auto& scvf = stencil.boundaryFace(bdfIdx);
@@ -618,7 +754,7 @@ private:
                 if (anyFlores) {
                     floresInfo_.appendRow(loc_flinfo.begin(), loc_flinfo.end());
                 }
-                if (dispersionActive || enableMICP) {
+                if (dispersionActive || enableBioeffects) {
                     velocityInfo_.appendRow(loc_vlinfo.begin(), loc_vlinfo.end());
                 }
             }
@@ -657,23 +793,23 @@ public:
 #pragma omp parallel for
 #endif
         for (unsigned globI = 0; globI < numCells; ++globI) {
-            OPM_TIMEBLOCK_LOCAL(linearizationForEachCell);
+            OPM_TIMEBLOCK_LOCAL(linearizationForEachCell, Subsystem::Assembly);
             const auto& nbInfos = neighborInfo_[globI];
             ADVectorBlock adres(0.0);
             ADVectorBlock darcyFlux(0.0);
             const IntensiveQuantities& intQuantsIn = model_().intensiveQuantities(globI, /*timeIdx*/ 0);
             // Flux term.
             {
-                OPM_TIMEBLOCK_LOCAL(fluxCalculationForEachCell);
+                OPM_TIMEBLOCK_LOCAL(fluxCalculationForEachCell, Subsystem::Assembly);
                 short loc = 0;
                 for (const auto& nbInfo : nbInfos) {
-                    OPM_TIMEBLOCK_LOCAL(fluxCalculationForEachFace);
+                    OPM_TIMEBLOCK_LOCAL(fluxCalculationForEachFace, Subsystem::Assembly);
                     const unsigned globJ = nbInfo.neighbor;
                     assert(globJ != globI);
                     adres = 0.0;
                     darcyFlux = 0.0;
                     const IntensiveQuantities& intQuantsEx = model_().intensiveQuantities(globJ, /*timeIdx*/ 0);
-                    LocalResidual::computeFlux(adres,darcyFlux, globI, globJ, intQuantsIn,
+                    LocalResidual::computeFlux(adres, darcyFlux, globI, globJ, intQuantsIn,
                                                intQuantsEx, nbInfo.res_nbinfo, problem_().moduleParams());
                     adres *= nbInfo.res_nbinfo.faceArea;
                     if (enableFlows) {
@@ -715,7 +851,7 @@ public:
 
 private:
     template <class SubDomainType>
-    void linearize_(const SubDomainType& domain)
+    void linearize_(const SubDomainType& domain, bool isNlddLocalSolve)
     {
         // This check should be removed once this is addressed by
         // for example storing the previous timesteps' values for
@@ -733,13 +869,15 @@ private:
         // Instead, that must be called before starting the linearization.
         const bool dispersionActive = simulator_().vanguard().eclState().getSimulationConfig().rock_config().dispersion();
         const unsigned int numCells = domain.cells.size();
-        const bool on_full_domain = (numCells == model_().numTotalDof());
+
+        // Fetch timestepsize used later in accumulation term.
+        const double dt = simulator_().timeStepSize();
 
 #ifdef _OPENMP
 #pragma omp parallel for
 #endif
         for (unsigned ii = 0; ii < numCells; ++ii) {
-            OPM_TIMEBLOCK_LOCAL(linearizationForEachCell);
+            OPM_TIMEBLOCK_LOCAL(linearizationForEachCell, Subsystem::Assembly);
             const unsigned globI = domain.cells[ii];
             const auto& nbInfos = neighborInfo_[globI];
             VectorBlock res(0.0);
@@ -750,10 +888,10 @@ private:
 
             // Flux term.
             {
-                OPM_TIMEBLOCK_LOCAL(fluxCalculationForEachCell);
+                OPM_TIMEBLOCK_LOCAL(fluxCalculationForEachCell, Subsystem::Assembly);
                 short loc = 0;
                 for (const auto& nbInfo : nbInfos) {
-                    OPM_TIMEBLOCK_LOCAL(fluxCalculationForEachFace);
+                    OPM_TIMEBLOCK_LOCAL(fluxCalculationForEachFace, Subsystem::Assembly);
                     const unsigned globJ = nbInfo.neighbor;
                     assert(globJ != globI);
                     res = 0.0;
@@ -761,10 +899,10 @@ private:
                     adres = 0.0;
                     darcyFlux = 0.0;
                     const IntensiveQuantities& intQuantsEx = model_().intensiveQuantities(globJ, /*timeIdx*/ 0);
-                    LocalResidual::computeFlux(adres,darcyFlux, globI, globJ, intQuantsIn, intQuantsEx,
-                                               nbInfo.res_nbinfo,  problem_().moduleParams());
+                    LocalResidual::computeFlux(adres, darcyFlux, globI, globJ, intQuantsIn, intQuantsEx,
+                                               nbInfo.res_nbinfo, problem_().moduleParams());
                     adres *= nbInfo.res_nbinfo.faceArea;
-                    if (dispersionActive || enableMICP) {
+                    if (dispersionActive || enableBioeffects) {
                         for (unsigned phaseIdx = 0; phaseIdx < numEq; ++phaseIdx) {
                             velocityInfo_[globI][loc].velocity[phaseIdx] =
                                 darcyFlux[phaseIdx].value() / nbInfo.res_nbinfo.faceArea;
@@ -782,12 +920,11 @@ private:
             }
 
             // Accumulation term.
-            const double dt = simulator_().timeStepSize();
             const double volume = model_().dofTotalVolume(globI);
             const Scalar storefac = volume / dt;
             adres = 0.0;
             {
-                OPM_TIMEBLOCK_LOCAL(computeStorage);
+                OPM_TIMEBLOCK_LOCAL(computeStorage, Subsystem::Assembly);
                 LocalResidual::computeStorage(adres, intQuantsIn);
             }
             setResAndJacobi(res, bMat, adres);
@@ -797,20 +934,18 @@ private:
                 // used, but after storage cache is shifted at the end of the
                 // timestep, it will become cached storage for timeIdx 1.
                 model_().updateCachedStorage(globI, /*timeIdx=*/0, res);
-                if (model_().newtonMethod().numIterations() == 0) {
+                // We should not update the storage cache here for NLDD local solves.
+                // This will reset the start-of-step storage to incorrect numbers when
+                // we do local solves, where the iteration number will start from 0,
+                // but the starting state may not be identical to the start-of-step state.
+                // Note that a full assembly must be done before local solves
+                // otherwise this will be left un-updated.
+                if (model_().newtonMethod().numIterations() == 0 && !isNlddLocalSolve) {
                     // Need to update the storage cache.
                     if (problem_().recycleFirstIterationStorage()) {
                         // Assumes nothing have changed in the system which
                         // affects masses calculated from primary variables.
-                        if (on_full_domain) {
-                            // This is to avoid resetting the start-of-step storage
-                            // to incorrect numbers when we do local solves, where the iteration
-                            // number will start from 0, but the starting state may not be identical
-                            // to the start-of-step state.
-                            // Note that a full assembly must be done before local solves
-                            // otherwise this will be left un-updated.
-                            model_().updateCachedStorage(globI, /*timeIdx=*/1, res);
-                        }
+                        model_().updateCachedStorage(globI, /*timeIdx=*/1, res);
                     }
                     else {
                         Dune::FieldVector<Scalar, numEq> tmp;
@@ -822,7 +957,7 @@ private:
                 res -= model_().cachedStorage(globI, 1);
             }
             else {
-                OPM_TIMEBLOCK_LOCAL(computeStorage0);
+                OPM_TIMEBLOCK_LOCAL(computeStorage0, Subsystem::Assembly);
                 Dune::FieldVector<Scalar, numEq> tmp;
                 const IntensiveQuantities intQuantOld = model_().intensiveQuantities(globI, 1);
                 LocalResidual::computeStorage(tmp, intQuantOld);
@@ -911,13 +1046,9 @@ private:
     LinearizationType linearizationType_{};
 
     using ResidualNBInfo = typename LocalResidual::ResidualNBInfo;
-    struct NeighborInfo
-    {
-        unsigned int neighbor;
-        ResidualNBInfo res_nbinfo;
-        MatrixBlock* matBlockAddress;
-    };
-    SparseTable<NeighborInfo> neighborInfo_{};
+    using NeighborInfoCPU = NeighborInfoStruct<ResidualNBInfo, MatrixBlock>;
+
+    SparseTable<NeighborInfoCPU> neighborInfo_{};
     std::vector<MatrixBlock*> diagMatAddress_{};
 
     struct FlowInfo
@@ -958,14 +1089,11 @@ private:
 
     bool separateSparseSourceTerms_ = false;
 
-    struct FullDomain
-    {
-        std::vector<int> cells;
-        std::vector<bool> interior;
-    };
-    FullDomain fullDomain_;
-};
+    FullDomain<> fullDomain_;
 
+    int exportIndex_;
+    int exportCount_;
+};
 } // namespace Opm
 
 #endif // TPFA_LINEARIZER

@@ -22,7 +22,7 @@
 #include <memory>
 #include <opm/grid/utility/SparseTable.hpp>
 #include <opm/simulators/linalg/PreconditionerWithUpdate.hpp>
-#include <opm/simulators/linalg/gpuistl/GpuSparseMatrix.hpp>
+#include <opm/simulators/linalg/gpuistl/GpuSparseMatrixWrapper.hpp>
 #include <opm/simulators/linalg/gpuistl/GpuVector.hpp>
 #include <opm/simulators/linalg/gpuistl/gpu_resources.hpp>
 #include <opm/simulators/linalg/gpuistl/detail/kernel_enums.hpp>
@@ -57,21 +57,28 @@ public:
     //! \brief The field type of the preconditioner.
     using field_type = typename X::field_type;
     //! \brief The GPU matrix type
-    using GpuMatrix = GpuSparseMatrix<field_type>;
+    using GpuMatrix = GpuSparseMatrixWrapper<field_type>;
     //! \brief The Float matrix type for mixed precision
-    using FloatMat = GpuSparseMatrix<float>;
+    using FloatMat = GpuSparseMatrixWrapper<float>;
 
     //! \brief The matrix type the preconditioner is for.
     using matrix_type = GpuMatrix;
-    
+
 
     //! \brief Constructor.
     //!
     //!  Constructor gets all parameters to operate the prec.
-    //! \param A The matrix to operate on.
-    //! \param w The relaxation factor.
+    //! \param gpuMatrix The GPU matrix to operate on.
+    //! \param cpuMatrix The CPU matrix to operate on.
+    //! \param splitMatrix True to split matrix
+    //! \param tuneKernels True to tune kernels
+    //! \param mixedPrecisionScheme Mixed precision scheme to use
     //!
-    explicit OpmGpuILU0(const GpuMatrix& gpuMatrix, const CPUMatrixT& cpuMatrix, bool splitMatrix, bool tuneKernels, int mixedPrecisionScheme);
+    explicit OpmGpuILU0(const GpuMatrix& gpuMatrix,
+                        const CPUMatrixT& cpuMatrix,
+                        bool splitMatrix,
+                        bool tuneKernels,
+                        int mixedPrecisionScheme);
 
     //! \brief Prepare the preconditioner.
     //! \note Does nothing at the time being.

@@ -35,6 +35,7 @@
 #include <opm/material/fluidstates/BlackOilFluidState.hpp>
 #include <opm/material/common/ConditionalStorage.hpp>
 
+#include <opm/models/blackoil/blackoilbioeffectsmodules.hh>
 #include <opm/models/blackoil/blackoilbrinemodules.hh>
 #include <opm/models/blackoil/blackoilconvectivemixingmodule.hh>
 #include <opm/models/blackoil/blackoildiffusionmodule.hh>
@@ -42,7 +43,6 @@
 #include <opm/models/blackoil/blackoilenergymodules.hh>
 #include <opm/models/blackoil/blackoilextbomodules.hh>
 #include <opm/models/blackoil/blackoilfoammodules.hh>
-#include <opm/models/blackoil/blackoilmicpmodules.hh>
 #include <opm/models/blackoil/blackoilpolymermodules.hh>
 #include <opm/models/blackoil/blackoilproperties.hh>
 #include <opm/models/blackoil/blackoilsolventmodules.hh>
@@ -67,7 +67,6 @@ class BlackOilLocalResidualTPFA : public GetPropType<TypeTag, Properties::DiscLo
     using Indices = GetPropType<TypeTag, Properties::Indices>;
     using Scalar = GetPropType<TypeTag, Properties::Scalar>;
     using Evaluation = GetPropType<TypeTag, Properties::Evaluation>;
-    using EqVector = GetPropType<TypeTag, Properties::EqVector>;
     using RateVector = GetPropType<TypeTag, Properties::RateVector>;
     using FluidSystem = GetPropType<TypeTag, Properties::FluidSystem>;
     using GridView = GetPropType<TypeTag, Properties::GridView>;
@@ -100,13 +99,15 @@ class BlackOilLocalResidualTPFA : public GetPropType<TypeTag, Properties::DiscLo
     static constexpr bool enableSolvent = getPropValue<TypeTag, Properties::EnableSolvent>();
     static constexpr bool enableExtbo = getPropValue<TypeTag, Properties::EnableExtbo>();
     static constexpr bool enablePolymer = getPropValue<TypeTag, Properties::EnablePolymer>();
-    static constexpr bool enableEnergy = getPropValue<TypeTag, Properties::EnableEnergy>();
+    static constexpr bool enableFullyImplicitThermal = (getPropValue<TypeTag, Properties::EnergyModuleType>() == EnergyModules::FullyImplicitThermal);
     static constexpr bool enableFoam = getPropValue<TypeTag, Properties::EnableFoam>();
     static constexpr bool enableBrine = getPropValue<TypeTag, Properties::EnableBrine>();
     static constexpr bool enableDiffusion = getPropValue<TypeTag, Properties::EnableDiffusion>();
     static constexpr bool enableDispersion = getPropValue<TypeTag, Properties::EnableDispersion>();
     static constexpr bool enableConvectiveMixing = getPropValue<TypeTag, Properties::EnableConvectiveMixing>();
-    static constexpr bool enableMICP = getPropValue<TypeTag, Properties::EnableMICP>();
+    static constexpr bool enableBioeffects = getPropValue<TypeTag, Properties::EnableBioeffects>();
+    static constexpr bool enableSaltPrecipitation = getPropValue<TypeTag, Properties::EnableSaltPrecipitation>();
+    static constexpr bool enableMICP = Indices::enableMICP;
 
     using SolventModule = BlackOilSolventModule<TypeTag>;
     using ExtboModule = BlackOilExtboModule<TypeTag>;
@@ -119,7 +120,7 @@ class BlackOilLocalResidualTPFA : public GetPropType<TypeTag, Properties::DiscLo
     using ConvectiveMixingModuleParam = typename ConvectiveMixingModule::ConvectiveMixingModuleParam;
 
     using DispersionModule = BlackOilDispersionModule<TypeTag, enableDispersion>;
-    using MICPModule = BlackOilMICPModule<TypeTag>;
+    using BioeffectsModule = BlackOilBioeffectsModule<TypeTag>;
 
     using Toolbox = MathToolbox<Evaluation>;
 
@@ -133,8 +134,8 @@ public:
         FaceDir::DirEnum faceDir;
         double Vin;
         double Vex;
-        ConditionalStorage<enableEnergy, double> inAlpha;
-        ConditionalStorage<enableEnergy, double> outAlpha;
+        ConditionalStorage<enableFullyImplicitThermal, double> inAlpha;
+        ConditionalStorage<enableFullyImplicitThermal, double> outAlpha;
         ConditionalStorage<enableDiffusion, double> diffusivity;
         ConditionalStorage<enableDispersion, double> dispersivity;
     };
@@ -161,7 +162,7 @@ public:
     static void computeStorage(Dune::FieldVector<LhsEval, numEq>& storage,
                                const IntensiveQuantities& intQuants)
     {
-        OPM_TIMEBLOCK_LOCAL(computeStorage);
+        OPM_TIMEBLOCK_LOCAL(computeStorage, Subsystem::Assembly);
         // retrieve the intensive quantities for the SCV at the specified point in time
         const auto& fs = intQuants.fluidState();
         storage = 0.0;
@@ -171,7 +172,7 @@ public:
                 continue;
             }
             unsigned activeCompIdx =
-                Indices::canonicalToActiveComponentIndex(FluidSystem::solventComponentIndex(phaseIdx));
+                FluidSystem::canonicalToActiveCompIdx(FluidSystem::solventComponentIndex(phaseIdx));
             LhsEval surfaceVolume =
                 Toolbox::template decay<LhsEval>(fs.saturation(phaseIdx)) *
                 Toolbox::template decay<LhsEval>(fs.invB(phaseIdx)) *
@@ -181,7 +182,7 @@ public:
 
             // account for dissolved gas
             if (phaseIdx == oilPhaseIdx && FluidSystem::enableDissolvedGas()) {
-                unsigned activeGasCompIdx = Indices::canonicalToActiveComponentIndex(gasCompIdx);
+                unsigned activeGasCompIdx = FluidSystem::canonicalToActiveCompIdx(gasCompIdx);
                 storage[conti0EqIdx + activeGasCompIdx] +=
                     Toolbox::template decay<LhsEval>(intQuants.fluidState().Rs()) *
                     surfaceVolume;
@@ -189,7 +190,7 @@ public:
 
             // account for dissolved gas in water
             if (phaseIdx == waterPhaseIdx && FluidSystem::enableDissolvedGasInWater()) {
-                unsigned activeGasCompIdx = Indices::canonicalToActiveComponentIndex(gasCompIdx);
+                unsigned activeGasCompIdx = FluidSystem::canonicalToActiveCompIdx(gasCompIdx);
                 storage[conti0EqIdx + activeGasCompIdx] +=
                     Toolbox::template decay<LhsEval>(intQuants.fluidState().Rsw()) *
                     surfaceVolume;
@@ -197,7 +198,7 @@ public:
 
             // account for vaporized oil
             if (phaseIdx == gasPhaseIdx && FluidSystem::enableVaporizedOil()) {
-                unsigned activeOilCompIdx = Indices::canonicalToActiveComponentIndex(oilCompIdx);
+                unsigned activeOilCompIdx = FluidSystem::canonicalToActiveCompIdx(oilCompIdx);
                 storage[conti0EqIdx + activeOilCompIdx] +=
                     Toolbox::template decay<LhsEval>(intQuants.fluidState().Rv()) *
                     surfaceVolume;
@@ -205,7 +206,7 @@ public:
 
             // account for vaporized water
             if (phaseIdx == gasPhaseIdx && FluidSystem::enableVaporizedWater()) {
-                unsigned activeWaterCompIdx = Indices::canonicalToActiveComponentIndex(waterCompIdx);
+                unsigned activeWaterCompIdx = FluidSystem::canonicalToActiveCompIdx(waterCompIdx);
                 storage[conti0EqIdx + activeWaterCompIdx] +=
                     Toolbox::template decay<LhsEval>(intQuants.fluidState().Rvw()) *
                     surfaceVolume;
@@ -232,8 +233,8 @@ public:
         // deal with salt (if present)
         BrineModule::addStorage(storage, intQuants);
 
-        // deal with micp (if present)
-        MICPModule::addStorage(storage, intQuants);
+        // deal with bioeffects (if present)
+        BioeffectsModule::addStorage(storage, intQuants);
     }
 
     /*!
@@ -250,7 +251,7 @@ public:
                             const ResidualNBInfo& nbInfo,
                             const ModuleParams& moduleParams)
     {
-        OPM_TIMEBLOCK_LOCAL(computeFlux);
+        OPM_TIMEBLOCK_LOCAL(computeFlux, Subsystem::Assembly);
         flux = 0.0;
         darcy = 0.0;
 
@@ -272,7 +273,7 @@ public:
                             unsigned scvfIdx,
                             unsigned timeIdx)
     {
-        OPM_TIMEBLOCK_LOCAL(computeFlux);
+        OPM_TIMEBLOCK_LOCAL(computeFlux, Subsystem::Assembly);
         assert(timeIdx == 0);
 
         flux = 0.0;
@@ -344,7 +345,7 @@ public:
                                  const ResidualNBInfo& nbInfo,
                                  const ModuleParams& moduleParams)
     {
-        OPM_TIMEBLOCK_LOCAL(calculateFluxes);
+        OPM_TIMEBLOCK_LOCAL(calculateFluxes, Subsystem::Assembly);
         const Scalar Vin = nbInfo.Vin;
         const Scalar Vex = nbInfo.Vex;
         const Scalar distZg = nbInfo.dZg;
@@ -386,7 +387,7 @@ public:
             // Use arithmetic average (more accurate with harmonic, but that requires recomputing the transmissbility)
             Evaluation transMult = (intQuantsIn.rockCompTransMultiplier() +
                                     Toolbox::value(intQuantsEx.rockCompTransMultiplier())) / 2;
-            if constexpr (enableMICP) {
+            if constexpr (enableBioeffects || enableSaltPrecipitation) {
                 transMult *= (intQuantsIn.permFactor() + Toolbox::value(intQuantsEx.permFactor())) / 2;
             }
             Evaluation darcyFlux;
@@ -398,7 +399,7 @@ public:
             }
 
             unsigned activeCompIdx =
-                Indices::canonicalToActiveComponentIndex(FluidSystem::solventComponentIndex(phaseIdx));
+                FluidSystem::canonicalToActiveCompIdx(FluidSystem::solventComponentIndex(phaseIdx));
             // NB! For the FLORES fluxes without derivatives
             darcy[conti0EqIdx + activeCompIdx] = darcyFlux.value() * faceArea;
 
@@ -409,28 +410,35 @@ public:
                     = getInvB_<FluidSystem, FluidState, Evaluation>(up.fluidState(), phaseIdx, pvtRegionIdx);
                 const auto& surfaceVolumeFlux = invB * darcyFlux;
                 evalPhaseFluxes_<Evaluation>(flux, phaseIdx, pvtRegionIdx, surfaceVolumeFlux, up.fluidState());
-                if constexpr (enableEnergy) {
+                if constexpr (enableFullyImplicitThermal) {
                     EnergyModule::template
                         addPhaseEnthalpyFluxes_<Evaluation>(flux, phaseIdx, darcyFlux, up.fluidState());
                 }
-                if constexpr (enableMICP) {
-                    MICPModule::template
-                        addMICPFluxes_<Evaluation>(flux, darcyFlux, intQuantsIn);
+                if constexpr (enableBioeffects) {
+                    BioeffectsModule::template
+                        addBioeffectsFluxes_<Evaluation>(flux, phaseIdx, darcyFlux, up);
+                }
+                if constexpr (enableBrine) {
+                    BrineModule::template
+                        addBrineFluxes_<Evaluation, FluidState>(flux, phaseIdx, darcyFlux, up.fluidState());
                 }
             } else {
                 const auto& invB = getInvB_<FluidSystem, FluidState, Scalar>(up.fluidState(), phaseIdx, pvtRegionIdx);
                 const auto& surfaceVolumeFlux = invB * darcyFlux;
                 evalPhaseFluxes_<Scalar>(flux, phaseIdx, pvtRegionIdx, surfaceVolumeFlux, up.fluidState());
-                if constexpr (enableEnergy) {
+                if constexpr (enableFullyImplicitThermal) {
                     EnergyModule::template
-                        addPhaseEnthalpyFluxes_<Scalar>(flux,phaseIdx,darcyFlux, up.fluidState());
+                        addPhaseEnthalpyFluxes_<Scalar>(flux, phaseIdx, darcyFlux, up.fluidState());
                 }
-                if constexpr (enableMICP) {
-                    MICPModule::template
-                        addMICPFluxes_<Scalar>(flux, darcyFlux, intQuantsEx);
+                if constexpr (enableBioeffects) {
+                    BioeffectsModule::template
+                        addBioeffectsFluxes_<Scalar>(flux, phaseIdx, darcyFlux, up);
+                }
+                if constexpr (enableBrine) {
+                    BrineModule::template
+                        addBrineFluxes_<Scalar, FluidState>(flux, phaseIdx, darcyFlux, up.fluidState());
                 }
             }
-
         }
 
         // deal with solvents (if present)
@@ -460,9 +468,9 @@ public:
                                                             nbInfo.faceArea,
                                                             moduleParams.convectiveMixingModuleParam);
         }
-        
+
         // deal with energy (if present)
-        if constexpr (enableEnergy) {
+        if constexpr (enableFullyImplicitThermal) {
             const Scalar inAlpha = nbInfo.inAlpha;
             const Scalar outAlpha = nbInfo.outAlpha;
             Evaluation heatFlux;
@@ -491,11 +499,6 @@ public:
                       "Relevant computeFlux() method must be implemented for this module before enabling.");
         // FoamModule::computeFlux(flux, elemCtx, scvfIdx, timeIdx);
 
-        // deal with salt (if present)
-        static_assert(!enableBrine,
-                      "Relevant computeFlux() method must be implemented for this module before enabling.");
-        // BrineModule::computeFlux(flux, elemCtx, scvfIdx, timeIdx);
-
         // deal with diffusion (if present). opm-models expects per area flux (added in the tmpdiffusivity).
         if constexpr (enableDiffusion) {
             typename DiffusionModule::ExtensiveQuantities::EvaluationArray effectiveDiffusionCoefficient;
@@ -521,10 +524,10 @@ public:
                                                 tmpdispersivity,
                                                 normVelocityAvg);
         }
-        
+
         // apply the scaling for the urea equation in MICP
         if constexpr (enableMICP) {
-            MICPModule::applyScaling(flux);
+            BioeffectsModule::applyScaling(flux);
         }
     }
 
@@ -570,7 +573,7 @@ public:
                                         const IntensiveQuantities& insideIntQuants,
                                         unsigned globalSpaceIdx)
     {
-        OPM_TIMEBLOCK_LOCAL(computeBoundaryFluxFree);
+        OPM_TIMEBLOCK_LOCAL(computeBoundaryFluxFree, Subsystem::Assembly);
         std::array<short, numPhases> upIdx;
         std::array<short, numPhases> dnIdx;
         std::array<Evaluation, numPhases> volumeFlux;
@@ -613,7 +616,7 @@ public:
                                              insideIntQuants.pvtRegionIndex(),
                                              surfaceVolumeFlux,
                                              insideIntQuants.fluidState());
-                if constexpr (enableEnergy) {
+                if constexpr (enableFullyImplicitThermal) {
                     EnergyModule::template
                         addPhaseEnthalpyFluxes_<Evaluation>(tmp, phaseIdx, darcyFlux, insideIntQuants.fluidState());
                 }
@@ -628,7 +631,7 @@ public:
                                          insideIntQuants.pvtRegionIndex(),
                                          surfaceVolumeFlux,
                                          bdyInfo.exFluidState);
-                if constexpr (enableEnergy) {
+                if constexpr (enableFullyImplicitThermal) {
                     EnergyModule::template
                         addPhaseEnthalpyFluxes_<Scalar>(tmp, phaseIdx, darcyFlux, bdyInfo.exFluidState);
                 }
@@ -640,7 +643,7 @@ public:
         }
 
         // conductive heat flux from boundary
-        if constexpr (enableEnergy) {
+        if constexpr (enableFullyImplicitThermal) {
             Evaluation heatFlux;
             // avoid overload of functions with same number of elements in eclproblem
             Scalar alpha =
@@ -679,12 +682,12 @@ public:
                                        const IntensiveQuantities& insideIntQuants,
                                        [[maybe_unused]] unsigned globalSpaceIdx)
     {
-        OPM_TIMEBLOCK_LOCAL(computeBoundaryThermal);
+        OPM_TIMEBLOCK_LOCAL(computeBoundaryThermal, Subsystem::Assembly);
         // only heat is allowed to flow through this boundary
         bdyFlux = 0.0;
 
         // conductive heat flux from boundary
-        if constexpr (enableEnergy) {
+        if constexpr (enableFullyImplicitThermal) {
             Evaluation heatFlux;
             // avoid overload of functions with same numeber of elements in eclproblem
             Scalar alpha =
@@ -714,15 +717,15 @@ public:
                               unsigned globalSpaceIdex,
                               unsigned timeIdx)
     {
-        OPM_TIMEBLOCK_LOCAL(computeSource);
+        OPM_TIMEBLOCK_LOCAL(computeSource, Subsystem::Assembly);
         // retrieve the source term intrinsic to the problem
         problem.source(source, globalSpaceIdex, timeIdx);
 
-        // deal with MICP (if present)
-        MICPModule::addSource(source, problem, insideIntQuants, globalSpaceIdex);
+        // deal with bioeffects (if present)
+        BioeffectsModule::addSource(source, problem, insideIntQuants, globalSpaceIdex);
 
         // scale the source term of the energy equation
-        if constexpr (enableEnergy) {
+        if constexpr (enableFullyImplicitThermal) {
             source[Indices::contiEnergyEqIdx] *= getPropValue<TypeTag, Properties::BlackOilEnergyScalingFactor>();
         }
     }
@@ -736,11 +739,11 @@ public:
         source = 0.0;
         problem.addToSourceDense(source, globalSpaceIdex, timeIdx);
 
-        // deal with MICP (if present)
-        MICPModule::addSource(source, problem, insideIntQuants, globalSpaceIdex);
+        // deal with bioeffects (if present)
+        BioeffectsModule::addSource(source, problem, insideIntQuants, globalSpaceIdex);
 
         // scale the source term of the energy equation
-        if constexpr (enableEnergy) {
+        if constexpr (enableFullyImplicitThermal) {
             source[Indices::contiEnergyEqIdx] *= getPropValue<TypeTag, Properties::BlackOilEnergyScalingFactor>();
         }
     }
@@ -753,15 +756,15 @@ public:
                        unsigned dofIdx,
                        unsigned timeIdx) const
     {
-        OPM_TIMEBLOCK_LOCAL(computeSource);
+        OPM_TIMEBLOCK_LOCAL(computeSource, Subsystem::Assembly);
         // retrieve the source term intrinsic to the problem
         elemCtx.problem().source(source, elemCtx, dofIdx, timeIdx);
 
-        // deal with MICP (if present)
-        MICPModule::addSource(source, elemCtx, dofIdx, timeIdx);
+        // deal with bioeffects (if present)
+        BioeffectsModule::addSource(source, elemCtx, dofIdx, timeIdx);
 
         // scale the source term of the energy equation
-        if constexpr (enableEnergy) {
+        if constexpr (enableFullyImplicitThermal) {
             source[Indices::contiEnergyEqIdx] *= getPropValue<TypeTag, Properties::BlackOilEnergyScalingFactor>();
         }
     }
@@ -790,7 +793,7 @@ public:
                                  const FluidState& upFs)
     {
         unsigned activeCompIdx =
-            Indices::canonicalToActiveComponentIndex(FluidSystem::solventComponentIndex(phaseIdx));
+            FluidSystem::canonicalToActiveCompIdx(FluidSystem::solventComponentIndex(phaseIdx));
 
         if constexpr (blackoilConserveSurfaceVolume) {
             flux[conti0EqIdx + activeCompIdx] += surfaceVolumeFlux;
@@ -805,7 +808,7 @@ public:
             if (FluidSystem::enableDissolvedGas()) {
                 const auto& Rs = BlackOil::getRs_<FluidSystem, FluidState, UpEval>(upFs, pvtRegionIdx);
 
-                unsigned activeGasCompIdx = Indices::canonicalToActiveComponentIndex(gasCompIdx);
+                const unsigned activeGasCompIdx = FluidSystem::canonicalToActiveCompIdx(gasCompIdx);
                 if constexpr (blackoilConserveSurfaceVolume) {
                     flux[conti0EqIdx + activeGasCompIdx] += Rs * surfaceVolumeFlux;
                 }
@@ -821,7 +824,7 @@ public:
             if (FluidSystem::enableDissolvedGasInWater()) {
                 const auto& Rsw = BlackOil::getRsw_<FluidSystem, FluidState, UpEval>(upFs, pvtRegionIdx);
 
-                unsigned activeGasCompIdx = Indices::canonicalToActiveComponentIndex(gasCompIdx);
+                const unsigned activeGasCompIdx = FluidSystem::canonicalToActiveCompIdx(gasCompIdx);
                 if constexpr (blackoilConserveSurfaceVolume) {
                     flux[conti0EqIdx + activeGasCompIdx] += Rsw * surfaceVolumeFlux;
                 }
@@ -837,7 +840,7 @@ public:
             if (FluidSystem::enableVaporizedOil()) {
                 const auto& Rv = BlackOil::getRv_<FluidSystem, FluidState, UpEval>(upFs, pvtRegionIdx);
 
-                unsigned activeOilCompIdx = Indices::canonicalToActiveComponentIndex(oilCompIdx);
+                const unsigned activeOilCompIdx = FluidSystem::canonicalToActiveCompIdx(oilCompIdx);
                 if constexpr (blackoilConserveSurfaceVolume) {
                     flux[conti0EqIdx + activeOilCompIdx] += Rv * surfaceVolumeFlux;
                 }
@@ -851,7 +854,7 @@ public:
             if (FluidSystem::enableVaporizedWater()) {
                 const auto& Rvw = BlackOil::getRvw_<FluidSystem, FluidState, UpEval>(upFs, pvtRegionIdx);
 
-                unsigned activeWaterCompIdx = Indices::canonicalToActiveComponentIndex(waterCompIdx);
+                const unsigned activeWaterCompIdx = FluidSystem::canonicalToActiveCompIdx(waterCompIdx);
                 if constexpr (blackoilConserveSurfaceVolume) {
                     flux[conti0EqIdx + activeWaterCompIdx] += Rvw * surfaceVolumeFlux;
                 }
@@ -885,19 +888,19 @@ public:
             // is disabled, its respective "main" component is not considered as well.)
 
             if constexpr (waterEnabled) {
-                unsigned activeWaterCompIdx = Indices::canonicalToActiveComponentIndex(waterCompIdx);
+                const unsigned activeWaterCompIdx = FluidSystem::canonicalToActiveCompIdx(waterCompIdx);
                 container[conti0EqIdx + activeWaterCompIdx] *=
                     FluidSystem::referenceDensity(waterPhaseIdx, pvtRegionIdx);
             }
 
             if constexpr (gasEnabled) {
-                unsigned activeGasCompIdx = Indices::canonicalToActiveComponentIndex(gasCompIdx);
+                const unsigned activeGasCompIdx = FluidSystem::canonicalToActiveCompIdx(gasCompIdx);
                 container[conti0EqIdx + activeGasCompIdx] *=
                     FluidSystem::referenceDensity(gasPhaseIdx, pvtRegionIdx);
             }
 
             if constexpr (oilEnabled) {
-                unsigned activeOilCompIdx = Indices::canonicalToActiveComponentIndex(oilCompIdx);
+                const unsigned activeOilCompIdx = FluidSystem::canonicalToActiveCompIdx(oilCompIdx);
                 container[conti0EqIdx + activeOilCompIdx] *=
                     FluidSystem::referenceDensity(oilPhaseIdx, pvtRegionIdx);
             }

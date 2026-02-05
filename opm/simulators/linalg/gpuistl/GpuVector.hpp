@@ -20,11 +20,12 @@
 #define OPM_GPUVECTOR_HEADER_HPP
 #include <dune/common/fvector.hh>
 #include <dune/istl/bvector.hh>
-#include <exception>
+
 #include <fmt/core.h>
 #include <opm/common/ErrorMacros.hpp>
 #include <opm/simulators/linalg/gpuistl/detail/CuBlasHandle.hpp>
 #include <opm/simulators/linalg/gpuistl/detail/safe_conversion.hpp>
+#include <opm/simulators/linalg/gpuistl/detail/gpu_constants.hpp>
 #include <vector>
 #include <string>
 
@@ -130,6 +131,11 @@ public:
     GpuVector& operator=(T scalar);
 
     /**
+     * @brief GpuVector default constructor creates a zero-sized vector (no GPU memory allocated)
+     */
+    GpuVector() : m_dataOnDevice(nullptr), m_numberOfElements(0), m_cuBlasHandle(detail::CuBlasHandle::getInstance()) {}
+
+    /**
      * @brief GpuVector allocates new GPU memory of size numberOfElements * sizeof(T)
      *
      * @note For now numberOfElements needs to be within the limits of int due to restrictions in cublas
@@ -191,6 +197,30 @@ public:
     }
 
     /**
+     * @brief copyFromHostAsync copies data from a Dune::BlockVector asynchronously.
+     * @param bvector the vector to copy from
+     * @param stream CUDA stream to use for the asynchronous copy (defaults to default stream).
+     *
+     * @note This does asynchronous transfer.
+     * @note This assumes that the size of this vector is equal to the dim of the input vector.
+     */
+    template <int BlockDimension>
+    void copyFromHostAsync(const Dune::BlockVector<Dune::FieldVector<T, BlockDimension>>& bvector, cudaStream_t stream = detail::DEFAULT_STREAM)
+    {
+        // TODO: [perf] vector.dim() can be replaced by bvector.N() * BlockDimension
+        if (detail::to_size_t(m_numberOfElements) != bvector.dim()) {
+            OPM_THROW(std::runtime_error,
+                      fmt::format("Given incompatible vector size. GpuVector has size {}, \n"
+                                  "however, BlockVector has N() = {}, and dim = {}.",
+                                  m_numberOfElements,
+                                  bvector.N(),
+                                  bvector.dim()));
+        }
+        const auto dataPointer = static_cast<const T*>(&(bvector[0][0]));
+        copyFromHostAsync(dataPointer, m_numberOfElements, stream);
+    }
+
+    /**
      * @brief copyToHost copies data to a Dune::BlockVector
      * @param bvector the vector to copy to
      *
@@ -214,6 +244,30 @@ public:
     }
 
     /**
+     * @brief copyToHostAsync copies data to a Dune::BlockVector asynchronously.
+     * @param bvector the vector to copy to
+     * @param stream CUDA stream to use for the asynchronous copy (defaults to default stream).
+     *
+     * @note This does asynchronous transfer.
+     * @note This assumes that the size of this vector is equal to the dim of the input vector.
+     */
+    template <int BlockDimension>
+    void copyToHostAsync(Dune::BlockVector<Dune::FieldVector<T, BlockDimension>>& bvector, cudaStream_t stream = detail::DEFAULT_STREAM) const
+    {
+        // TODO: [perf] vector.dim() can be replaced by bvector.N() * BlockDimension
+        if (detail::to_size_t(m_numberOfElements) != bvector.dim()) {
+            OPM_THROW(std::runtime_error,
+                      fmt::format("Given incompatible vector size. GpuVector has size {},\n however, the BlockVector "
+                                  "has has N() = {}, and dim() = {}.",
+                                  m_numberOfElements,
+                                  bvector.N(),
+                                  bvector.dim()));
+        }
+        const auto dataPointer = static_cast<T*>(&(bvector[0][0]));
+        copyToHostAsync(dataPointer, m_numberOfElements, stream);
+    }
+
+    /**
      * @brief copyFromHost copies numberOfElements from the CPU memory dataPointer
      * @param dataPointer raw pointer to CPU memory
      * @param numberOfElements number of elements to copy
@@ -221,10 +275,23 @@ public:
      * @note assumes that this vector has numberOfElements elements
      */
     void copyFromHost(const T* dataPointer, size_t numberOfElements);
-    void copyFromHost(const T* dataPointer, size_t numberOfElements, cudaStream_t stream);
 
     /**
-     * @brief copyFromHost copies numberOfElements to the CPU memory dataPointer
+     * @brief copyFromHostAsync copies numberOfElements from the CPU memory dataPointer asynchronously.
+     * @param dataPointer raw pointer to CPU memory
+     * @param numberOfElements number of elements to copy
+     * @param stream CUDA stream to use for the asynchronous copy (defaults to default stream).
+     * @note This does asynchronous transfer. If the memory region pointed to by dataPointer
+     *       has been previously registered (e.g., using cudaHostRegister by an external mechanism
+     *       like PinnedMemoryHolder), the transfer may be faster.
+     * @note assumes that this vector has numberOfElements elements
+     */
+    void copyFromHostAsync(const T* dataPointer, size_t numberOfElements, cudaStream_t stream = detail::DEFAULT_STREAM);
+
+
+
+    /**
+     * @brief copyToHost copies numberOfElements to the CPU memory dataPointer
      * @param dataPointer raw pointer to CPU memory
      * @param numberOfElements number of elements to copy
      * @note This does synchronous transfer.
@@ -233,13 +300,37 @@ public:
     void copyToHost(T* dataPointer, size_t numberOfElements) const;
 
     /**
-     * @brief copyToHost copies data from an std::vector
+     * @brief copyToHostAsync copies numberOfElements to the CPU memory dataPointer asynchronously.
+     * @param dataPointer raw pointer to CPU memory
+     * @param numberOfElements number of elements to copy
+     * @param stream CUDA stream to use for the asynchronous copy (defaults to default stream).
+     * @note This does asynchronous transfer. If the memory region pointed to by dataPointer
+     *       has been previously registered (e.g., using cudaHostRegister by an external mechanism
+     *       like PinnedMemoryHolder), the transfer may be faster.
+     * @note assumes that this vector has numberOfElements elements
+     */
+    void copyToHostAsync(T* dataPointer, size_t numberOfElements, cudaStream_t stream = detail::DEFAULT_STREAM) const;
+
+
+
+    /**
+     * @brief copyFromHost copies data from an std::vector
      * @param data the vector to copy from
      *
      * @note This does synchronous transfer.
      * @note This assumes that the size of this vector is equal to the size of the input vector.
      */
     void copyFromHost(const std::vector<T>& data);
+
+    /**
+     * @brief copyFromHostAsync copies data from an std::vector asynchronously.
+     * @param data the vector to copy from
+     * @param stream CUDA stream to use for the asynchronous copy (defaults to default stream).
+     *
+     * @note This does asynchronous transfer.
+     * @note This assumes that the size of this vector is equal to the size of the input vector.
+     */
+    void copyFromHostAsync(const std::vector<T>& data, cudaStream_t stream = detail::DEFAULT_STREAM);
 
     /**
      * @brief copyToHost copies data to an std::vector
@@ -249,6 +340,19 @@ public:
      * @note This assumes that the size of this vector is equal to the size of the input vector.
      */
     void copyToHost(std::vector<T>& data) const;
+
+    /**
+     * @brief copyToHostAsync copies data to an std::vector asynchronously.
+     * @param data the vector to copy to
+     * @param stream CUDA stream to use for the asynchronous copy (defaults to default stream).
+     * @note This does asynchronous transfer. If the memory region of the std::vector's data
+     *       has been previously registered (e.g. using PinnedMemoryHolder),
+     *       the transfer may be faster.
+     * @note This assumes that the size of this vector is equal to the size of the input vector.
+     */
+    void copyToHostAsync(std::vector<T>& data, cudaStream_t stream = detail::DEFAULT_STREAM) const;
+
+
 
     /**
      * @brief copyFromDeviceToDevice copies data from the GPU memory of other to this vector
@@ -350,6 +454,15 @@ public:
      */
     size_type dim() const;
 
+    /**
+     * @brief resize changes the size of the vector, preserving existing data if new size is larger
+     * @param new_size the new number of elements
+     * @note If new_size is larger, existing data is preserved and new elements are uninitialized
+     * @note If new_size is smaller, data is truncated
+     * @note If new_size equals current size, no operation is performed
+     * @note For now new_size needs to be within the limits of int due to restrictions in cublas
+     */
+    void resize(size_t new_size);
 
     /**
      * @brief creates an std::vector of the same size and copies the GPU data to this std::vector
@@ -358,8 +471,8 @@ public:
     std::vector<T> asStdVector() const;
 
     /**
-     * @brief creates an std::vector of the same size and copies the GPU data to this std::vector
-     * @return an std::vector containing the elements copied from the GPU.
+     * @brief creates a Dune::BlockVector of the same size and copies the GPU data to this Dune::BlockVector
+     * @return a Dune::BlockVector containing the elements copied from the GPU.
      */
     template <int blockSize>
     Dune::BlockVector<Dune::FieldVector<T, blockSize>> asDuneBlockVector() const
@@ -407,7 +520,7 @@ private:
 
     // Note that we store this as int to make sure we are always cublas compatible.
     // This gives the added benefit that a size_t to int conversion error occurs during construction.
-    const int m_numberOfElements;
+    int m_numberOfElements;
     detail::CuBlasHandle& m_cuBlasHandle;
 
     void assertSameSize(const GpuVector<T>& other) const;
@@ -416,5 +529,16 @@ private:
     void assertHasElements() const;
 };
 
+} // namespace Opm::gpuistl
+
+// ADL bridge: convert GPU vector to Dune BlockVector and delegate to Dune's writer
+namespace Opm::gpuistl
+{
+template <typename T>
+inline void writeMatrixMarket(const GpuVector<T>& vectorOnDevice, std::ostream& ostr)
+{
+    const auto hostBlockVector = vectorOnDevice.template asDuneBlockVector<1>();
+    writeMatrixMarket(hostBlockVector, ostr);
+}
 } // namespace Opm::gpuistl
 #endif

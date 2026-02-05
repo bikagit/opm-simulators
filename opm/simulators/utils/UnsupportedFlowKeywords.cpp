@@ -246,7 +246,6 @@ const KeywordValidation::UnsupportedKeywords& unsupportedKeywords()
         {"GRUPRIG", {true, std::nullopt}},
         {"GRUPSLAV", {true, std::nullopt}},
         {"GRUPTARG", {true, std::nullopt}},
-        {"GSATINJE", {true, std::nullopt}},
         {"GSEPCOND", {true, std::nullopt}},
         {"GSSCPTST", {true, std::nullopt}},
         {"GSWINGF", {true, std::nullopt}},
@@ -632,7 +631,6 @@ const KeywordValidation::UnsupportedKeywords& unsupportedKeywords()
         {"TRNHD", {true, std::nullopt}},
         {"TRPLPORO", {true, std::nullopt}},
         {"TRROCK", {true, std::nullopt}},
-        {"TUNINGDP", {false, std::nullopt}},
         {"TUNINGH", {false, std::nullopt}},
         {"TUNINGL", {false, std::nullopt}},
         {"TUNINGS", {false, std::nullopt}},
@@ -736,7 +734,7 @@ const KeywordValidation::UnsupportedKeywords& unsupportedKeywords()
         {"WTHPMAX", {true, std::nullopt}},
         {"ZIPPY2", {false, std::nullopt}},
         {"ZIPP2OFF", {false, std::nullopt}},
-        {"ZMFVD", {false, std::nullopt}},        
+        {"ZMFVD", {false, std::nullopt}},
     };
 
     return unsupported_keywords;

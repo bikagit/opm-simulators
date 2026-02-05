@@ -27,6 +27,7 @@
 #include <opm/simulators/timestepping/AdaptiveSimulatorTimer.hpp>
 #endif
 
+#include <dune/common/timer.hh>
 #include <dune/istl/istlexception.hh>
 
 #include <opm/common/Exceptions.hpp>
@@ -96,7 +97,11 @@ AdaptiveTimeStepping(const UnitSystem& unit_system,
 }
 
 //! \brief contructor
+//! \param max_next_tstep Maximum next time step allowed
 //! \param tuning Pointer to ecl TUNING keyword
+//! \param unit_system Unit system to use
+//! \param report Simulator report to use
+//! \param terminal_output True to print to terminal
 template<class TypeTag>
 AdaptiveTimeStepping<TypeTag>::
 AdaptiveTimeStepping(double max_next_tstep,
@@ -131,7 +136,7 @@ AdaptiveTimeStepping(double max_next_tstep,
 template<class TypeTag>
 bool
 AdaptiveTimeStepping<TypeTag>::
-operator==(const AdaptiveTimeStepping<TypeTag>& rhs)
+operator==(const AdaptiveTimeStepping<TypeTag>& rhs) const
 {
     if (this->time_step_control_type_ != rhs.time_step_control_type_ ||
         (this->time_step_control_ && !rhs.time_step_control_) ||
@@ -185,7 +190,10 @@ registerParameters()
 
 /** \brief  step method that acts like the solver::step method
             in a sub cycle of time steps
-    \param tuningUpdater Function used to update TUNING parameters before each
+    \param simulator_timer Simulator timer
+    \param solver Solver to use
+    \param is_event True if this is an event
+    \param tuning_updater Function used to update TUNING parameters before each
                          time step. ACTIONX might change tuning.
 */
 template<class TypeTag>
@@ -571,7 +579,7 @@ runStepOriginal_()
 #ifdef RESERVOIR_COUPLING_ENABLED
 template <class TypeTag>
 template <class Solver>
-ReservoirCouplingMaster&
+ReservoirCouplingMaster<typename AdaptiveTimeStepping<TypeTag>::Scalar>&
 AdaptiveTimeStepping<TypeTag>::SubStepper<Solver>::
 reservoirCouplingMaster_()
 {
@@ -582,7 +590,7 @@ reservoirCouplingMaster_()
 #ifdef RESERVOIR_COUPLING_ENABLED
 template <class TypeTag>
 template <class Solver>
-ReservoirCouplingSlave&
+ReservoirCouplingSlave<typename AdaptiveTimeStepping<TypeTag>::Scalar>&
 AdaptiveTimeStepping<TypeTag>::SubStepper<Solver>::
 reservoirCouplingSlave_()
 {
@@ -632,16 +640,25 @@ runStepReservoirCouplingMaster_()
     double current_time{this->simulator_timer_.simulationTimeElapsed()};
     double step_end_time = current_time + original_time_step;
     auto current_step_length = original_time_step;
+    auto report_step_idx = this->simulator_timer_.currentStepNum();
+    if (report_step_idx == 0 && iteration == 0) {
+        reservoirCouplingMaster_().initTimeStepping();
+    }
     SimulatorReport report;
+    // The master needs to know which slaves have activated before it can start the substep loop
+    reservoirCouplingMaster_().maybeReceiveActivationHandshakeFromSlaves(current_time);
     while (true) {
+        reservoirCouplingMaster_().sendDontTerminateSignalToSlaves(); // Tell the slaves to keep running.
         reservoirCouplingMaster_().receiveNextReportDateFromSlaves();
-        if (iteration == 0) {
-            maybeUpdateTuning_(current_time, current_step_length, /*substep=*/0);
+        bool start_of_report_step = (iteration == 0);
+        if (start_of_report_step) {
+            reservoirCouplingMaster_().initStartOfReportStep(report_step_idx);
         }
         current_step_length = reservoirCouplingMaster_().maybeChopSubStep(
                                           current_step_length, current_time);
         reservoirCouplingMaster_().sendNextTimeStepToSlaves(current_step_length);
-        if (iteration == 0) {
+        if (start_of_report_step) {
+            maybeUpdateTuning_(current_time, current_step_length, /*substep=*/0);
             maybeModifySuggestedTimeStepAtBeginningOfReportStep_(current_step_length);
         }
         AdaptiveSimulatorTimer substep_timer{
@@ -655,6 +672,10 @@ runStepReservoirCouplingMaster_()
         const bool final_step = ReservoirCoupling::Seconds::compare_gt_or_eq(
             current_time + current_step_length, step_end_time
         );
+        // Mark this as the first substep of the "sync" timestep. This flag controls
+        // whether master-slave data exchange should occur in beginTimeStep() in the well model.
+        // It will be cleared after the first runSubStep_() call.
+        reservoirCouplingMaster_().setFirstSubstepOfSyncTimestep(true);
         SubStepIteration<Solver> substepIteration{*this, substep_timer, current_step_length, final_step};
         const auto sub_steps_report = substepIteration.run();
         report += sub_steps_report;
@@ -680,10 +701,19 @@ runStepReservoirCouplingSlave_()
     double current_time{this->simulator_timer_.simulationTimeElapsed()};
     double step_end_time = current_time + original_time_step;
     SimulatorReport report;
+    auto report_step_idx = this->simulator_timer_.currentStepNum();
+    if (report_step_idx == 0 && iteration == 0) {
+        reservoirCouplingSlave_().initTimeStepping();
+    }
     while (true) {
+        bool start_of_report_step = (iteration == 0);
+        if (reservoirCouplingSlave_().maybeReceiveTerminateSignalFromMaster()) {
+            // Call MPI_Comm_disconnect() to terminate the MPI communicator, etc..
+            break;
+        }
         reservoirCouplingSlave_().sendNextReportDateToMasterProcess();
         const auto timestep = reservoirCouplingSlave_().receiveNextTimeStepFromMaster();
-        if (iteration == 0) {
+        if (start_of_report_step) {
             maybeUpdateTuning_(current_time, original_time_step, /*substep=*/0);
             maybeModifySuggestedTimeStepAtBeginningOfReportStep_(timestep);
         }
@@ -698,6 +728,10 @@ runStepReservoirCouplingSlave_()
         const bool final_step = ReservoirCoupling::Seconds::compare_gt_or_eq(
             current_time + timestep, step_end_time
         );
+        // Mark this as the first substep of the "sync" timestep. This flag controls
+        // whether master-slave data exchange should occur in beginTimeStep() in the well model.
+        // It will be cleared after the first runSubStep_() call.
+        reservoirCouplingSlave_().setFirstSubstepOfSyncTimestep(true);
         SubStepIteration<Solver> substepIteration{*this, substep_timer, timestep, final_step};
         const auto sub_steps_report = substepIteration.run();
         report += sub_steps_report;
@@ -766,17 +800,22 @@ run()
             detail::logTimer(this->substep_timer_);
         }
 
-        const auto substep_report = runSubStep_();
-
-        //Pass substep to eclwriter for summary output
-        problem.setSubStepReport(substep_report);
-        auto& full_report = adaptive_time_stepping_.report();
-        full_report += substep_report;
-        problem.setSimulationReport(full_report);
-
-        report += substep_report;
+        auto substep_report = runSubStep_();
+        markFirstSubStepAsFinished_();  // Needed for reservoir coupling
 
         if (substep_report.converged || checkContinueOnUnconvergedSolution_(dt)) {
+            Dune::Timer perfTimer;
+            perfTimer.start();
+            // Pass substep to eclwriter for summary output
+            problem.setSubStepReport(substep_report);
+            auto& full_report = adaptive_time_stepping_.report();
+            full_report += substep_report;
+            problem.setSimulationReport(full_report);
+            problem.endTimeStep();
+            substep_report.pre_post_time += perfTimer.stop();
+
+            report += substep_report;
+
             ++this->substep_timer_;   // advance by current dt
 
             const int iterations = getNumIterations_(substep_report);
@@ -803,6 +842,7 @@ run()
             this->substep_timer_.setLastStepFailed(false);
         }
         else { // in case of no convergence or time step tolerance test failure
+            report += substep_report;
             this->substep_timer_.setLastStepFailed(true);
             checkTimeStepMaxRestartLimit_(restarts);
 
@@ -1033,6 +1073,44 @@ ignoreConvergenceFailure_() const
 
 template<class TypeTag>
 template<class Solver>
+bool
+AdaptiveTimeStepping<TypeTag>::SubStepIteration<Solver>::
+isReservoirCouplingMaster_() const
+{
+    return this->substepper_.isReservoirCouplingMaster_();
+}
+
+template<class TypeTag>
+template<class Solver>
+bool
+AdaptiveTimeStepping<TypeTag>::SubStepIteration<Solver>::
+isReservoirCouplingSlave_() const
+{
+    return this->substepper_.isReservoirCouplingSlave_();
+}
+
+template<class TypeTag>
+template<class Solver>
+void
+AdaptiveTimeStepping<TypeTag>::SubStepIteration<Solver>::
+markFirstSubStepAsFinished_() const
+{
+#ifdef RESERVOIR_COUPLING_ENABLED
+    // Clear the first-substep flag after the first runSubStep_() call.
+    // This ensures that master-slave synchronization only happens once per sync timestep,
+    // not on retry attempts after convergence-driven timestep chops.
+    if (isReservoirCouplingMaster_()) {
+        reservoirCouplingMaster_().setFirstSubstepOfSyncTimestep(false);
+    }
+    else if (isReservoirCouplingSlave_()) {
+        reservoirCouplingSlave_().setFirstSubstepOfSyncTimestep(false);
+    }
+#endif
+    return;
+}
+
+template<class TypeTag>
+template<class Solver>
 double
 AdaptiveTimeStepping<TypeTag>::SubStepIteration<Solver>::
 maxGrowth_() const
@@ -1117,6 +1195,26 @@ minTimeStep_() const
 {
     return this->adaptive_time_stepping_.min_time_step_;
 }
+
+#ifdef RESERVOIR_COUPLING_ENABLED
+template<class TypeTag>
+template<class Solver>
+ReservoirCouplingMaster<typename AdaptiveTimeStepping<TypeTag>::Scalar>&
+AdaptiveTimeStepping<TypeTag>::SubStepIteration<Solver>::
+reservoirCouplingMaster_() const
+{
+    return this->substepper_.reservoirCouplingMaster_();
+}
+
+template<class TypeTag>
+template<class Solver>
+ReservoirCouplingSlave<typename AdaptiveTimeStepping<TypeTag>::Scalar>&
+AdaptiveTimeStepping<TypeTag>::SubStepIteration<Solver>::
+reservoirCouplingSlave_() const
+{
+    return this->substepper_.reservoirCouplingSlave_();
+}
+#endif
 
 template<class TypeTag>
 template<class Solver>

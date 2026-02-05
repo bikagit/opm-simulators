@@ -40,6 +40,7 @@
 
 #include <opm/material/common/Valgrind.hpp>
 
+#include <opm/models/blackoil/blackoilenergymodules.hh>
 #include <opm/models/blackoil/blackoilproperties.hh>
 #include <opm/models/common/multiphasebaseproperties.hh>
 #include <opm/models/utils/parametersystem.hpp>
@@ -102,8 +103,8 @@ public:
                    [this](const int idx)
                    { return simulator_.problem().eclWriter().collectOnIORank().localIdxToGlobalIdx(idx); },
                    simulator.vanguard().grid().comm(),
-                   getPropValue<TypeTag, Properties::EnableEnergy>(),
-                   getPropValue<TypeTag, Properties::EnableTemperature>(),
+                   getPropValue<TypeTag, Properties::EnergyModuleType>() == EnergyModules::FullyImplicitThermal,
+                   getPropValue<TypeTag, Properties::EnergyModuleType>() == EnergyModules::ConstantTemperature,
                    getPropValue<TypeTag, Properties::EnableMech>(),
                    getPropValue<TypeTag, Properties::EnableSolvent>(),
                    getPropValue<TypeTag, Properties::EnablePolymer>(),
@@ -111,7 +112,7 @@ public:
                    getPropValue<TypeTag, Properties::EnableBrine>(),
                    getPropValue<TypeTag, Properties::EnableSaltPrecipitation>(),
                    getPropValue<TypeTag, Properties::EnableExtbo>(),
-                   getPropValue<TypeTag, Properties::EnableMICP>())
+                   getPropValue<TypeTag, Properties::EnableBioeffects>())
         , simulator_(simulator)
     {
         for (auto& region_pair : this->regions_) {
@@ -247,7 +248,7 @@ public:
      */
     void processElement(const ElementContext& elemCtx)
     {
-        OPM_TIMEBLOCK_LOCAL(processElement);
+        OPM_TIMEBLOCK_LOCAL(processElement, Subsystem::Output);
         if (!std::is_same<Discretization, EcfvDiscretization<TypeTag>>::value) {
             return;
         }
@@ -272,14 +273,14 @@ public:
 
     void processElementFlows(const ElementContext& /* elemCtx */)
     {
-        OPM_TIMEBLOCK_LOCAL(processElementBlockData);
+        OPM_TIMEBLOCK_LOCAL(processElementBlockData, Subsystem::Output);
         if (!std::is_same_v<Discretization, EcfvDiscretization<TypeTag>>)
             return;
     }
 
     void processElementBlockData(const ElementContext& /* elemCtx */)
     {
-        OPM_TIMEBLOCK_LOCAL(processElementBlockData);
+        OPM_TIMEBLOCK_LOCAL(processElementBlockData, Subsystem::Output);
         if (!std::is_same<Discretization, EcfvDiscretization<TypeTag>>::value)
             return;
     }
@@ -365,6 +366,14 @@ private:
     }
 
     bool isOwnedByCurrentRank(const std::string& wname) const override
+    {
+        // Note: This statement is not correct for distributed wells and
+        // will need additional logic once those are supported for
+        // compositional flows.
+        return ! this->isDefunctParallelWell(wname);
+    }
+
+    bool isOnCurrentRank(const std::string& wname) const override
     {
         // Note: This statement is not correct for distributed wells and
         // will need additional logic once those are supported for

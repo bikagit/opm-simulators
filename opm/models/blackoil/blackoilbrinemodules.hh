@@ -181,9 +181,9 @@ public:
                 const double saltDensity = intQuants.saltDensity(); // Solid salt density kg/m3
                 const LhsEval solidSalt =
                               Toolbox::template decay<LhsEval>(intQuants.porosity()) /
-                              (1.0 - Toolbox::template decay<LhsEval>(intQuants.saltSaturation()) + 1.e-8) *
+                              (1.0 - Toolbox::template decay<LhsEval>(fs.saltSaturation()) + 1.e-8) *
                               saltDensity *
-                              Toolbox::template decay<LhsEval>(intQuants.saltSaturation());
+                              Toolbox::template decay<LhsEval>(fs.saltSaturation());
 
                 storage[contiBrineEqIdx] += massBrine + solidSalt;
             }
@@ -197,26 +197,45 @@ public:
                             [[maybe_unused]] const ElementContext& elemCtx,
                             [[maybe_unused]] unsigned scvfIdx,
                             [[maybe_unused]] unsigned timeIdx)
-
     {
         if constexpr (enableBrine) {
             const auto& extQuants = elemCtx.extensiveQuantities(scvfIdx, timeIdx);
+            unsigned focusIdx = elemCtx.focusDofIndex();
+            unsigned upIdx = extQuants.upstreamIndex(waterPhaseIdx);
+            flux[contiBrineEqIdx] = 0.0;
+            if (upIdx == focusIdx)
+                addBrineFluxes_<Evaluation>(flux, elemCtx, scvfIdx, timeIdx);
+            else
+                addBrineFluxes_<Scalar>(flux, elemCtx, scvfIdx, timeIdx);
+        }
+    }
 
-            const unsigned upIdx = extQuants.upstreamIndex(FluidSystem::waterPhaseIdx);
-            const unsigned inIdx = extQuants.interiorIndex();
-            const auto& up = elemCtx.intensiveQuantities(upIdx, timeIdx);
+    template <class UpstreamEval>
+    static void addBrineFluxes_(RateVector& flux,
+                                const ElementContext& elemCtx,
+                                unsigned scvfIdx,
+                                unsigned timeIdx)
+    {
+        const auto& extQuants = elemCtx.extensiveQuantities(scvfIdx, timeIdx);
+        unsigned upIdx = extQuants.upstreamIndex(waterPhaseIdx);
+        const auto& up = elemCtx.intensiveQuantities(upIdx, timeIdx);
+        const auto& upFs = up.fluidState();
+        const auto& volFlux = extQuants.volumeFlux(waterPhaseIdx);
+        addBrineFluxes_<UpstreamEval>(flux, waterPhaseIdx, volFlux, upFs);
+    }
 
-            if (upIdx == inIdx) {
+    template <class UpEval, class FluidState>
+    static void addBrineFluxes_(RateVector& flux,
+                                unsigned phaseIdx,
+                                const Evaluation& volFlux,
+                                const FluidState& upFs)
+    {
+        if constexpr (enableBrine) {
+            if (phaseIdx == waterPhaseIdx) {
                 flux[contiBrineEqIdx] =
-                        extQuants.volumeFlux(waterPhaseIdx) *
-                        up.fluidState().invB(waterPhaseIdx) *
-                        up.fluidState().saltConcentration();
-            }
-            else {
-                flux[contiBrineEqIdx] =
-                        extQuants.volumeFlux(waterPhaseIdx) *
-                        decay<Scalar>(up.fluidState().invB(waterPhaseIdx)) *
-                        decay<Scalar>(up.fluidState().saltConcentration());
+                    decay<UpEval>(upFs.saltConcentration())
+                    * decay<UpEval>(upFs.invB(waterPhaseIdx))
+                    * volFlux;
             }
         }
     }
@@ -424,29 +443,16 @@ public:
                                [[maybe_unused]] unsigned timeIdx)
     {
         if constexpr (enableSaltPrecipitation) {
-            const Evaluation porosityFactor  = min(1.0 - saltSaturation(), 1.0); //phi/phi_0
+            const Evaluation porosityFactor  = min(1.0 - asImp_().fluidState_.saltSaturation(), 1.0); //phi/phi_0
 
             const auto& permfactTable = BrineModule::permfactTable(elemCtx, dofIdx, timeIdx);
 
             permFactor_ = permfactTable.eval(porosityFactor);
-            for (unsigned phaseIdx = 0; phaseIdx < numPhases; ++phaseIdx) {
-                if (!FluidSystem::phaseIsActive(phaseIdx)) {
-                    continue;
-                }
-
-                asImp_().mobility_[phaseIdx] *= permFactor_;
-            }
         }
     }
 
-    const Evaluation& saltConcentration() const
-    { return saltConcentration_; }
-
     const Evaluation& brineRefDensity() const
     { return refDensity_; }
-
-    const Evaluation& saltSaturation() const
-    { return saltSaturation_; }
 
     Scalar saltSolubility() const
     { return saltSolubility_; }
@@ -487,14 +493,8 @@ public:
                                   unsigned)
     {}
 
-    const Evaluation& saltConcentration() const
-    { throw std::runtime_error("saltConcentration() called but brine are disabled"); }
-
     const Evaluation& brineRefDensity() const
     { throw std::runtime_error("brineRefDensity() called but brine are disabled"); }
-
-    const Evaluation& saltSaturation() const
-    { throw std::logic_error("saltSaturation() called but salt precipitation is disabled"); }
 
     const Scalar saltSolubility() const
     { throw std::logic_error("saltSolubility() called but salt precipitation is disabled"); }

@@ -38,7 +38,6 @@
 #include <opm/simulators/timestepping/SimulatorReport.hpp>
 #include <opm/simulators/timestepping/SimulatorTimer.hpp>
 
-#include <opm/simulators/utils/BlackoilPhases.hpp>
 #include <opm/simulators/utils/ComponentName.hpp>
 
 #include <opm/simulators/wells/BlackoilWellModel.hpp>
@@ -76,6 +75,8 @@ public:
     using Scalar = GetPropType<TypeTag, Properties::Scalar>;
     using ModelParameters = BlackoilModelParameters<Scalar>;
 
+    static constexpr bool enableSaltPrecipitation = getPropValue<TypeTag, Properties::EnableSaltPrecipitation>();
+
     static constexpr int numEq = Indices::numEq;
     static constexpr int contiSolventEqIdx = Indices::contiSolventEqIdx;
     static constexpr int contiZfracEqIdx = Indices::contiZfracEqIdx;
@@ -99,8 +100,8 @@ public:
     static constexpr int microbialConcentrationIdx = Indices::microbialConcentrationIdx;
     static constexpr int oxygenConcentrationIdx = Indices::oxygenConcentrationIdx;
     static constexpr int ureaConcentrationIdx = Indices::ureaConcentrationIdx;
-    static constexpr int biofilmConcentrationIdx = Indices::biofilmConcentrationIdx;
-    static constexpr int calciteConcentrationIdx = Indices::calciteConcentrationIdx;
+    static constexpr int biofilmVolumeFractionIdx = Indices::biofilmVolumeFractionIdx;
+    static constexpr int calciteVolumeFractionIdx = Indices::calciteVolumeFractionIdx;
 
     using VectorBlockType = Dune::FieldVector<Scalar, numEq>;
     using MatrixBlockType = typename SparseMatrixAdapter::MatrixBlock;
@@ -109,17 +110,34 @@ public:
 
     using ComponentName = ::Opm::ComponentName<FluidSystem,Indices>;
 
+    // Helper structs
+    struct CnvPvSplitData {
+        std::pair<std::vector<double>, std::vector<int>> cnvPvSplit;
+        std::vector<unsigned> ixCells;
+    };
+
+    struct MaxSolutionUpdateData {
+        Scalar dPMax = 0.0;
+        Scalar dSMax = 0.0;
+        Scalar dRsMax = 0.0;
+        Scalar dRvMax = 0.0;
+    };
+
+    // Output debug flags for which tolerances used
+    enum class DebugFlags {
+        STRICT = 0,
+        RELAXED = 1,
+        TUNINGDP = 2
+    };
+
     // ---------  Public methods  ---------
 
     /// Construct the model. It will retain references to the
     /// arguments of this functions, and they are expected to
     /// remain in scope for the lifetime of the solver.
+    /// \param simulator            Reference to main simulator
     /// \param[in] param            parameters
-    /// \param[in] grid             grid data structure
-    /// \param[in] wells            well structure
-    /// \param[in] vfp_properties   Vertical flow performance tables
-    /// \param[in] linsolver        linear solver
-    /// \param[in] eclState         eclipse state
+    /// \param[in] well_model       Reference to well model
     /// \param[in] terminal_output  request output to cout/cerr
     BlackoilModel(Simulator& simulator,
                   const ModelParameters& param,
@@ -159,11 +177,6 @@ public:
                                                    const SimulatorTimerInterface& timer,
                                                    NonlinearSolverType& nonlinear_solver);
 
-    /// Called once after each time step.
-    /// In this class, this function does nothing.
-    /// \param[in] timer                  simulation timer
-    SimulatorReportSingle afterStep(const SimulatorTimerInterface&);
-
     /// Assemble the residual and Jacobian of the nonlinear system.
     SimulatorReportSingle assembleReservoir(const SimulatorTimerInterface& /* timer */,
                                             const int iterationIdx);
@@ -185,6 +198,11 @@ public:
 
     /// Apply an update to the primary variables.
     void updateSolution(const BVector& dx);
+
+    /// Get solution update vector as a PrimaryVariable
+    void prepareStoringSolutionUpdate();
+    void storeSolutionUpdate(const BVector& dx);
+    MaxSolutionUpdateData getMaxSolutionUpdate(const std::vector<unsigned>& ixCells);
 
     /// Return true if output to cout is wanted.
     bool terminalOutputEnabled() const
@@ -209,19 +227,20 @@ public:
 
     /// \brief Compute pore-volume/cell count split among "converged",
     /// "relaxed converged", "unconverged" cells based on CNV point
-    /// measures.
-    std::pair<std::vector<double>, std::vector<int>>
-    characteriseCnvPvSplit(const std::vector<Scalar>& B_avg, const double dt);
+    /// measures. Also returns list of cells where CNV is greater than
+    /// its strict tolerance
+    CnvPvSplitData characteriseCnvPvSplit(const std::vector<Scalar>& B_avg, const double dt);
 
     /// \brief Compute the number of Newtons required by each cell in order to
     /// satisfy the solution change convergence criteria at the last time step.
     void convergencePerCell(const std::vector<Scalar>& B_avg,
-                            const double tol_cnv,
                             const double dt,
+                            const double tol_cnv,
                             const double tol_cnv_energy,
                             const int iteration);
 
     void updateTUNING(const Tuning& tuning);
+    void updateTUNINGDP(const TuningDp& tuning_dp);
 
     ConvergenceReport
     getReservoirConvergence(const double reportTime,
@@ -245,7 +264,7 @@ public:
 
     /// The number of active fluid phases in the model.
     int numPhases() const
-    { return phaseUsage_.num_phases; }
+    { return Indices::numPhases; }
 
     /// Wrapper required due to not following generic API
     template<class T>
@@ -316,22 +335,22 @@ public:
     { return compNames_; }
 
     //! \brief Returns true if an NLDD solver exists
-    bool hasNlddSolver() const 
+    bool hasNlddSolver() const
     { return nlddSolver_ != nullptr; }
 
 protected:
     // ---------  Data members  ---------
     Simulator& simulator_;
     const Grid& grid_;
-    const PhaseUsage phaseUsage_;
     static constexpr bool has_solvent_ = getPropValue<TypeTag, Properties::EnableSolvent>();
     static constexpr bool has_extbo_ = getPropValue<TypeTag, Properties::EnableExtbo>();
     static constexpr bool has_polymer_ = getPropValue<TypeTag, Properties::EnablePolymer>();
     static constexpr bool has_polymermw_ = getPropValue<TypeTag, Properties::EnablePolymerMW>();
-    static constexpr bool has_energy_ = getPropValue<TypeTag, Properties::EnableEnergy>();
+    static constexpr bool has_energy_ = getPropValue<TypeTag, Properties::EnergyModuleType>() == EnergyModules::FullyImplicitThermal;
     static constexpr bool has_foam_ = getPropValue<TypeTag, Properties::EnableFoam>();
     static constexpr bool has_brine_ = getPropValue<TypeTag, Properties::EnableBrine>();
-    static constexpr bool has_micp_ = getPropValue<TypeTag, Properties::EnableMICP>();
+    static constexpr bool has_bioeffects_ = getPropValue<TypeTag, Properties::EnableBioeffects>();
+    static constexpr bool has_micp_ = Indices::enableMICP;
 
     ModelParameters                 param_;
     SimulatorReportSingle failureReport_;
@@ -347,6 +366,8 @@ protected:
     std::vector<std::vector<Scalar>> residual_norms_history_;
     Scalar current_relaxation_;
     BVector dx_old_;
+
+    SolutionVector solUpd_;
 
     std::vector<StepReport> convergence_reports_;
     ComponentName compNames_{};

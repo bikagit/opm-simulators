@@ -60,29 +60,13 @@ typename StandardWellEval<FluidSystem,Indices>::EvalWell
 StandardWellEval<FluidSystem,Indices>::
 extendEval(const Eval& in) const
 {
-    EvalWell out(primary_variables_.numWellEq() + Indices::numEq, in.value());
-    for(int eqIdx = 0; eqIdx < Indices::numEq;++eqIdx) {
-        out.setDerivative(eqIdx, in.derivative(eqIdx));
+    EvalWell out(in.value());
+    // total number of equations/derivatives (well + reservoir)
+    const int totalNumEq = primary_variables_.numWellEq() + Indices::numEq;
+    for(int eqIdx = 0; eqIdx < Indices::numEq; ++eqIdx) {
+        out.setDerivative(eqIdx, in.derivative(eqIdx), totalNumEq);
     }
     return out;
-}
-
-template<class FluidSystem, class Indices>
-void
-StandardWellEval<FluidSystem,Indices>::
-updateWellStateFromPrimaryVariables(WellState<Scalar>& well_state,
-                                    const SummaryState& summary_state,
-                                    DeferredLogger& deferred_logger) const
-{
-    this->primary_variables_.copyToWellState(well_state, deferred_logger);
-
-    WellBhpThpCalculator(baseif_).
-            updateThp(connections_.rho(),
-                      [this,&well_state]() { return this->baseif_.getALQ(well_state); },
-                      {FluidSystem::phaseIsActive(FluidSystem::waterPhaseIdx),
-                       FluidSystem::phaseIsActive(FluidSystem::oilPhaseIdx),
-                       FluidSystem::phaseIsActive(FluidSystem::gasPhaseIdx)},
-                      well_state, summary_state, deferred_logger);
 }
 
 template<class FluidSystem, class Indices>
@@ -98,13 +82,13 @@ computeAccumWell()
 template<class FluidSystem, class Indices>
 ConvergenceReport
 StandardWellEval<FluidSystem,Indices>::
-getWellConvergence(const WellState<Scalar>& well_state,
+getWellConvergence(const WellState<Scalar, IndexTraits>& well_state,
                    const std::vector<Scalar>& B_avg,
                    const Scalar maxResidualAllowed,
                    const Scalar tol_wells,
                    const Scalar relaxed_tolerance_flow,
                    const bool relax_tolerance,
-                   const bool well_is_stopped, 
+                   const bool well_is_stopped,
                    std::vector<Scalar>& res,
                    DeferredLogger& deferred_logger) const
 {
@@ -114,11 +98,10 @@ getWellConvergence(const WellState<Scalar>& well_state,
         res[eq_idx] = std::abs(this->linSys_.residual()[0][eq_idx]);
     }
 
-    std::vector<Scalar> well_flux_residual(baseif_.numComponents());
+    std::vector<Scalar> well_flux_residual(baseif_.numConservationQuantities());
 
     // Finish computation
-    for (int compIdx = 0; compIdx < baseif_.numComponents(); ++compIdx )
-    {
+    for (int compIdx = 0; compIdx < baseif_.numConservationQuantities(); ++compIdx) {
         well_flux_residual[compIdx] = B_avg[compIdx] * res[compIdx];
     }
 
@@ -132,7 +115,7 @@ getWellConvergence(const WellState<Scalar>& well_state,
         }
 
         const unsigned canonicalCompIdx = FluidSystem::solventComponentIndex(phaseIdx);
-        const int compIdx = Indices::canonicalToActiveComponentIndex(canonicalCompIdx);
+        const int compIdx = FluidSystem::canonicalToActiveCompIdx(canonicalCompIdx);
 
         if (std::isnan(well_flux_residual[compIdx])) {
             report.setWellFailed({type, CR::Severity::NotANumber, compIdx, baseif_.name()});
@@ -156,7 +139,7 @@ getWellConvergence(const WellState<Scalar>& well_state,
         checkConvergenceControlEq(well_state,
                                   {1.e3, 1.e4, 1.e-4, 1.e-6, maxResidualAllowed},
                                   std::abs(this->linSys_.residual()[0][Bhp]),
-                                  well_is_stopped, 
+                                  well_is_stopped,
                                   report,
                                   deferred_logger);
 

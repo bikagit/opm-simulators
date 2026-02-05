@@ -46,26 +46,29 @@ assemble(const int /*iterationIdx*/,
     // well model, so we do not need to do it here (when
     // iterationIdx is 0).
 
-    DeferredLogger local_deferredLogger;
-    this->updateWellControls(local_deferredLogger, domain);
-    this->assembleWellEq(dt, domain, local_deferredLogger);
+    // Use do_mpi_gather=false to avoid MPI collective operations in domain solves.
+    auto loggerGuard = wellModel_.groupStateHelper().pushLogger(/*do_mpi_gather=*/false);
+
+    this->updateWellControls(domain);
+    this->assembleWellEq(dt, domain);
+
+    // Update cellRates_ with current contributions from wells in this domain for reservoir linearization
+    wellModel_.updateCellRatesForDomain(domain.index, this->well_domain());
 }
 
 template<typename TypeTag>
 void
 BlackoilWellModelNldd<TypeTag>::
 assembleWellEq(const double dt,
-               const Domain& domain,
-               DeferredLogger& deferred_logger)
+               const Domain& domain)
 {
     OPM_TIMEBLOCK(assembleWellEq);
     for (const auto& well : wellModel_.localNonshutWells()) {
         if (this->well_domain().at(well->name()) == domain.index) {
             well->assembleWellEq(wellModel_.simulator(),
                                  dt,
-                                 wellModel_.wellState(),
-                                 wellModel_.groupState(),
-                                 deferred_logger);
+                                 wellModel_.groupStateHelper(),
+                                 wellModel_.wellState());
         }
     }
 }
@@ -104,7 +107,8 @@ recoverWellSolutionAndUpdateWellState(const BVector& x,
     // Note: no point in trying to do a parallel gathering
     // try/catch here, as this function is not called in
     // parallel but for each individual domain of each rank.
-    DeferredLogger local_deferredLogger;
+    // Use do_mpi_gather=false to avoid MPI collective operations.
+    auto loggerGuard = wellModel_.groupStateHelper().pushLogger(/*do_mpi_gather=*/false);
     for (const auto& well : wellModel_.localNonshutWells()) {
         if (this->well_domain().at(well->name()) == domainIdx) {
             const auto& cells = well->cells();
@@ -115,14 +119,9 @@ recoverWellSolutionAndUpdateWellState(const BVector& x,
             }
             well->recoverWellSolutionAndUpdateWellState(wellModel_.simulator(),
                                                         x_local_,
-                                                        wellModel_.wellState(),
-                                                        local_deferredLogger);
+                                                        wellModel_.groupStateHelper(),
+                                                        wellModel_.wellState());
         }
-    }
-    // TODO: avoid losing the logging information that could
-    // be stored in the local_deferredlogger in a parallel case.
-    if (wellModel_.terminalOutput()) {
-        local_deferredLogger.logMessages();
     }
 }
 
@@ -137,23 +136,26 @@ getWellConvergence(const Domain& domain,
     const bool relax_tolerance = iterationIdx > wellModel_.numStrictIterations();
 
     ConvergenceReport report;
-    for (const auto& well : wellModel_.localNonshutWells()) {
-        if ((this->well_domain().at(well->name()) == domain.index)) {
-            if (well->isOperableAndSolvable() || well->wellIsStopped()) {
-                report += well->getWellConvergence(wellModel_.simulator(),
-                                                   wellModel_.wellState(),
-                                                   B_avg,
-                                                   local_deferredLogger,
-                                                   relax_tolerance);
-            } else {
-                ConvergenceReport xreport;
-                using CR = ConvergenceReport;
-                xreport.setWellFailed({CR::WellFailure::Type::Unsolvable,
-                                       CR::Severity::Normal, -1, well->name()});
-                report += xreport;
+    {
+        // Use do_mpi_gather=false to avoid MPI collective operations in domain solves.
+        auto loggerGuard = wellModel_.groupStateHelper().pushLogger(/*do_mpi_gather=*/false);
+
+        for (const auto& well : wellModel_.localNonshutWells()) {
+            if ((this->well_domain().at(well->name()) == domain.index)) {
+                if (well->isOperableAndSolvable() || well->wellIsStopped()) {
+                    report += well->getWellConvergence(wellModel_.groupStateHelper(),
+                                                       B_avg,
+                                                       relax_tolerance);
+                } else {
+                    ConvergenceReport xreport;
+                    using CR = ConvergenceReport;
+                    xreport.setWellFailed({CR::WellFailure::Type::Unsolvable,
+                                           CR::Severity::Normal, -1, well->name()});
+                    report += xreport;
+                }
             }
         }
-    }
+    } // loggerGuard goes out of scope here, before the OpmLog::debug() calls below
 
     // Log debug messages for NaN or too large residuals.
     if (wellModel_.terminalOutput()) {
@@ -175,8 +177,7 @@ getWellConvergence(const Domain& domain,
 template<typename TypeTag>
 void
 BlackoilWellModelNldd<TypeTag>::
-updateWellControls(DeferredLogger& deferred_logger,
-                   const Domain& domain)
+updateWellControls(const Domain& domain)
 {
     OPM_TIMEBLOCK(updateWellControls);
     if (!wellModel_.wellsActive()) {
@@ -192,9 +193,8 @@ updateWellControls(DeferredLogger& deferred_logger,
             constexpr auto mode = WellInterface<TypeTag>::IndividualOrGroup::Individual;
             well->updateWellControl(wellModel_.simulator(),
                                     mode,
-                                    wellModel_.wellState(),
-                                    wellModel_.groupState(),
-                                    deferred_logger);
+                                    wellModel_.groupStateHelper(),
+                                    wellModel_.wellState());
         }
     }
 }

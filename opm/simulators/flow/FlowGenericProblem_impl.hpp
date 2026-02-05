@@ -65,6 +65,9 @@ FlowGenericProblem(const EclipseState& eclState,
     , gridView_(gridView)
     , lookUpData_(gridView)
 {
+    // we need to update the FluidSystem based on EclipseState before it is passed around
+    this->initFluidSystem_();
+
     enableTuning_ = Parameters::Get<Parameters::EnableTuning>();
     enableDriftCompensation_ = Parameters::Get<Parameters::EnableDriftCompensation>();
     initialTimeStepSize_ = Parameters::Get<Parameters::InitialTimeStepSize<Scalar>>();
@@ -100,7 +103,8 @@ serializationTestObject(const EclipseState& eclState,
     result.solventSaturation_ = {15.0};
     result.solventRsw_ = {18.0};
     result.polymer_ = PolymerSolutionContainer<Scalar>::serializationTestObject();
-    result.micp_ = MICPSolutionContainer<Scalar>::serializationTestObject();
+    result.bioeffects_ = BioeffectsSolutionContainer<Scalar>::serializationTestObject();
+    result.CO2H2_ = CO2H2SolutionContainer<Scalar>::serializationTestObject();
 
     return result;
 }
@@ -193,7 +197,8 @@ readRockParameters_(const std::vector<Scalar>& cellCenterDepths,
         std::size_t numRocktabTables = rock_config.num_rock_tables();
 
         if (overburdTables.size() != numRocktabTables)
-            throw std::runtime_error(std::to_string(numRocktabTables) +" OVERBURD tables is expected, but " + std::to_string(overburdTables.size()) +" is provided");
+            throw std::runtime_error(fmt::format("{} OVERBURD tables is expected, but {} is provided",
+                                     numRocktabTables, overburdTables.size()));
 
         std::vector<Tabulated1DFunction<Scalar>> overburdenTables(numRocktabTables);
         for (std::size_t regionIdx = 0; regionIdx < numRocktabTables; ++regionIdx) {
@@ -212,7 +217,7 @@ readRockParameters_(const std::vector<Scalar>& cellCenterDepths,
     }
     else if (!overburdTables.empty() && rock_config.store()) {
         OpmLog::warning("ROCKOPTS item 2 set to STORE, OVERBURD ignored!");
-    } 
+    }
 }
 
 template<class GridView, class FluidSystem>
@@ -263,12 +268,14 @@ readRockCompactionParameters_()
         maxWaterSaturation_.resize(numElem, 0.0);
 
         if (rock2dTables.size() != numRocktabTables)
-            throw std::runtime_error("Water compation option is selected in ROCKCOMP." + std::to_string(numRocktabTables)
-                                     +" ROCK2D tables is expected, but " + std::to_string(rock2dTables.size()) +" is provided");
+            throw std::runtime_error(fmt::format("Water compation option is selected in ROCKCOMP."
+                                                 " {} ROCK2D tables is expected, but {} is provided",
+                                                 numRocktabTables, rock2dTables.size()));
 
         if (rockwnodTables.size() != numRocktabTables)
-            throw std::runtime_error("Water compation option is selected in ROCKCOMP." + std::to_string(numRocktabTables)
-                                     +" ROCKWNOD tables is expected, but " + std::to_string(rockwnodTables.size()) +" is provided");
+            throw std::runtime_error(fmt::format("Water compation option is selected in ROCKCOMP."
+                                                 " {} ROCKWNOD tables is expected, but {} is provided",
+                                                 numRocktabTables, rockwnodTables.size()));
         //TODO check size match
         rockCompPoroMultWc_.resize(numRocktabTables, TabulatedTwoDFunction(TabulatedTwoDFunction::InterpolationPolicy::Vertical));
         for (std::size_t regionIdx = 0; regionIdx < numRocktabTables; ++regionIdx) {
@@ -336,12 +343,17 @@ typename FlowGenericProblem<GridView,FluidSystem>::Scalar
 FlowGenericProblem<GridView,FluidSystem>::
 rockFraction(unsigned elementIdx, unsigned timeIdx) const
 {
-    // the reference porosity is defined as the accumulated pore volume divided by the
-    // geometric volume of the element. Note that it can
-    // be larger than 1.0 if porevolume multipliers are used
-    // to for instance implement larger boundary cells
-    auto porosity = this->lookUpData_.fieldPropDouble(eclState_.fieldProps(), "PORO", elementIdx);
-    return referencePorosity(elementIdx, timeIdx) / porosity * (1 - porosity);
+    // For the energy equation, we need the volume of the rock.
+    // The volume of the rock is computed by rockFraction * geometric volume of the element.
+    // The reference porosity is defined as porosity * ntg * pore-volume-multiplier.
+    // A common practice in reservoir simulation is to use large pore-volume-multipliers in boundary cells
+    // to model boundary conditions other than no-flow. This may result in reference porosities that are larger than 1.
+    // A simple (1-reference porosity) * geometric volume of the element may give unphysical results.
+    // We therefore instead consider the pore-volume-multiplier as a volume multiplier. The rock fraction is thus given by
+    // (1 - porosity * ntg) * pore-volume-multiplier = (1 - porosity * ntg) * reference porosity / (porosity * ntg)
+    const auto ntg = this->lookUpData_.fieldPropDouble(eclState_.fieldProps(), "NTG", elementIdx);
+    const auto poro_eff = ntg * this->lookUpData_.fieldPropDouble(eclState_.fieldProps(), "PORO", elementIdx);
+    return (1 - poro_eff) * referencePorosity(elementIdx, timeIdx) / poro_eff;
 }
 
 template<class GridView, class FluidSystem>
@@ -353,11 +365,11 @@ updateNum(const std::string& name, std::vector<T>& numbers, std::size_t num_regi
         return;
 
     std::function<void(T, int)> valueCheck = [num_regions,name](T fieldPropValue, [[maybe_unused]] int fieldPropIdx) {
-        if ( fieldPropValue > (int)num_regions) {
-            throw std::runtime_error("Values larger than maximum number of regions "
-                                     + std::to_string(num_regions) + " provided in " + name);
+        if (fieldPropValue > static_cast<int>(num_regions)) {
+            throw std::runtime_error(fmt::format("Values larger than maximum number of regions {} provided in {}",
+                                                 num_regions, name));
         }
-        if ( fieldPropValue <= 0) {
+        if (fieldPropValue <= 0) {
             throw std::runtime_error("zero or negative values provided for region array: " + name);
         }
     };
@@ -456,7 +468,8 @@ beginTimeStep_(bool enableExperiments,
     if (enableExperiments && gridView_.comm().rank() == 0 && episodeIdx >= 0) {
         std::ostringstream ss;
         boost::posix_time::time_facet* facet = new boost::posix_time::time_facet("%d-%b-%Y");
-        boost::posix_time::ptime date = boost::posix_time::from_time_t(startTime) + boost::posix_time::milliseconds(static_cast<long long>(time / prefix::milli));
+        boost::posix_time::ptime date = boost::posix_time::from_time_t(startTime) +
+                                        boost::posix_time::milliseconds(static_cast<long long>(time / prefix::milli));
         ss.imbue(std::locale(std::locale::classic(), facet));
         ss <<"\nTime step " << timeStepIndex << ", stepsize "
                << unit::convert::to(timeStepSize, unit::day) << " days,"
@@ -480,6 +493,7 @@ readBlackoilExtentionsInitialConditions_(std::size_t numDof,
                                          bool enableSolvent,
                                          bool enablePolymer,
                                          bool enablePolymerMolarWeight,
+                                         bool enableBioeffects,
                                          bool enableMICP)
 {
     auto getArray = [](const std::vector<double>& input)
@@ -517,31 +531,33 @@ readBlackoilExtentionsInitialConditions_(std::size_t numDof,
         }
     }
 
-    if (enableMICP) {
+    if (enableBioeffects) {
         if (eclState_.fieldProps().has_double("SMICR")) {
-            micp_.microbialConcentration = getArray(eclState_.fieldProps().get_double("SMICR"));
+            bioeffects_.microbialConcentration = getArray(eclState_.fieldProps().get_double("SMICR"));
         } else {
-            micp_.microbialConcentration.resize(numDof, 0.0);
-        }
-        if (eclState_.fieldProps().has_double("SOXYG")) {
-            micp_.oxygenConcentration = getArray(eclState_.fieldProps().get_double("SOXYG"));
-        } else {
-            micp_.oxygenConcentration.resize(numDof, 0.0);
-        }
-        if (eclState_.fieldProps().has_double("SUREA")) {
-            micp_.ureaConcentration = getArray(eclState_.fieldProps().get_double("SUREA"));
-        } else {
-            micp_.ureaConcentration.resize(numDof, 0.0);
+            bioeffects_.microbialConcentration.resize(numDof, 0.0);
         }
         if (eclState_.fieldProps().has_double("SBIOF")) {
-            micp_.biofilmConcentration = getArray(eclState_.fieldProps().get_double("SBIOF"));
+            bioeffects_.biofilmVolumeFraction = getArray(eclState_.fieldProps().get_double("SBIOF"));
         } else {
-            micp_.biofilmConcentration.resize(numDof, 0.0);
+            bioeffects_.biofilmVolumeFraction.resize(numDof, 0.0);
         }
-        if (eclState_.fieldProps().has_double("SCALC")) {
-            micp_.calciteConcentration = getArray(eclState_.fieldProps().get_double("SCALC"));
-        } else {
-            micp_.calciteConcentration.resize(numDof, 0.0);
+        if (enableMICP) {
+            if (eclState_.fieldProps().has_double("SOXYG")) {
+                bioeffects_.oxygenConcentration = getArray(eclState_.fieldProps().get_double("SOXYG"));
+            } else {
+                bioeffects_.oxygenConcentration.resize(numDof, 0.0);
+            }
+            if (eclState_.fieldProps().has_double("SUREA")) {
+                bioeffects_.ureaConcentration = getArray(eclState_.fieldProps().get_double("SUREA"));
+            } else {
+                bioeffects_.ureaConcentration.resize(numDof, 0.0);
+            }
+            if (eclState_.fieldProps().has_double("SCALC")) {
+                bioeffects_.calciteVolumeFraction = getArray(eclState_.fieldProps().get_double("SCALC"));
+            } else {
+                bioeffects_.calciteVolumeFraction.resize(numDof, 0.0);
+            }
         }
     }
 }
@@ -632,11 +648,11 @@ typename FlowGenericProblem<GridView,FluidSystem>::Scalar
 FlowGenericProblem<GridView,FluidSystem>::
 microbialConcentration(unsigned elemIdx) const
 {
-    if (micp_.microbialConcentration.empty()) {
+    if (bioeffects_.microbialConcentration.empty()) {
         return 0;
     }
 
-    return micp_.microbialConcentration[elemIdx];
+    return bioeffects_.microbialConcentration[elemIdx];
 }
 
 template<class GridView, class FluidSystem>
@@ -644,11 +660,11 @@ typename FlowGenericProblem<GridView,FluidSystem>::Scalar
 FlowGenericProblem<GridView,FluidSystem>::
 oxygenConcentration(unsigned elemIdx) const
 {
-    if (micp_.oxygenConcentration.empty()) {
+    if (bioeffects_.oxygenConcentration.empty()) {
         return 0;
     }
 
-    return micp_.oxygenConcentration[elemIdx];
+    return bioeffects_.oxygenConcentration[elemIdx];
 }
 
 template<class GridView, class FluidSystem>
@@ -656,35 +672,35 @@ typename FlowGenericProblem<GridView,FluidSystem>::Scalar
 FlowGenericProblem<GridView,FluidSystem>::
 ureaConcentration(unsigned elemIdx) const
 {
-    if (micp_.ureaConcentration.empty()) {
+    if (bioeffects_.ureaConcentration.empty()) {
         return 0;
     }
 
-    return micp_.ureaConcentration[elemIdx];
+    return bioeffects_.ureaConcentration[elemIdx];
 }
 
 template<class GridView, class FluidSystem>
 typename FlowGenericProblem<GridView,FluidSystem>::Scalar
 FlowGenericProblem<GridView,FluidSystem>::
-biofilmConcentration(unsigned elemIdx) const
+biofilmVolumeFraction(unsigned elemIdx) const
 {
-    if (micp_.biofilmConcentration.empty()) {
+    if (bioeffects_.biofilmVolumeFraction.empty()) {
         return 0;
     }
 
-    return micp_.biofilmConcentration[elemIdx];
+    return bioeffects_.biofilmVolumeFraction[elemIdx];
 }
 
 template<class GridView, class FluidSystem>
 typename FlowGenericProblem<GridView,FluidSystem>::Scalar
 FlowGenericProblem<GridView,FluidSystem>::
-calciteConcentration(unsigned elemIdx) const
+calciteVolumeFraction(unsigned elemIdx) const
 {
-    if (micp_.calciteConcentration.empty()) {
+    if (bioeffects_.calciteVolumeFraction.empty()) {
         return 0;
     }
 
-    return micp_.calciteConcentration[elemIdx];
+    return bioeffects_.calciteVolumeFraction[elemIdx];
 }
 
 template<class GridView, class FluidSystem>
@@ -749,7 +765,7 @@ operator==(const FlowGenericProblem& rhs) const
            this->solventSaturation_ == rhs.solventSaturation_ &&
            this->solventRsw_ == rhs.solventRsw_ &&
            this->polymer_ == rhs.polymer_ &&
-           this->micp_ == rhs.micp_;
+           this->bioeffects_ == rhs.bioeffects_;
 }
 
 } // namespace Opm

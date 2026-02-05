@@ -78,18 +78,13 @@ struct EnableVapwat { using type = UndefinedProperty; };
 template<class TypeTag, class MyTypeTag>
 struct EnableDisgasInWater { using type = UndefinedProperty; };
 
-//! Enable the ECL-blackoil extension for MICP.
+//! Enable the ECL-blackoil extension for bioeffects (biofilm/MICP)
 template<class TypeTag, class MyTypeTag>
-struct EnableMICP { using type = UndefinedProperty; };
-
-//! Allow the spatial and temporal domains to exhibit non-constant temperature
-//! in the black-oil model
-template<class TypeTag, class MyTypeTag>
-struct EnableTemperature { using type = UndefinedProperty; };
+struct EnableBioeffects { using type = UndefinedProperty; };
 
 template<class TypeTag, class MyTypeTag>
 struct EnableMech { using type = UndefinedProperty; };
-    
+
 //! The relative weight of the residual of the energy equation compared to the mass
 //! residuals
 //!
@@ -103,6 +98,11 @@ struct BlackOilEnergyScalingFactor { using type = UndefinedProperty; };
 //! Similarly to the energy equation, a scaling is applied to the urea equation in MICP
 template<class TypeTag, class MyTypeTag>
 struct BlackOilUreaScalingFactor { using type = UndefinedProperty; };
+
+//! Specifies who temperature is modeled by the simulator
+template<class TypeTag, class MyTypeTag>
+struct EnergyModuleType { using type = UndefinedProperty; };
+
 
 } // namespace Opm::Properties
 

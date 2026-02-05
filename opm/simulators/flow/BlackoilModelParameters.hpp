@@ -55,11 +55,13 @@ struct ToleranceMb { static constexpr Scalar value = 1e-7; };
 template<class Scalar>
 struct ToleranceMbRelaxed { static constexpr Scalar value = 1e-6; };
 
+//TODO change to a simpler number with fewer digits
+//converting J -> RM3 (entalpy / (cp * deltaK * rho) assuming change of 1e-5K of water
 template<class Scalar>
-struct ToleranceEnergyBalance { static constexpr Scalar value = 1e-7; };
+struct ToleranceEnergyBalance { static constexpr Scalar value = 1e-7*41.82; };
 
 template<class Scalar>
-struct ToleranceEnergyBalanceRelaxed { static constexpr Scalar value = 1e-6; };
+struct ToleranceEnergyBalanceRelaxed { static constexpr Scalar value = 1e-6*41.82; };
 
 template<class Scalar>
 struct ToleranceCnv { static constexpr Scalar value = 1e-2; };
@@ -68,10 +70,22 @@ template<class Scalar>
 struct ToleranceCnvRelaxed { static constexpr Scalar value = 1.0; };
 
 template<class Scalar>
-struct ToleranceCnvEnergy { static constexpr Scalar value = 1e-2; };
+struct ToleranceCnvEnergy { static constexpr Scalar value = 1e-2*41.82; };
 
 template<class Scalar>
-struct ToleranceCnvEnergyRelaxed { static constexpr Scalar value = 1.0; };
+struct ToleranceCnvEnergyRelaxed { static constexpr Scalar value = 1.0*41.82; };
+
+template<class Scalar>
+struct ToleranceMaxDp { static constexpr Scalar value = 0.0; };
+
+template<class Scalar>
+struct ToleranceMaxDs { static constexpr Scalar value = 0.0; };
+
+template<class Scalar>
+struct ToleranceMaxDrs { static constexpr Scalar value = 0.0; };
+
+template<class Scalar>
+struct ToleranceMaxDrv { static constexpr Scalar value = 0.0; };
 
 template<class Scalar>
 struct ToleranceWells { static constexpr Scalar value = 1e-4; };
@@ -100,9 +114,11 @@ struct TolerancePressureMsWells { static constexpr Scalar value = 0.01*1e5; };
 template<class Scalar>
 struct MaxPressureChangeMsWells { static constexpr Scalar value = 10*1e5; };
 
-struct MaxNewtonIterationsWithInnerWellIterations { static constexpr int value = 8; };
+struct MaxNewtonIterationsWithInnerWellIterations { static constexpr int value = 99; };
 struct MaxInnerIterMsWells { static constexpr int value = 100; };
 struct MaxInnerIterWells { static constexpr int value = 50; };
+struct MaxWellStatusSwitchInInnerIterWells { static constexpr int value = 99; };
+struct MaxWellStatusSwitchForWells { static constexpr int value = 99; };
 struct ShutUnsolvableWells { static constexpr bool value = true; };
 struct AlternativeWellRateInit { static constexpr bool value = true; };
 struct StrictOuterIterWells { static constexpr int value = 6; };
@@ -139,6 +155,7 @@ struct NetworkMaxPressureUpdateInBars { static constexpr Scalar value = 5.0; };
 struct NonlinearSolver { static constexpr auto value = "newton"; };
 struct LocalSolveApproach { static constexpr auto value = "gauss-seidel"; };
 struct MaxLocalSolveIterations { static constexpr int value = 20; };
+struct NewtonMinIterations { static constexpr int value = 2; };
 
 struct WellGroupConstraintsMaxIterations { static constexpr int value = 1; };
 template<class Scalar>
@@ -207,6 +224,14 @@ public:
     Scalar tolerance_cnv_energy_;
     /// Relaxed local energy convergence tolerance (can be used when iter >= min_strict_cnv_iter_ && cnvViolatedPV < relaxed_max_pv_fraction_).
     Scalar tolerance_cnv_energy_relaxed_;
+    /// Max pressure change during a Newton iteration (TUNINGDP item = TRGDDP)
+    Scalar tolerance_max_dp_;
+    /// Max saturation change during a Newton iteration (TUNINGDP item = TRGDDS)
+    Scalar tolerance_max_ds_;
+    /// Max RS change during a Newton iteration (TUNINGDP item = TRGDDRS)
+    Scalar tolerance_max_drs_;
+    /// Max RV change during a Newton iteration (TUNINGDP item = TRGDDRV)
+    Scalar tolerance_max_drv_;
     /// Well convergence tolerance.
     Scalar tolerance_wells_;
     /// Tolerance for the well control equations
@@ -266,7 +291,7 @@ public:
     /// Update scaling factors for mass balance equations
     bool update_equations_scaling_;
 
-    /// Try to detect oscillation or stagnation.
+    /// Try to detect oscillation or stagnation
     bool use_update_stabilization_;
 
     /// Whether to use MultisegmentWell to handle multisegment wells
@@ -303,7 +328,7 @@ public:
     bool use_implicit_ipr_;
 
     /// Whether to allow checking/changing to group controls during inner well iterations
-    bool check_group_constraints_inner_well_iterations_; 
+    bool check_group_constraints_inner_well_iterations_;
 
     /// Maximum number of iterations in the network solver before relaxing tolerance
     int network_max_strict_outer_iterations_;
@@ -323,10 +348,23 @@ public:
     /// Maximum number of iterations in the well/group switch algorithm
     int well_group_constraints_max_iterations_;
 
-    /// Nonlinear solver type: newton or nldd.
+    /// Maximum number of status switches (open<->stop> in local well iterations
+    int max_well_status_switch_inner_iter_;
+
+    /// Maximum number of status switches (open<->stop> during a time step
+    int max_well_status_switch_;
+
+    /// Nonlinear solver type: newton or nldd
     std::string nonlinear_solver_;
-    /// 'jacobi' and 'gauss-seidel' supported.
+
+    /// 'jacobi' and 'gauss-seidel' supported
     DomainSolveApproach local_solve_approach_{DomainSolveApproach::Jacobi};
+
+    /// Maximum number of Newton iterations per time step
+    int newton_max_iter_;
+
+    /// Minimum number of Newton iterations per time step
+    int newton_min_iter_;
 
     int max_local_solve_iterations_;
 

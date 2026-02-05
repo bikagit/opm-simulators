@@ -30,10 +30,10 @@
 
 
 #include <opm/material/fluidmatrixinteractions/EclMaterialLawManager.hpp>
-
 #include <opm/models/utils/propertysystem.hh>
 
 #include <opm/simulators/flow/FlowBaseProblemProperties.hpp>
+#include <opm/material/thermal/EnergyModuleType.hpp>
 
 #include <tuple>
 
@@ -61,6 +61,10 @@ struct TracerModel<TypeTag, TTag::FlowBaseProblemComp> {
     using type = ::Opm::TracerModel<TypeTag>;
 };
 
+template<class TypeTag>
+struct EnergyModuleType<TypeTag, TTag::FlowBaseProblemComp>
+{ static constexpr EnergyModules value = EnergyModules::NoTemperature; };
+
 // Set the material law for fluid fluxes
 template<class TypeTag>
 struct MaterialLaw<TypeTag, TTag::FlowBaseProblemComp>
@@ -72,10 +76,12 @@ private:
     using Traits = ThreePhaseMaterialTraits<Scalar,
                                             /*wettingPhaseIdx=*/FluidSystem::waterPhaseIdx,
                                             /*nonWettingPhaseIdx=*/FluidSystem::oilPhaseIdx,
-                                            /*gasPhaseIdx=*/FluidSystem::gasPhaseIdx>;
+                                            /*gasPhaseIdx=*/FluidSystem::gasPhaseIdx,
+                                            /* hysteresis */ true,
+                                            /* endpointscaling */ true>;
 
 public:
-    using EclMaterialLawManager = ::Opm::EclMaterialLawManager<Traits>;
+    using EclMaterialLawManager = ::Opm::EclMaterialLaw::Manager<Traits>;
 
     using type = typename EclMaterialLawManager::MaterialLaw;
 };

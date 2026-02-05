@@ -39,6 +39,7 @@
 #include <opm/simulators/wells/ParallelWellInfo.hpp>
 #include <opm/simulators/wells/PerforationData.hpp>
 #include <opm/simulators/wells/WellFilterCake.hpp>
+#include <opm/simulators/wells/GroupStateHelper.hpp>
 #include <opm/simulators/wells/WellProdIndexCalculator.hpp>
 #include <opm/simulators/wells/WellTracerRate.hpp>
 #include <opm/simulators/wells/WGState.hpp>
@@ -58,9 +59,10 @@
 namespace Opm {
     class DeferredLogger;
     class EclipseState;
-    template<class Scalar> class BlackoilWellModelGasLiftGeneric;
-    template<class Scalar> class GasLiftGroupInfo;
-    template<class Scalar> class GasLiftSingleWellGeneric;
+    template<typename Scalar, typename IndexTraits> class BlackoilWellModelGasLiftGeneric;
+    template<typename Scalar, typename IndexTraits> class BlackoilWellModelNetworkGeneric;
+    template<typename Scalar, typename IndexTraits> class GasLiftGroupInfo;
+    template<typename Scalar, typename IndexTraits> class GasLiftSingleWellGeneric;
     template<class Scalar> class GasLiftWellState;
     class Group;
     class GuideRateConfig;
@@ -68,9 +70,9 @@ namespace Opm {
     class Schedule;
     struct SimulatorUpdate;
     class SummaryConfig;
-    template<class Scalar> class VFPProperties;
-    template<class Scalar> class WellInterfaceGeneric;
-    template<class Scalar> class WellState;
+    template<typename Scalar, typename IndexTraits> class VFPProperties;
+    template<typename Scalar, typename IndexTraits> class WellInterfaceGeneric;
+    template<typename Scalar, typename IndexTraits> class WellState;
 } // namespace Opm
 
 namespace Opm { namespace data {
@@ -89,15 +91,17 @@ struct EnableTerminalOutput { static constexpr bool value = true; };
 namespace Opm {
 
 /// Class for handling the blackoil well model.
-template<class Scalar>
+template<typename Scalar, typename IndexTraits>
 class BlackoilWellModelGeneric
 {
+    using GroupStateHelperType =  GroupStateHelper<Scalar, IndexTraits>;
 public:
     BlackoilWellModelGeneric(Schedule& schedule,
-                             BlackoilWellModelGasLiftGeneric<Scalar>& gaslift,
+                             BlackoilWellModelGasLiftGeneric<Scalar, IndexTraits>& gaslift,
+                             BlackoilWellModelNetworkGeneric<Scalar, IndexTraits>& network,
                              const SummaryState& summaryState,
                              const EclipseState& eclState,
-                             const PhaseUsage& phase_usage,
+                             const PhaseUsageInfo<IndexTraits>& phase_usage,
                              const Parallel::Communication& comm);
 
     virtual ~BlackoilWellModelGeneric() = default;
@@ -121,9 +125,6 @@ public:
     //! \brief Returns true if well is defined, open and has connections on current rank.
     bool hasOpenLocalWell(const std::string& well_name) const;
 
-    /// return true if network is active (at least one network well in prediction mode)
-    bool networkActive() const;
-
     // whether there exists any multisegment well open on this process
     bool anyMSWellOpenLocal() const;
 
@@ -136,18 +137,18 @@ public:
     const Well& getWellEcl(const std::string& well_name) const;
     std::vector<Well> getLocalWells(const int timeStepIdx) const;
     const Schedule& schedule() const { return schedule_; }
-    const PhaseUsage& phaseUsage() const { return phase_usage_; }
+    const PhaseUsageInfo<IndexTraits>& phaseUsage() const { return phase_usage_info_; }
     const GroupState<Scalar>& groupState() const { return this->active_wgstate_.group_state; }
-    std::vector<const WellInterfaceGeneric<Scalar>*> genericWells() const
+    std::vector<const WellInterfaceGeneric<Scalar, IndexTraits>*> genericWells() const
     { return {well_container_generic_.begin(), well_container_generic_.end()}; }
 
-    std::vector<WellInterfaceGeneric<Scalar>*> genericWells()
+    std::vector<WellInterfaceGeneric<Scalar, IndexTraits>*> genericWells()
     { return well_container_generic_; }
 
     /*
       Immutable version of the currently active wellstate.
     */
-    const WellState<Scalar>& wellState() const
+    const WellState<Scalar, IndexTraits>& wellState() const
     {
         return this->active_wgstate_.well_state;
     }
@@ -155,7 +156,7 @@ public:
     /*
       Mutable version of the currently active wellstate.
     */
-    WellState<Scalar>& wellState()
+    WellState<Scalar, IndexTraits>& wellState()
     {
         return this->active_wgstate_.well_state;
     }
@@ -163,8 +164,16 @@ public:
     /*
       Will return the currently active nupcolWellState; must update
       the internal nupcol wellstate with updateNupcolWGState() first.
+
+      Both const and non-const accessors are provided. The non-const
+      accessor is required for the WellStateGuard pattern and pushWellState()
+      in WellGroupHelper, which temporarily switches WellGroupHelper to use this state.
     */
-    const WellState<Scalar>& nupcolWellState() const
+    const WellState<Scalar, IndexTraits>& nupcolWellState() const
+    {
+        return this->nupcol_wgstate_.well_state;
+    }
+    WellState<Scalar, IndexTraits>& nupcolWellState()
     {
         return this->nupcol_wgstate_.well_state;
     }
@@ -198,21 +207,9 @@ public:
       with storeWellState() can then subsequently be recovered with the
       resetWellState() method.
     */
-    void commitWGState()
-    {
-        this->last_valid_wgstate_ = this->active_wgstate_;
-        this->last_valid_node_pressures_ = this->node_pressures_;
-    }
+    void commitWGState();
 
     data::GroupAndNetworkValues groupAndNetworkData(const int reportStepIdx) const;
-
-    /// Checks if network is active (at least one network well on prediction).
-    void updateNetworkActiveState(const int report_step);
-
-    /// Checks if there are reasons to perform a pre-step network re-balance.
-    /// (Currently, the only reasons are network well status changes.)
-    /// (TODO: Consider if adding network change events would be helpful.)
-    bool needPreStepNetworkRebalance(const int report_step) const;
 
     /// Shut down any single well
     /// Returns true if the well was actually found and shut.
@@ -240,9 +237,6 @@ public:
 
     bool reportStepStarts() const { return report_step_starts_; }
 
-    bool shouldBalanceNetwork(const int reportStepIndex,
-                              const int iterationIdx) const;
-
     void updateClosedWellsThisStep(const std::string& well_name) const
     {
         this->closed_this_step_.insert(well_name);
@@ -260,8 +254,7 @@ public:
         serializer(local_shut_wells_);
         serializer(closed_this_step_);
         serializer(guideRate_);
-        serializer(node_pressures_);
-        serializer(last_valid_node_pressures_);
+        serializer(genNetwork_);
         serializer(prev_inj_multipliers_);
         serializer(active_wgstate_);
         serializer(last_valid_wgstate_);
@@ -280,17 +273,45 @@ public:
 
     bool isOwner(const std::string& wname) const
     {
-        auto pwInfoPos = std::find_if(this->parallel_well_info_.begin(),
-                                      this->parallel_well_info_.end(),
-                                      [&wname](const auto& pwInfo)
-                                      { return pwInfo.name() == wname; });
+        return this->parallelWellSatisfies
+            (wname, [](const auto& pwInfo) { return pwInfo.isOwner(); });
+    }
 
-        return (pwInfoPos != this->parallel_well_info_.end())
-            && pwInfoPos->isOwner();
+    bool hasLocalCells(const std::string& wname) const
+    {
+        return this->parallelWellSatisfies
+            (wname, [](const auto& pwInfo) { return pwInfo.hasLocalCells(); });
     }
 
     const ConnectionIndexMap& connectionIndexMap(const std::size_t idx)
     { return conn_idx_map_[idx]; }
+
+    GroupStateHelperType& groupStateHelper() { return group_state_helper_; }
+    const GroupStateHelperType& groupStateHelper() const { return group_state_helper_; }
+    std::pair<int, int> getGroupFipnumAndPvtreg() const;
+
+    virtual void calcResvCoeff(const int fipnum,
+                               const int pvtreg,
+                               const std::vector<Scalar>& production_rates,
+                               std::vector<Scalar>& resv_coeff) const = 0;
+    virtual void calcInjResvCoeff(const int fipnum,
+                                  const int pvtreg,
+                                  std::vector<Scalar>& resv_coeff) const = 0;
+
+    const VFPProperties<Scalar,IndexTraits>& getVFPProperties() const
+    {
+        return *vfp_properties_;
+    }
+
+    void updateAndCommunicateGroupData(const int reportStepIdx,
+                                       const int iterationIdx,
+                                       const Scalar tol_nupcol,
+                                       // we only want to update the wellgroup target
+                                       // after the groups have found their controls
+                                       const bool update_wellgrouptarget);
+
+    const EclipseState& eclState() const
+    { return eclState_; }
 
 protected:
     /*
@@ -320,12 +341,12 @@ protected:
       prevWellState() must have been stored with the commitWGState()
       function first.
     */
-    const WellState<Scalar>& prevWellState() const
+    const WellState<Scalar, IndexTraits>& prevWellState() const
     {
         return this->last_valid_wgstate_.well_state;
     }
 
-    const WGState<Scalar>& prevWGState() const
+    const WGState<Scalar, IndexTraits>& prevWGState() const
     {
         return this->last_valid_wgstate_;
     }
@@ -335,7 +356,7 @@ protected:
       last_valid_well_state_ member, that state can then be recovered
       with a subsequent call to resetWellState().
     */
-    void commitWGState(WGState<Scalar> wgstate)
+    void commitWGState(WGState<Scalar, IndexTraits> wgstate)
     {
         this->last_valid_wgstate_ = std::move(wgstate);
     }
@@ -348,7 +369,9 @@ protected:
     void resetWGState()
     {
         this->active_wgstate_ = this->last_valid_wgstate_;
-        this->node_pressures_ = this->last_valid_node_pressures_;
+        this->genNetwork_.resetState();
+        // Update helper pointers to reference the restored active state
+        this->group_state_helper_.updateState(this->wellState(), this->groupState());
     }
 
     /*
@@ -364,7 +387,7 @@ protected:
     void reportGroupSwitching(DeferredLogger& local_deferredLogger) const;
 
     /// \brief Create the parallel well information
-    /// \param localWells The local wells from ECL schedule
+    /// \param wells The local wells from ECL schedule
     std::vector<std::reference_wrapper<ParallelWellInfo<Scalar>>>
     createLocalParallelWellInfo(const std::vector<Well>& wells);
 
@@ -373,23 +396,12 @@ protected:
 
     bool wasDynamicallyShutThisTimeStep(const int well_index) const;
 
-    Scalar updateNetworkPressures(const int reportStepIdx,
-                                  const Scalar damping_factor,
-                                  const Scalar update_upper_bound);
-
     void updateWsolvent(const Group& group,
                         const int reportStepIdx,
-                        const WellState<Scalar>& wellState);
+                        const WellState<Scalar, IndexTraits>& wellState);
     void setWsolvent(const Group& group,
                      const int reportStepIdx,
                      Scalar wsolvent);
-    virtual void calcResvCoeff(const int fipnum,
-                               const int pvtreg,
-                               const std::vector<Scalar>& production_rates,
-                               std::vector<Scalar>& resv_coeff) = 0;
-    virtual void calcInjResvCoeff(const int fipnum,
-                                  const int pvtreg,
-                                  std::vector<Scalar>& resv_coeff) = 0;
 
     /// Assign dynamic well status for each well owned by current rank
     ///
@@ -407,7 +419,7 @@ protected:
     /// few quantities, like the D factor, the Kh product and the CTF, for
     /// shut connections.
     ///
-    /// \param[in] reportStepIdx Zero-based index of current report step.
+    /// \param[in] reportStepIndex Zero-based index of current report step.
     void assignShutConnections(data::Wells& wsrpt,
                                const int reportStepIndex) const;
 
@@ -419,13 +431,11 @@ protected:
                             data::GroupData& gdata) const;
     void assignGroupValues(const int reportStepIdx,
                            std::map<std::string, data::GroupData>& gvalues) const;
-    void assignNodeValues(std::map<std::string, data::NodeData>& nodevalues,
-                          const int reportStepIdx) const;
 
     void calculateEfficiencyFactors(const int reportStepIdx);
 
     void checkGconsaleLimits(const Group& group,
-                             WellState<Scalar>& well_state,
+                             WellState<Scalar, IndexTraits>& well_state,
                              const int reportStepIdx,
                              DeferredLogger& deferred_logger);
 
@@ -437,23 +447,17 @@ protected:
     bool checkGroupHigherConstraints(const Group& group,
                                      DeferredLogger& deferred_logger,
                                      const int reportStepIdx,
-                                     const int max_number_of_group_switch);
-
-    void updateAndCommunicateGroupData(const int reportStepIdx,
-                                       const int iterationIdx,
-                                       const Scalar tol_nupcol,
-                                       const bool update_wellgrouptarget, // we only want to update the wellgrouptarget after the groups have found their controls
-                                       DeferredLogger& deferred_logger);
+                                     const int max_number_of_group_switch,
+                                     const bool update_group_switching_log);
 
     void inferLocalShutWells();
 
     void setRepRadiusPerfLength();
 
     virtual void computePotentials(const std::size_t widx,
-                                   const WellState<Scalar>& well_state_copy,
+                                   const WellState<Scalar, IndexTraits>& well_state_copy,
                                    std::string& exc_msg,
-                                   ExceptionType::ExcEnum& exc_type,
-                                   DeferredLogger& deferred_logger) = 0;
+                                   ExceptionType::ExcEnum& exc_type) = 0;
 
     // Calculating well potentials for each well
     void updateWellPotentials(const int reportStepIdx,
@@ -504,19 +508,19 @@ protected:
     void assignMassGasRate(data::Wells& wsrpt,
                            const Scalar gasDensity) const;
 
+    void updateNONEProductionGroups(const GasLiftOpt& glo, DeferredLogger& deferred_logger);
+
     Schedule& schedule_;
-    
+
     const SummaryState& summaryState_;
     const EclipseState& eclState_;
     const Parallel::Communication& comm_;
-    BlackoilWellModelGasLiftGeneric<Scalar>& gen_gaslift_;
-    BlackoilWellModelWBP<Scalar> wbp_;
+    BlackoilWellModelGasLiftGeneric<Scalar, IndexTraits>& gen_gaslift_;
+    BlackoilWellModelWBP<Scalar, IndexTraits> wbp_;
 
-
-    PhaseUsage phase_usage_;
+    const PhaseUsageInfo<IndexTraits>& phase_usage_info_;
     bool terminal_output_{false};
     bool wells_active_{false};
-    bool network_active_{false};
     bool initial_step_{};
     bool report_step_starts_{};
 
@@ -535,7 +539,7 @@ protected:
     std::function<bool(const std::string&)> not_on_process_{};
 
     // a vector of all the wells.
-    std::vector<WellInterfaceGeneric<Scalar>*> well_container_generic_{};
+    std::vector<WellInterfaceGeneric<Scalar, IndexTraits>*> well_container_generic_{};
 
     std::vector<int> local_shut_wells_{};
 
@@ -549,18 +553,13 @@ protected:
     mutable std::unordered_set<std::string> closed_this_step_;
 
     GuideRate guideRate_;
-    std::unique_ptr<VFPProperties<Scalar>> vfp_properties_{};
-
-    // Network pressures for output and initialization
-    std::map<std::string, Scalar> node_pressures_;
-    // Valid network pressures for output and initialization for safe restart after failed iterations
-    std::map<std::string, Scalar> last_valid_node_pressures_;
+    std::unique_ptr<VFPProperties<Scalar, IndexTraits>> vfp_properties_{};
 
     // previous injection multiplier, it is used in the injection multiplier calculation for WINJMULT keyword
     std::unordered_map<std::string, std::vector<Scalar>> prev_inj_multipliers_;
 
     // Handling for filter cake injection multipliers
-    std::unordered_map<std::string, WellFilterCake<Scalar>> filter_cake_;
+    std::unordered_map<std::string, WellFilterCake<Scalar, IndexTraits>> filter_cake_;
 
     /*
       The various wellState members should be accessed and modified
@@ -568,9 +567,10 @@ protected:
       commitWellState(), resetWellState(), nupcolWellState() and
       updateNupcolWGState().
     */
-    WGState<Scalar> active_wgstate_;
-    WGState<Scalar> last_valid_wgstate_;
-    WGState<Scalar> nupcol_wgstate_;
+    WGState<Scalar, IndexTraits> active_wgstate_;
+    WGState<Scalar, IndexTraits> last_valid_wgstate_;
+    WGState<Scalar, IndexTraits> nupcol_wgstate_;
+    GroupStateHelperType group_state_helper_;
     WellGroupEvents report_step_start_events_; //!< Well group events at start of report step
 
     bool wellStructureChangedDynamically_{false};
@@ -581,8 +581,10 @@ protected:
     // Store map of group name and close offending well for output
     std::map<std::string, std::pair<std::string, std::string>> closed_offending_wells_;
 
+    BlackoilWellModelNetworkGeneric<Scalar,IndexTraits>& genNetwork_;
+
 private:
-    WellInterfaceGeneric<Scalar>* getGenWell(const std::string& well_name);
+    WellInterfaceGeneric<Scalar, IndexTraits>* getGenWell(const std::string& well_name);
 
     template <typename Iter, typename Body>
     void wellUpdateLoop(Iter first, Iter last, const int timeStepIdx, Body&& body);
@@ -593,6 +595,31 @@ private:
 
     void updateEclWellsCTFFromAction(const int timeStepIdx,
                                      const SimulatorUpdate& sim_update);
+
+    /// Check if a well satisfies a particular MPI condition
+    ///
+    /// Common conditions in this context are whether or not a named well is
+    /// owned by the current rank or has connections on the current rank.
+    ///
+    /// \tparam Predicate Condition predicate function type.
+    ///
+    /// \param[in] wname Well name.
+    ///
+    /// \param[in] p Predicate function implementing the specific condition.
+    ///
+    /// \return Whether or not \p wname is a parallel well and, if so, if it
+    /// satisfies the condition \p p.
+    template <typename Predicate>
+    bool parallelWellSatisfies(const std::string& wname, Predicate&& p) const
+    {
+        auto pwInfoPos = std::find_if(this->parallel_well_info_.begin(),
+                                      this->parallel_well_info_.end(),
+                                      [&wname](const auto& pwInfo)
+                                      { return pwInfo.name() == wname; });
+
+        return (pwInfoPos != this->parallel_well_info_.end())
+            && p(*pwInfoPos);
+    }
 
     /// Run caller-defined code for each well owned by current rank
     ///

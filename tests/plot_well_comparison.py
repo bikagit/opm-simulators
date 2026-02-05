@@ -1,10 +1,11 @@
-#!/usr/bin/python3
+#!/usr/bin/env python3
 
 # Generates a PDF with plots of all summary curves from a reference
 # case and a 'new' simulation.
 
 import argparse
 from datetime import datetime, timedelta
+from filelock import FileLock
 import matplotlib.pyplot as plt
 from matplotlib.dates import DateFormatter
 from matplotlib.backends.backend_pdf import PdfPages
@@ -17,7 +18,7 @@ from scipy import integrate, stats
 # Run analysis of a test.
 # Calculate the deviation for each curve
 # and generate a pdf with plots ordered according to deviation
-def run_analysis(ref_file_name, sys_file_name, test_name):
+def run_analysis(ref_file_name, sys_file_name, test_name, ref_name, sim_name):
     ref_file = ESmry(ref_file_name + '.SMSPEC')
     sim_file = ESmry(sys_file_name + '.SMSPEC')
 
@@ -68,7 +69,7 @@ def run_analysis(ref_file_name, sys_file_name, test_name):
         fig, ax = plt.subplots()
         ax.plot(ref_time, ref, linestyle='dashed', linewidth=0.5, marker='o', markersize=1.0)
         ax.plot(sim_time, sim, linewidth=0.5, marker='x', markersize=1.0)
-        ax.legend(['Reference', 'New simulation'])
+        ax.legend([ref_name, sim_name])
         plt.title(r)
         u = ref_file.units(r)
         if u:
@@ -84,16 +85,18 @@ def run_analysis(ref_file_name, sys_file_name, test_name):
     p.close()
 
     if os.path.exists('max_devs.pkl'):
-        with open('max_devs.pkl', 'rb') as f:
-            max_deviations = pickle.load(f)
+        with FileLock('max_devs.lck'):
+            with open('max_devs.pkl', 'rb') as f:
+                max_deviations = pickle.load(f)
     else:
         max_deviations = {}
 
     max_dev = max(deviation, key = lambda x: deviation[x])
     max_deviations[test_name] = deviation[max_dev]
 
-    with open('max_devs.pkl', 'wb') as f:
-        pickle.dump(max_deviations, f)
+    with FileLock('max_devs.lck'):
+        with open('max_devs.pkl', 'wb') as f:
+            pickle.dump(max_deviations, f)
 
 # Rename files to rank them according to maximum deviations
 def reorder_files():
@@ -111,10 +114,13 @@ parser = argparse.ArgumentParser('plot_well_comparison.py')
 parser.add_argument('-c', help='Name of test to process', dest='test_name')
 parser.add_argument('-r', help='Reference file', dest='ref_file')
 parser.add_argument('-s', help='Simulation file', dest='sim_file')
+parser.add_argument('-t', help='Name for first simulation', dest='ref_name', default='Reference')
+parser.add_argument('-u', help='Name for second simulation', dest='sim_name', default='New simulation')
 parser.add_argument('-o', choices=['plot', 'rename'], help='Operation to do', required=True, dest='operation')
 args = parser.parse_args()
 
 if args.operation == 'plot':
-    run_analysis(args.ref_file, args.sim_file, args.test_name)
+    print(f"Processing {args.test_name}")
+    run_analysis(args.ref_file, args.sim_file, args.test_name, args.ref_name, args.sim_name)
 else:
     reorder_files()

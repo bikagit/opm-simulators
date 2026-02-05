@@ -49,8 +49,8 @@ operator==(const PolymerSolutionContainer<Scalar>& rhs) const
 }
 
 template<class Scalar>
-MICPSolutionContainer<Scalar>
-MICPSolutionContainer<Scalar>::serializationTestObject()
+BioeffectsSolutionContainer<Scalar>
+BioeffectsSolutionContainer<Scalar>::serializationTestObject()
 {
     return {{16.0},
             {17.0},
@@ -60,29 +60,56 @@ MICPSolutionContainer<Scalar>::serializationTestObject()
 }
 
 template<class Scalar>
-void MICPSolutionContainer<Scalar>::resize(const unsigned numElems)
+void BioeffectsSolutionContainer<Scalar>::resize(const unsigned numElems)
 {
     microbialConcentration.resize(numElems, 0.0);
     oxygenConcentration.resize(numElems, 0.0);
     ureaConcentration.resize(numElems, 0.0);
-    biofilmConcentration.resize(numElems, 0.0);
-    calciteConcentration.resize(numElems, 0.0);
+    biofilmVolumeFraction.resize(numElems, 0.0);
+    calciteVolumeFraction.resize(numElems, 0.0);
 }
 
 template<class Scalar>
-bool MICPSolutionContainer<Scalar>::
-operator==(const MICPSolutionContainer<Scalar>& rhs) const
+bool BioeffectsSolutionContainer<Scalar>::
+operator==(const BioeffectsSolutionContainer<Scalar>& rhs) const
 {
     return this->microbialConcentration == rhs.microbialConcentration &&
            this->oxygenConcentration == rhs.oxygenConcentration &&
            this->ureaConcentration == rhs.ureaConcentration &&
-           this->biofilmConcentration == rhs.biofilmConcentration &&
-           this->calciteConcentration == rhs.calciteConcentration;
+           this->biofilmVolumeFraction == rhs.biofilmVolumeFraction &&
+           this->calciteVolumeFraction == rhs.calciteVolumeFraction;
+}
+
+template<class Scalar>
+CO2H2SolutionContainer<Scalar>
+CO2H2SolutionContainer<Scalar>::serializationTestObject()
+{
+    return {{21.0},
+            {22.0},
+            {23.0}};
+}
+
+template<class Scalar>
+void CO2H2SolutionContainer<Scalar>::resize(const unsigned numElems)
+{
+    cXmfCO2.resize(numElems, 0.0);
+    cXmfH2.resize(numElems, 0.0);
+    cYmfwat.resize(numElems, 0.0);
+}
+
+template<class Scalar>
+bool CO2H2SolutionContainer<Scalar>::
+operator==(const CO2H2SolutionContainer<Scalar>& rhs) const
+{
+    return this->cXmfCO2 == rhs.cXmfCO2 &&
+           this->cXmfH2 == rhs.cXmfH2 &&
+           this->cYmfwat == rhs.cYmfwat;
 }
 
 #define INSTANTIATE_TYPE(T) \
     template struct PolymerSolutionContainer<T>; \
-    template struct MICPSolutionContainer<T>;
+    template struct BioeffectsSolutionContainer<T>; \
+    template struct CO2H2SolutionContainer<T>;
 
 INSTANTIATE_TYPE(double)
 

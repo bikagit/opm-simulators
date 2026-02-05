@@ -13,13 +13,12 @@
 
 # Mandatory call to project
 
-cmake_minimum_required (VERSION 3.10)
+cmake_minimum_required (VERSION 3.23)
 
 project(opm-simulators C CXX)
 
 
 option(SIBLING_SEARCH "Search for other modules in sibling directories?" ON)
-set( USE_OPENMP_DEFAULT OFF ) # Use of OpenMP is considered experimental
 option(BUILD_FLOW "Build the production oriented flow simulator?" ON)
 option(BUILD_FLOW_VARIANTS "Build the variants for flow by default?" OFF)
 option(BUILD_FLOW_FLOAT_VARIANTS "Build the variants for flow using float?" OFF)
@@ -70,6 +69,19 @@ if (CONVERT_CUDA_TO_HIP AND CMAKE_VERSION VERSION_GREATER_EQUAL "3.21")
   find_package(hipsparse REQUIRED)
   find_package(hipblas REQUIRED)
   link_libraries(roc::hipblas roc::hipsparse)
+  find_program(HIPIFY_PERL_COMMAND
+               NAMES hipify-perl
+               HINTS
+                PATH /opt/rocm/bin
+  )
+  if(HIPIFY_PERL_COMMAND)
+    add_executable(hipify-perl IMPORTED GLOBAL)
+    set_target_properties(hipify-perl
+                          PROPERTIES IMPORTED_LOCATION ${HIPIFY_PERL_COMMAND}
+    )
+  else()
+    message(FATAL_ERROR "hipify-perl required to convert CUDA to HIP not found")
+  endif()
 elseif(CONVERT_CUDA_TO_HIP)
   message("To generate HIP code for AMD GPUs run CMake with version >= 3.21")
 endif()
@@ -97,13 +109,20 @@ if (OPM_ENABLE_PYTHON)
     if(${CMAKE_VERSION} VERSION_LESS "3.18.0")
       find_package(Python3 REQUIRED COMPONENTS Interpreter Development)
     else()
-      find_package(Python3 REQUIRED COMPONENTS Interpreter Development.Module)
+      find_package(Python3 REQUIRED COMPONENTS Interpreter Development.Module Development.Embed)
     endif()
   endif()
   if(Python3_VERSION_MINOR LESS 3)
     # Python native namespace packages requires python >= 3.3
     message(SEND_ERROR "OPM requires python >= 3.3 but only version ${Python3_VERSION} was found")
   endif()
+
+  find_package(pybind11 CONFIG)
+
+  if(NOT pybind11_FOUND)
+    include(DownloadPyBind11)
+  endif()
+
   # Compatibility settings for PythonInterp and PythonLibs
   # used e.g. in FindCwrap, pybind11
   set(PYTHON_EXECUTABLE ${Python3_EXECUTABLE})
@@ -147,10 +166,6 @@ endif()
 if(USE_GPU_BRIDGE)
   set(COMPILE_GPU_BRIDGE 1)
 endif()
-
-# not the same location as most of the other projects? this hook overrides
-macro (dir_hook)
-endmacro (dir_hook)
 
 # project information is in dune.module. Read this file and set variables.
 # we cannot generate dune.module since it is read by dunecontrol before
@@ -320,7 +335,7 @@ if(USE_AMGX)
   endif()
 endif()
 
-macro (config_hook)
+macro(${project}_config_hook)
   opm_need_version_of ("dune-common")
   opm_need_version_of ("dune-istl")
   if(dune-fem_FOUND)
@@ -358,32 +373,30 @@ macro (config_hook)
   if(have_float_from_chars)
     set(HAVE_FLOATING_POINT_FROM_CHARS 1)
   endif()
-endmacro (config_hook)
+endmacro()
 
-macro (prereqs_hook)
-endmacro (prereqs_hook)
-
-macro (sources_hook)
+macro(${project}_sources_hook)
   if(OPENCL_FOUND)
     include(opencl-source-provider)
     list(APPEND opm-simulators_SOURCES ${PROJECT_BINARY_DIR}/clSources.cpp)
   endif()
   if(QuadMath_FOUND)
     get_target_property(qm_defs QuadMath::QuadMath INTERFACE_COMPILE_DEFINITIONS)
-    list(APPEND qm_defs HAVE_QUAD=1)
     get_target_property(qm_options QuadMath::QuadMath INTERFACE_COMPILE_OPTIONS)
+    if(qm_defs)
+      list(APPEND qm_defs HAVE_QUAD=1)
+    else()
+      set(qm_defs HAVE_QUAD=1)
+    endif()
     set_source_files_properties(opm/models/nonlinear/newtonmethodparams.cpp
                                 opm/models/utils/parametersystem.cpp
                                 opm/models/utils/simulatorutils.cpp
                                 PROPERTIES COMPILE_DEFINITIONS "${qm_defs}"
                                 COMPILE_OPTIONS "${qm_options}")
   endif()
-endmacro (sources_hook)
+endmacro()
 
-macro (fortran_hook)
-endmacro (fortran_hook)
-
-macro (files_hook)
+macro(${project}_files_hook)
   if(hip_FOUND)
     get_filename_component(CXX_COMPILER ${CMAKE_CXX_COMPILER} NAME)
     if(hip_VERSION VERSION_LESS "5.3")
@@ -423,20 +436,22 @@ macro (files_hook)
   # (CMakeLists_files.cmake and because we need the created lists during
   # then inclusion of OpmLibMain
   include (CMakeLists_files.cmake)
-endmacro (files_hook)
+endmacro()
 
-macro (tests_hook)
+macro(${project}_tests_hook)
   if(HYPRE_FOUND)
     list(APPEND tests_SOURCES tests/test_HyprePreconditionerCPU.cpp)
+    list(APPEND tests_SOURCES tests/gpuistl/test_HypreInterfaceCPU.cpp)
     if(HYPRE_USING_CUDA OR HYPRE_USING_HIP)
       list(APPEND tests_SOURCES tests/test_HyprePreconditionerGPU.cpp)
+      list(APPEND tests_SOURCES tests/gpuistl/test_HypreInterfaceGPU.cpp)
     endif()
   endif()
   if(AMGX_FOUND)
+    list(APPEND tests_SOURCES tests/gpuistl/test_AmgxInterface.cpp)
     list(APPEND tests_SOURCES tests/test_AmgxPreconditioner.cpp)
   endif()
-endmacro (tests_hook)
-
+endmacro()
 
 # all setup common to the OPM library modules is done here
 include (OpmLibMain)
@@ -445,14 +460,14 @@ opm_add_test(test_tuning_trgmbe
               SOURCES
                 tests/test_tuning_TRGMBE.cpp
               LIBRARIES
-                ${Boost_UNIT_TEST_FRAMEWORK_LIBRARY}
+                Boost::unit_test_framework
               ONLY_COMPILE)
 
 opm_add_test(test_tuning_tsinit_nextstep
               SOURCES
                 tests/test_tuning_TSINIT_NEXTSTEP.cpp
               LIBRARIES
-                ${Boost_UNIT_TEST_FRAMEWORK_LIBRARY} opmcommon
+                Boost::unit_test_framework opmcommon
               ONLY_COMPILE)
 
 # this test is identical to the simulation of the lens problem that
@@ -482,13 +497,14 @@ if(QuadMath_FOUND)
                  SOURCES
                  examples/${tapp}.cpp
                  ONLY_COMPILE)
-    target_link_libraries(${tapp}_quad QuadMath::QuadMath)
+    target_link_libraries(${tapp}_quad PRIVATE QuadMath::QuadMath)
     target_compile_definitions(${tapp}_quad PRIVATE HAVE_QUAD=1)
   endforeach()
 endif()
 
 target_sources(test_outputdir PRIVATE $<TARGET_OBJECTS:moduleVersion>)
 target_sources(test_equil PRIVATE $<TARGET_OBJECTS:moduleVersion>)
+target_sources(test_group_higher_constraints PRIVATE $<TARGET_OBJECTS:moduleVersion>)
 target_sources(test_RestartSerialization PRIVATE $<TARGET_OBJECTS:moduleVersion>)
 target_sources(test_glift1 PRIVATE $<TARGET_OBJECTS:moduleVersion>)
 if(MPI_FOUND)
@@ -518,6 +534,10 @@ if(MPI_FOUND)
   include (${CMAKE_CURRENT_SOURCE_DIR}/parallelUnitTests.cmake)
 endif()
 
+if(OPM_ENABLE_PYTHON)
+  include (${CMAKE_CURRENT_SOURCE_DIR}/pythonIntegrationTests.cmake)
+endif()
+
 include(OpmBashCompletion)
 
 if (NOT BUILD_FLOW)
@@ -540,12 +560,14 @@ endif()
 
 add_library(moduleVersion OBJECT opm/simulators/utils/moduleVersion.cpp)
 set_property(TARGET moduleVersion PROPERTY POSITION_INDEPENDENT_CODE ON)
+opm_add_target_options(TARGET moduleVersion)
 
 add_library(MainDispatchDynamic OBJECT opm/simulators/flow/MainDispatchDynamic.cpp)
+opm_add_target_options(TARGET MainDispatchDynamic)
 set_property(TARGET MainDispatchDynamic PROPERTY POSITION_INDEPENDENT_CODE ON)
 
 # We only wait for the hipification process if we are compiling HIP.
-# That is, we need to wait for the HIP header files to be generated 
+# That is, we need to wait for the HIP header files to be generated
 # before the rest of the code can compile. HIP header file includes
 # anything in gpuistl, say.
 if (CONVERT_CUDA_TO_HIP)
@@ -553,7 +575,7 @@ if (CONVERT_CUDA_TO_HIP)
 endif()
 
 if(TARGET fmt::fmt)
-  target_link_libraries(MainDispatchDynamic fmt::fmt)
+  target_link_libraries(MainDispatchDynamic PRIVATE fmt::fmt)
 endif()
 
 if(TARGET opmcommon)
@@ -561,44 +583,46 @@ if(TARGET opmcommon)
 endif()
 
 if(USE_TRACY_PROFILER AND Tracy_FOUND)
-  target_link_libraries(MainDispatchDynamic Tracy::TracyClient)
+  target_link_libraries(MainDispatchDynamic PRIVATE Tracy::TracyClient)
 endif()
 
 # Strictly we only depend on the update-version target,
 # but this is not exposed in a super-build.
 add_dependencies(moduleVersion opmsimulators)
 
-set(FLOW_MODELS blackoil brine energy extbo foam gasoil gaswater
+set(FLOW_MODELS blackoil blackoil_temp brine energy extbo foam gasoil gaswater
                 oilwater oilwater_brine gaswater_brine oilwater_polymer
                 oilwater_polymer_injectivity micp polymer solvent solvent_foam
                 gasoil_energy brine_saltprecipitation
                 gaswater_saltprec_vapwat gaswater_saltprec_energy brine_precsalt_vapwat
                 blackoil_legacyassembly gasoildiffuse gaswater_dissolution
-                gaswater_dissolution_diffuse gaswater_energy gaswater_solvent)
+                gaswater_dissolution_diffuse gaswater_energy gaswater_solvent biofilm
+                blackoil_nohyst)
 set(FLOW_VARIANT_MODELS brine_energy onephase onephase_energy)
 
 set(FLOW_TGTS)
 foreach(OBJ ${COMMON_MODELS} ${FLOW_MODELS} ${FLOW_VARIANT_MODELS})
   add_library(flow_lib${OBJ} OBJECT flow/flow_${OBJ}.cpp)
+  opm_add_target_options(TARGET flow_lib${OBJ})
   list(APPEND FLOW_TGTS $<TARGET_OBJECTS:flow_lib${OBJ}>)
   if(TARGET fmt::fmt)
-    target_link_libraries(flow_lib${OBJ} fmt::fmt)
+    target_link_libraries(flow_lib${OBJ} PRIVATE fmt::fmt)
   endif()
   if(TARGET opmcommon)
       add_dependencies(flow_lib${OBJ} opmcommon)
   endif()
   if(USE_TRACY_PROFILER AND Tracy_FOUND)
-    target_link_libraries(flow_lib${OBJ} Tracy::TracyClient)
+    target_link_libraries(flow_lib${OBJ} PRIVATE Tracy::TracyClient)
   endif()
 
   # We only wait for the hipification process if we are compiling HIP.
-  # That is, we need to wait for the HIP header files to be generated 
+  # That is, we need to wait for the HIP header files to be generated
   # before the rest of the code can compile. HIP header file includes
   # anything in gpuistl, say.
   if(CONVERT_CUDA_TO_HIP)
     add_dependencies(flow_lib${OBJ} hipified_headers)
   endif()
-  
+
   opm_add_test(flow_${OBJ}
                ONLY_COMPILE
                SOURCES
@@ -720,13 +744,20 @@ if(BUILD_FLOW_FLOAT_VARIANTS)
 endif()
 
 if (OPM_ENABLE_PYTHON)
-  add_subdirectory(python)
+  add_subdirectory(python/simulators)
 endif()
 
 add_custom_target(extra_test ${CMAKE_CTEST_COMMAND} -C ExtraTests)
 
-# must link libraries after target 'opmsimulators' has been defined
+# must activate avx2 flags and C11 for mixed precision.
+if(HAVE_AVX2_EXTENSION)
+  # Trying to set the standard using `set(CMAKE_C_STANDARD 11)` had no effect, still used -std=c99
+  # Hence we are requesting C17. (-std=c99 -D_ISOC11_SOURCE also seems to work)
+  set_property(SOURCE ${AVX2_SOURCE_FILES} PROPERTY COMPILE_FLAGS "${AVX2_FLAGS}" APPEND_STRING)
+  set_property(TARGET opmsimulators PROPERTY C_STANDARD 17)
+endif()
 
+# must link libraries after target 'opmsimulators' has been defined
 if(CUDA_FOUND)
   if (NOT USE_HIP)
     target_link_libraries(opmsimulators
@@ -737,7 +768,7 @@ if(CUDA_FOUND)
     )
 
     foreach(tgt test_gpu_safe_call test_cuda_check_last_error test_GpuVector test_is_gpu_pointer)
-      target_link_libraries(${tgt} CUDA::cudart)
+      target_link_libraries(${tgt} PRIVATE CUDA::cudart)
     endforeach()
   endif()
   if(USE_GPU_BRIDGE)
@@ -775,6 +806,14 @@ if(CUDA_FOUND)
                        throw_macros_on_gpu
                        preconditioner_factory_gpu
                        gpuBlackOilFluidSystem
+                       blackoilfluidstategpu
+                       conditional_storage
+                       GpuPressureTransferPolicy
+                       deviceBlockOperations
+                       primary_variables_gpu
+                       MiniVector
+                       MiniMatrix
+                       GpuSparseTable
                        PROPERTIES LABELS ${gpu_label})
   if(MPI_FOUND)
     set_tests_properties(GpuOwnerOverlapCopy PROPERTIES LABELS ${gpu_label})
@@ -784,12 +823,15 @@ endif()
 if(HYPRE_FOUND)
   if (HYPRE_USING_CUDA)
     set_tests_properties(HyprePreconditionerGPU PROPERTIES LABELS gpu_cuda)
+    set_tests_properties(HypreInterfaceGPU PROPERTIES LABELS gpu_cuda)
   elseif (HYPRE_USING_HIP)
     set_tests_properties(HyprePreconditionerGPU PROPERTIES LABELS gpu_hip)
+    set_tests_properties(HypreInterfaceGPU PROPERTIES LABELS gpu_hip)
   endif()
 endif()
 
 if(AMGX_FOUND)
+  set_tests_properties(AmgxInterface PROPERTIES LABELS gpu_cuda)
   set_tests_properties(AmgxPreconditioner PROPERTIES LABELS gpu_cuda)
 endif()
 
@@ -822,4 +864,3 @@ endif()
 
 install(DIRECTORY doc/man1 DESTINATION ${CMAKE_INSTALL_MANDIR}
   FILES_MATCHING PATTERN "*.1")
-

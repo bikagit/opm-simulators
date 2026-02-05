@@ -29,11 +29,12 @@
 #include <opm/input/eclipse/Schedule/ScheduleTypes.hpp>
 
 #include <opm/material/densead/Evaluation.hpp>
+#include <opm/material/fluidsystems/BlackOilDefaultFluidSystemIndices.hpp>
 
 #include <opm/simulators/wells/FractionCalculator.hpp>
 #include <opm/simulators/wells/GroupState.hpp>
 #include <opm/simulators/wells/TargetCalculator.hpp>
-#include <opm/simulators/wells/WellGroupHelpers.hpp>
+#include <opm/simulators/wells/GroupStateHelper.hpp>
 #include <opm/simulators/wells/WellInterfaceGeneric.hpp>
 #include <opm/simulators/wells/WellState.hpp>
 
@@ -43,22 +44,22 @@
 
 namespace Opm {
 
-template<class Scalar>
+template<typename Scalar, typename IndexTraits>
 template<class EvalWell>
-void WellGroupControls<Scalar>::
+void WellGroupControls<Scalar, IndexTraits>::
 getGroupInjectionControl(const Group& group,
-                         const WellState<Scalar>& well_state,
-                         const GroupState<Scalar>& group_state,
-                         const Schedule& schedule,
-                         const SummaryState& summaryState,
+                         const GroupStateHelperType& groupStateHelper,
                          const InjectorType& injectorType,
                          const EvalWell& bhp,
                          const EvalWell& injection_rate,
                          const RateConvFunc& rateConverter,
                          Scalar efficiencyFactor,
-                         EvalWell& control_eq,
-                         DeferredLogger& deferred_logger) const
+                         EvalWell& control_eq) const
 {
+    const auto& well_state = groupStateHelper.wellState();
+    const auto& group_state = groupStateHelper.groupState();
+    const auto& schedule = groupStateHelper.schedule();
+    const auto& summaryState = groupStateHelper.summaryState();
     // Setting some defaults to silence warnings below.
     // Will be overwritten in the switch statement.
     Phase injectionPhase = Phase::WATER;
@@ -102,14 +103,12 @@ getGroupInjectionControl(const Group& group,
             // Inject share of parents control
             const auto& parent = schedule.getGroup(group.parent(), well_.currentStep());
             efficiencyFactor *= group.getGroupEfficiencyFactor();
-            getGroupInjectionControl(parent, well_state,
-                                     group_state, schedule,
-                                     summaryState, injectorType,
+            getGroupInjectionControl(parent, groupStateHelper,
+                                     injectorType,
                                      bhp, injection_rate,
                                      rateConverter,
                                      efficiencyFactor,
-                                     control_eq,
-                                     deferred_logger);
+                                     control_eq);
             return;
         }
     }
@@ -125,7 +124,7 @@ getGroupInjectionControl(const Group& group,
 
     const auto target_rate = well_state.well(well_.indexOfWell()).group_target;
     if (target_rate) {
-        control_eq = injection_rate - *target_rate;
+        control_eq = injection_rate - target_rate->target_value;
     } else {
         const auto& controls = well.injectionControls(summaryState);
         control_eq = bhp - controls.bhp_limit;
@@ -133,18 +132,14 @@ getGroupInjectionControl(const Group& group,
     return;
 }
 
-template<class Scalar>
+template<typename Scalar, typename IndexTraits>
 std::optional<Scalar>
-WellGroupControls<Scalar>::
+WellGroupControls<Scalar, IndexTraits>::
 getGroupInjectionTargetRate(const Group& group,
-                            const WellState<Scalar>& well_state,
-                            const GroupState<Scalar>& group_state,
-                            const Schedule& schedule,
-                            const SummaryState& summaryState,
+                            const GroupStateHelperType& groupStateHelper,
                             const InjectorType& injectorType,
                             const RateConvFunc& rateConverter,
-                            Scalar efficiencyFactor,
-                            DeferredLogger& deferred_logger) const
+                            Scalar efficiencyFactor) const
 {
     // Setting some defaults to silence warnings below.
     // Will be overwritten in the switch statement.
@@ -169,7 +164,7 @@ getGroupInjectionTargetRate(const Group& group,
         // Should not be here.
         assert(false);
     }
-    auto currentGroupControl = group_state.injection_control(group.name(), injectionPhase);
+    auto currentGroupControl = groupStateHelper.groupState().injection_control(group.name(), injectionPhase);
     if (currentGroupControl == Group::InjectionCMode::FLD ||
         currentGroupControl == Group::InjectionCMode::NONE) {
         if (!group.injectionGroupControlAvailable(injectionPhase)) {
@@ -184,11 +179,10 @@ getGroupInjectionTargetRate(const Group& group,
             return std::nullopt;
         } else {
             // Inject share of parents control
-            const auto& parent = schedule.getGroup( group.parent(), well_.currentStep());
+            const auto& parent = groupStateHelper.schedule().getGroup( group.parent(), well_.currentStep());
             efficiencyFactor *= group.getGroupEfficiencyFactor();
-            return getGroupInjectionTargetRate(parent, well_state, group_state,
-                                               schedule, summaryState, injectorType,
-                                               rateConverter, efficiencyFactor, deferred_logger);
+            return getGroupInjectionTargetRate(parent, groupStateHelper, injectorType,
+                                               rateConverter, efficiencyFactor);
         }
     }
 
@@ -196,24 +190,29 @@ getGroupInjectionTargetRate(const Group& group,
         return std::nullopt;
     }
 
-    return well_state.well(well_.indexOfWell()).group_target;
+    const auto& group_target = groupStateHelper.wellState().well(well_.indexOfWell()).group_target;
+    if (!group_target.has_value()) {
+        return std::nullopt;
+    }
+
+    return group_target->target_value;
 }
 
-template<class Scalar>
+template<typename Scalar, typename IndexTraits>
 template<class EvalWell>
-void WellGroupControls<Scalar>::
+void WellGroupControls<Scalar, IndexTraits>::
 getGroupProductionControl(const Group& group,
-                          const WellState<Scalar>& well_state,
-                          const GroupState<Scalar>& group_state,
-                          const Schedule& schedule,
-                          const SummaryState& summaryState,
+                          const GroupStateHelperType& groupStateHelper,
                           const EvalWell& bhp,
                           const std::vector<EvalWell>& rates,
                           const RateConvFunc& rateConverter,
                           Scalar efficiencyFactor,
-                          EvalWell& control_eq,
-                          DeferredLogger& deferred_logger) const
+                          EvalWell& control_eq) const
 {
+    const auto& group_state = groupStateHelper.groupState();
+    const auto& summaryState = groupStateHelper.summaryState();
+    const auto& schedule = groupStateHelper.schedule();
+    const auto& well_state = groupStateHelper.wellState();
     const Group::ProductionCMode& currentGroupControl = group_state.production_control(group.name());
     if (currentGroupControl == Group::ProductionCMode::FLD ||
         currentGroupControl == Group::ProductionCMode::NONE) {
@@ -233,16 +232,14 @@ getGroupProductionControl(const Group& group,
             // Produce share of parents control
             const auto& parent = schedule.getGroup(group.parent(), well_.currentStep());
             efficiencyFactor *= group.getGroupEfficiencyFactor();
-            getGroupProductionControl(parent, well_state, group_state,
-                                      schedule, summaryState, bhp,
+            getGroupProductionControl(parent, groupStateHelper, bhp,
                                       rates, rateConverter,
-                                      efficiencyFactor, control_eq, deferred_logger);
+                                      efficiencyFactor, control_eq);
             return;
         }
     }
 
     const auto& well = well_.wellEcl();
-    const auto pu = well_.phaseUsage();
 
     if (!group.isProductionGroup()) {
         // use bhp as control eq and let the updateControl code find a valid control
@@ -255,27 +252,18 @@ getGroupProductionControl(const Group& group,
     // This is the group containing the control we will check against.
 
     // Make conversion factors for RESV <-> surface rates.
-    std::vector<Scalar> resv_coeff(well_.phaseUsage().num_phases, 1.0);
+    std::vector<Scalar> resv_coeff(well_.phaseUsage().numActivePhases(), 1.0);
     rateConverter(0, well_.pvtRegionIdx(), group.name(), resv_coeff); // FIPNUM region 0 here, should use FIPNUM from WELSPECS.
 
     // gconsale may adjust the grat target.
     // the adjusted rates is send to the targetCalculator
-    Scalar gratTargetFromSales = 0.0;
-    if (group_state.has_grat_sales_target(group.name()))
-        gratTargetFromSales = group_state.grat_sales_target(group.name());
 
-    WGHelpers::TargetCalculator tcalc(currentGroupControl,
-                                      pu,
-                                      resv_coeff,
-                                      gratTargetFromSales,
-                                      group.name(),
-                                      group_state,
-                                      group.has_gpmaint_control(currentGroupControl));
+    GroupStateHelpers::TargetCalculator<Scalar, IndexTraits> tcalc{groupStateHelper, resv_coeff, group};
 
     const auto target_rate = well_state.well(well_.indexOfWell()).group_target;
     if (target_rate) {
         const auto current_rate = -tcalc.calcModeRateFromRates(rates); // Switch sign since 'rates' are negative for producers.
-        control_eq = current_rate - *target_rate;
+        control_eq = current_rate - target_rate->target_value;
     } else {
         const auto& controls = well.productionControls(summaryState);
         control_eq = bhp - controls.bhp_limit;
@@ -283,17 +271,17 @@ getGroupProductionControl(const Group& group,
     return;
 }
 
-template<class Scalar>
-Scalar WellGroupControls<Scalar>::
+template<typename Scalar, typename IndexTraits>
+Scalar
+WellGroupControls<Scalar, IndexTraits>::
 getGroupProductionTargetRate(const Group& group,
-                             const WellState<Scalar>& well_state,
-                             const GroupState<Scalar>& group_state,
-                             const Schedule& schedule,
-                             const SummaryState& summaryState,
+                             const GroupStateHelperType& groupStateHelper,
                              const RateConvFunc& rateConverter,
-                             Scalar efficiencyFactor,
-                             DeferredLogger& deferred_logger) const
+                             Scalar efficiencyFactor) const
 {
+    const auto& well_state = groupStateHelper.wellState();
+    const auto& group_state = groupStateHelper.groupState();
+    const auto& schedule = groupStateHelper.schedule();
     const Group::ProductionCMode& currentGroupControl = group_state.production_control(group.name());
     if (currentGroupControl == Group::ProductionCMode::FLD ||
         currentGroupControl == Group::ProductionCMode::NONE) {
@@ -303,14 +291,10 @@ getGroupProductionTargetRate(const Group& group,
             // Produce share of parents control
             const auto& parent = schedule.getGroup(group.parent(), well_.currentStep());
             efficiencyFactor *= group.getGroupEfficiencyFactor();
-            return getGroupProductionTargetRate(parent, well_state, group_state,
-                                                schedule, summaryState,
-                                                rateConverter, efficiencyFactor,
-                                                deferred_logger);
+            return getGroupProductionTargetRate(parent, groupStateHelper,
+                                                rateConverter, efficiencyFactor);
         }
     }
-
-    const auto pu = well_.phaseUsage();
 
     if (!group.isProductionGroup()) {
         return 1.0;
@@ -320,29 +304,18 @@ getGroupProductionTargetRate(const Group& group,
     // This is the group containing the control we will check against.
 
     // Make conversion factors for RESV <-> surface rates.
-    std::vector<Scalar> resv_coeff(well_.phaseUsage().num_phases, 1.0);
+    std::vector<Scalar> resv_coeff(well_.phaseUsage().numActivePhases(), 1.0);
     rateConverter(0, well_.pvtRegionIdx(), group.name(), resv_coeff); // FIPNUM region 0 here, should use FIPNUM from WELSPECS.
 
-    // gconsale may adjust the grat target.
-    // the adjusted rates is send to the targetCalculator
-    Scalar gratTargetFromSales = 0.0;
-    if (group_state.has_grat_sales_target(group.name()))
-        gratTargetFromSales = group_state.grat_sales_target(group.name());
-
-    WGHelpers::TargetCalculator tcalc(currentGroupControl,
-                                      pu,
-                                      resv_coeff,
-                                      gratTargetFromSales,
-                                      group.name(),
-                                      group_state,
-                                      group.has_gpmaint_control(currentGroupControl));
-
+    GroupStateHelpers::TargetCalculator<Scalar, IndexTraits> tcalc{groupStateHelper,
+                                                                   resv_coeff,
+                                                                   group};
 
     const auto target_rate = well_state.well(well_.indexOfWell()).group_target;
     if (!target_rate) {
         return 1.0;
     }
-    if (*target_rate == 0.0) {
+    if (target_rate->target_value == 0.0) {
         return 0.0;
     }
     const auto& ws = well_state.well(well_.indexOfWell());
@@ -350,26 +323,24 @@ getGroupProductionTargetRate(const Group& group,
     const auto current_rate = -tcalc.calcModeRateFromRates(rates); // Switch sign since 'rates' are negative for producers.
     Scalar scale = 1.0;
     if (current_rate > 1e-14)
-        scale = *target_rate / current_rate;
+        scale = target_rate->target_value / current_rate;
 
     return scale;
 }
 
-template<class Scalar>
-std::pair<Scalar, Group::ProductionCMode> WellGroupControls<Scalar>::
-getAutoChokeGroupProductionTargetRate(const std::string& name,
+template<typename Scalar, typename IndexTraits>
+std::pair<Scalar, Group::ProductionCMode> WellGroupControls<Scalar, IndexTraits>::
+getAutoChokeGroupProductionTargetRate(const Group& bottom_group,
                                       const Group& group,
-                                      const WellState<Scalar>& well_state,
-                                      const GroupState<Scalar>& group_state,
-                                      const Schedule& schedule,
-                                      const SummaryState& summaryState,
+                                      const GroupStateHelperType& groupStateHelper,
                                       const std::vector<Scalar>& resv_coeff,
-                                      Scalar efficiencyFactor,
-                                      const int reportStepIdx,
-                                      const PhaseUsage& pu,
-                                      const GuideRate* guideRate,
-                                      DeferredLogger& deferred_logger)
+                                      Scalar efficiencyFactor)
 {
+    const auto& schedule = groupStateHelper.schedule();
+    const auto& summaryState = groupStateHelper.summaryState();
+    const int reportStepIdx = groupStateHelper.reportStepIdx();
+    const GuideRate* guideRate = &groupStateHelper.guideRate();
+    const auto& group_state = groupStateHelper.groupState();
     const Group::ProductionCMode& currentGroupControl = group_state.production_control(group.name());
     if (currentGroupControl == Group::ProductionCMode::FLD ||
         currentGroupControl == Group::ProductionCMode::NONE) {
@@ -379,10 +350,8 @@ getAutoChokeGroupProductionTargetRate(const std::string& name,
             // Produce share of parents control
             const auto& parent = schedule.getGroup(group.parent(), reportStepIdx);
             efficiencyFactor *= group.getGroupEfficiencyFactor();
-            return getAutoChokeGroupProductionTargetRate(name, parent, well_state, group_state,
-                                                schedule, summaryState,
-                                                resv_coeff, efficiencyFactor, reportStepIdx, pu,
-                                                guideRate, deferred_logger);
+            return getAutoChokeGroupProductionTargetRate(bottom_group, parent, groupStateHelper,
+                                                resv_coeff, efficiencyFactor);
         }
     }
 
@@ -397,30 +366,18 @@ getAutoChokeGroupProductionTargetRate(const std::string& name,
     // std::vector<double> resv_coeff(well_.phaseUsage().num_phases, 1.0);
     // rateConverter(0, well_.pvtRegionIdx(), group.name(), resv_coeff); // FIPNUM region 0 here, should use FIPNUM from WELSPECS.
 
-    // gconsale may adjust the grat target.
-    // the adjusted rates is send to the targetCalculator
-    Scalar gratTargetFromSales = 0.0;
-    if (group_state.has_grat_sales_target(group.name()))
-        gratTargetFromSales = group_state.grat_sales_target(group.name());
+    GroupStateHelpers::TargetCalculator<Scalar, IndexTraits> tcalc{groupStateHelper,
+                                                                   resv_coeff,
+                                                                   group};
 
-    WGHelpers::TargetCalculator tcalc(currentGroupControl,
-                                      pu,
-                                      resv_coeff,
-                                      gratTargetFromSales,
-                                      group.name(),
-                                      group_state,
-                                      group.has_gpmaint_control(currentGroupControl));
-
-    WGHelpers::FractionCalculator fcalc(schedule,
-                                        well_state,
-                                        group_state,
-                                        summaryState,
-                                        reportStepIdx,
-                                        guideRate,
-                                        tcalc.guideTargetMode(),
-                                        pu,
-                                        true,
-                                        Phase::OIL);
+    GroupStateHelpers::FractionCalculator<Scalar, IndexTraits> fcalc(schedule,
+                                                                     groupStateHelper,
+                                                                     summaryState,
+                                                                     reportStepIdx,
+                                                                     guideRate,
+                                                                     tcalc.guideTargetMode(),
+                                                                     true,
+                                                                     Phase::OIL);
 
     auto localFraction = [&](const std::string& child) {
         return fcalc.localFraction(child, child); //Note child needs to be passed to always include since the global isGrup map is not updated yet.
@@ -431,13 +388,8 @@ getAutoChokeGroupProductionTargetRate(const std::string& name,
         return tcalc.calcModeRateFromRates(groupTargetReductions);
     };
 
-    std::optional<Group::ProductionControls> ctrl;
-    if (!group.has_gpmaint_control(currentGroupControl))
-        ctrl = group.productionControls(summaryState);
-
-    const Scalar orig_target = tcalc.groupTarget(ctrl, deferred_logger);
-    const auto chain = WellGroupHelpers<Scalar>::groupChainTopBot(name, group.name(),
-                                                                  schedule, reportStepIdx);
+    const Scalar orig_target = tcalc.groupTarget();
+    const auto chain = groupStateHelper.groupChainTopBot(bottom_group.name(), group.name());
     // Because 'name' is the last of the elements, and not an ancestor, we subtract one below.
     const std::size_t num_ancestors = chain.size() - 1;
     Scalar target = orig_target;
@@ -457,34 +409,26 @@ getAutoChokeGroupProductionTargetRate(const std::string& name,
 }
 
 #define INSTANTIATE(T,...)                                               \
-    template void WellGroupControls<T>::                                 \
+    template void WellGroupControls<T, BlackOilDefaultFluidSystemIndices>::                                 \
         getGroupInjectionControl(const Group&,                           \
-                                 const WellState<T>&,                    \
-                                 const GroupState<T>&,                   \
-                                 const Schedule&,                        \
-                                 const SummaryState&,                    \
+                                 const GroupStateHelper<T, BlackOilDefaultFluidSystemIndices>&,             \
                                  const InjectorType&,                    \
                                  const __VA_ARGS__& bhp,                 \
                                  const __VA_ARGS__& injection_rate,      \
                                  const RateConvFunc& rateConverter,      \
                                  T efficiencyFactor,                     \
-                                 __VA_ARGS__& control_eq,                \
-                                 DeferredLogger& deferred_logger) const; \
-    template void WellGroupControls<T>::                                 \
+                                 __VA_ARGS__& control_eq) const;         \
+    template void WellGroupControls<T, BlackOilDefaultFluidSystemIndices>::                                 \
         getGroupProductionControl(const Group&,                          \
-                                  const WellState<T>&,                   \
-                                  const GroupState<T>&,                  \
-                                  const Schedule&,                       \
-                                  const SummaryState&,                   \
+                                  const GroupStateHelper<T, BlackOilDefaultFluidSystemIndices>&,            \
                                   const __VA_ARGS__& bhp,                \
                                   const std::vector<__VA_ARGS__>&,       \
                                   const RateConvFunc& rateConverter,     \
                                   T efficiencyFactor,                    \
-                                  __VA_ARGS__& control_eq,               \
-                                  DeferredLogger& deferred_logger) const;
+                                  __VA_ARGS__& control_eq) const;
 
 #define INSTANTIATE_TYPE(T)                      \
-    template class WellGroupControls<T>;         \
+    template class WellGroupControls<T, BlackOilDefaultFluidSystemIndices>;         \
     INSTANTIATE(T,DenseAd::Evaluation<T,3,0u>)   \
     INSTANTIATE(T,DenseAd::Evaluation<T,4,0u>)   \
     INSTANTIATE(T,DenseAd::Evaluation<T,5,0u>)   \

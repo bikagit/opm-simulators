@@ -364,7 +364,7 @@ template<class Scalar>
 Scalar VFPHelpers<Scalar>::
 findTHP(const std::vector<Scalar>& bhp_array,
         const std::vector<double>& thp_array,
-        Scalar bhp, 
+        Scalar bhp,
         const bool find_largest)
 {
     int nthp = thp_array.size();
@@ -434,12 +434,12 @@ findTHP(const std::vector<Scalar>& bhp_array,
     }
     //bhp_array not sorted, raw search.
     else {
-        //Here we're into damage prevention territory, and there may be any number of  
+        //Here we're into damage prevention territory, and there may be any number of
         //solutions (including zero). The well is currently not controlled by THP, and
-        //since we're doing severe extrapolaton we would also like, if possible, to prevent 
-        //it from switcing to THP. Accordingly, if there are multiple solutions, we return 
-        //the value for the intersection corresponding to the largest (smallest) THP-value 
-        //for producers (injectors). 
+        //since we're doing severe extrapolaton we would also like, if possible, to prevent
+        //it from switcing to THP. Accordingly, if there are multiple solutions, we return
+        //the value for the intersection corresponding to the largest (smallest) THP-value
+        //for producers (injectors).
 
         //first check which extrapolations are valid
         const bool first_slope_positive = bhp_array[1] >= bhp_array[0];
@@ -499,11 +499,14 @@ findTHP(const std::vector<Scalar>& bhp_array,
             const Scalar& y1 = bhp_array[array_ix+1];
             thp = findX(x0, x1, y0, y1, bhp);
         } else {
-            // no intersection, just return largest/smallest value in table
-            if (find_largest) {
-                thp = thp_array[nthp-1];
-            } else {
+            // No intersections from interpolation or extrapolation 
+            // bhp is either smaller than or larger than all values in
+            // bhp_array. If bhp < all values, return smallest thp-value
+            // in table, otherwise return largest.
+            if (bhp < bhp_array[0]) {
                 thp = thp_array[0];
+            } else {
+                thp = thp_array[nthp-1];
             }
         }
     }
@@ -555,10 +558,10 @@ intersectWithIPR(const VFPProdTable& table,
                  const std::function<Scalar(const Scalar)>& adjust_bhp)
 {
     // Given fixed thp, wfr, gfr and alq, this function finds a stable (-flo, bhp)-intersection
-    // between the ipr-line and bhp(flo) from table, if such an intersection exists. For multiple 
+    // between the ipr-line and bhp(flo) from table, if such an intersection exists. For multiple
     // stable intersections, the one corresponding the largest flo is returned as long as this intersection
     // lies within the tabulated values. If the ipr-line lies above all (flo, bhp) points, the intersection
-    // is determined by extrapolation based on the last two points. 
+    // is determined by extrapolation based on the last two points.
     // The adjust_bhp-function is used to adjust the vfp-table bhp-values to actual bhp-values due
     // to vfp/well ref-depth differences and/or WVFPDP-related pressure adjustments.
 
@@ -578,7 +581,7 @@ intersectWithIPR(const VFPProdTable& table,
     }
     // find largest flo (flo_x) for which y = bhp(flo) + (flo-a)/b = 0 and dy/dflo > 0
     Scalar flo_x = -1.0;
-    Scalar flo0, flo1;
+    Scalar flo0;
     Scalar y0, y1;
     flo0 = 0.0; // start by checking flo=0
     auto flo_i = findInterpData(flo0, table.getFloAxis());
@@ -587,7 +590,7 @@ intersectWithIPR(const VFPProdTable& table,
 
     const std::vector<double>& flos = table.getFloAxis();
     for (size_t i = 0; i < flos.size(); ++i) {
-        flo1 = flos[i];
+        const auto flo1 = flos[i];
         flo_i = findInterpData(flo1, flos);
         bhp_i = interpolate(table, flo_i, thp_i, wfr_i, gfr_i, alq_i);
         y1 = adjust_bhp(bhp_i.value) + (flo1 - ipr_a)/ipr_b;
@@ -601,9 +604,9 @@ intersectWithIPR(const VFPProdTable& table,
             flo0 = flo1;
             y0 = y1;
         } else if (y1 < 0 && y0 < y1 && flo_x < 0) { // at last interval
-            // If y0 < y1 < 0, there is a stable intersection above the largest flo-value by 
-            // extrapolation. If no previous stable intersections were found, i.e., ipr-line lies 
-            // above all (flo, bhp) points, then we return this intersection. Otherwise, we don't 
+            // If y0 < y1 < 0, there is a stable intersection above the largest flo-value by
+            // extrapolation. If no previous stable intersections were found, i.e., ipr-line lies
+            // above all (flo, bhp) points, then we return this intersection. Otherwise, we don't
             // trust it (avoid vfp-extrapolation whenever possible)
             Scalar w = -y0/(y1-y0); // w > 1.0
             flo_x = flo0 + w*(flo1 - flo0);

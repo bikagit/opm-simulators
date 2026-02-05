@@ -117,7 +117,7 @@ apply(Vector& rhs,
 
 	bool use_multithreading = true;
 #if HAVE_OPENMP
-	// if user  manually sets --threads-per-process=1, do not use multithreading 
+	// if user  manually sets --threads-per-process=1, do not use multithreading
         if (omp_get_max_threads() == 1)
 	    use_multithreading = false;
 #endif // HAVE_OPENMP
@@ -274,7 +274,8 @@ using PolyHedralGrid3D = Dune::PolyhedralGrid<3, 3>;
     INSTANTIATE(T,3)        \
     INSTANTIATE(T,4)        \
     INSTANTIATE(T,5)        \
-    INSTANTIATE(T,6)
+    INSTANTIATE(T,6)        \
+    INSTANTIATE(T,7)
 
 INSTANTIATE_TYPE(double)
 

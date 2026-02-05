@@ -37,6 +37,7 @@
 #include <opm/material/common/Valgrind.hpp>
 
 #include <opm/models/common/multiphasebaseproperties.hh>
+#include <opm/models/blackoil/blackoilenergymodules.hh>
 #include <opm/models/discretization/common/fvbaseproperties.hh>
 
 #if HAVE_ECL_INPUT
@@ -71,15 +72,9 @@ template <class TypeTag>
 class BlackOilConvectiveMixingModule<TypeTag, /*enableConvectiveMixing=*/false>
 {
     using Scalar = GetPropType<TypeTag, Properties::Scalar>;
-    using FluidSystem = GetPropType<TypeTag, Properties::FluidSystem>;
     using RateVector = GetPropType<TypeTag, Properties::RateVector>;
     using Evaluation = GetPropType<TypeTag, Properties::Evaluation>;
-    using Indices = GetPropType<TypeTag, Properties::Indices>;
     using IntensiveQuantities = GetPropType<TypeTag, Properties::IntensiveQuantities>;
-    using GridView = GetPropType<TypeTag, Properties::GridView>;
-
-    enum { conti0EqIdx = Indices::conti0EqIdx };
-    enum { dimWorld = GridView::dimensionworld };
 
 public:
     struct ConvectiveMixingModuleParam
@@ -143,7 +138,7 @@ class BlackOilConvectiveMixingModule<TypeTag, /*enableConvectiveMixing=*/true>
     enum { dimWorld = GridView::dimensionworld };
     enum { waterPhaseIdx = FluidSystem::waterPhaseIdx };
     enum { oilPhaseIdx = FluidSystem::oilPhaseIdx };
-    static constexpr bool enableEnergy = getPropValue<TypeTag, Properties::EnableEnergy>();
+    static constexpr bool enableFullyImplicitThermal = (getPropValue<TypeTag, Properties::EnergyModuleType>() == EnergyModules::FullyImplicitThermal);
     static constexpr unsigned contiEnergyEqIdx = Indices::contiEnergyEqIdx;
 
 public:
@@ -183,7 +178,7 @@ public:
                                  const IntensiveQuantities& intQuantsEx,
                                  const unsigned phaseIdx,
                                  const ConvectiveMixingModuleParam& info) {
-        
+
         if (info.active_.empty()) {
             return;
         }
@@ -381,7 +376,7 @@ public:
 
             const auto convectiveFlux = -trans * transMult * info.Xhi_[up.pvtRegionIndex()] * invB *
                                         pressure_difference_convective_mixing * RsupRestricted / (visc * faceArea);
-            unsigned activeGasCompIdx = Indices::canonicalToActiveComponentIndex(FluidSystem::gasCompIdx);
+            unsigned activeGasCompIdx = FluidSystem::canonicalToActiveCompIdx(FluidSystem::gasCompIdx);
             if (globalUpIndex == globalIndexIn) {
                 flux[conti0EqIdx + activeGasCompIdx] += convectiveFlux;
             }
@@ -389,7 +384,7 @@ public:
                 flux[conti0EqIdx + activeGasCompIdx] += Opm::getValue(convectiveFlux);
             }
 
-            if constexpr (enableEnergy) {
+            if constexpr (enableFullyImplicitThermal) {
                 const auto& h = up.fluidState().enthalpy(liquidPhaseIdx) *
                                 FluidSystem::referenceDensity(FluidSystem::gasPhaseIdx, up.pvtRegionIndex());
                 if (globalUpIndex == globalIndexIn) {

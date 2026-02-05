@@ -28,11 +28,11 @@
 #ifndef EWOMS_BLACK_OIL_EXTENSIVE_QUANTITIES_HH
 #define EWOMS_BLACK_OIL_EXTENSIVE_QUANTITIES_HH
 
+#include <opm/models/blackoil/blackoilbioeffectsmodules.hh>
 #include <opm/models/blackoil/blackoildiffusionmodule.hh>
 #include <opm/models/blackoil/blackoilenergymodules.hh>
 #include <opm/models/blackoil/blackoilpolymermodules.hh>
 #include <opm/models/blackoil/blackoilsolventmodules.hh>
-#include <opm/models/blackoil/blackoilmicpmodules.hh>
 #include <opm/models/common/multiphasebaseextensivequantities.hh>
 
 namespace Opm {
@@ -53,15 +53,14 @@ class BlackOilExtensiveQuantities
     : public MultiPhaseBaseExtensiveQuantities<TypeTag>
     , public BlackOilSolventExtensiveQuantities<TypeTag, getPropValue<TypeTag, Properties::EnableSolvent>()>
     , public BlackOilPolymerExtensiveQuantities<TypeTag, getPropValue<TypeTag, Properties::EnablePolymer>()>
-    , public BlackOilEnergyExtensiveQuantities<TypeTag, getPropValue<TypeTag, Properties::EnableEnergy>()>
+    , public BlackOilEnergyExtensiveQuantities<TypeTag, getPropValue<TypeTag, Properties::EnergyModuleType>()>
     , public BlackOilDiffusionExtensiveQuantities<TypeTag, getPropValue<TypeTag, Properties::EnableDiffusion>()>
-    , public BlackOilMICPExtensiveQuantities<TypeTag, getPropValue<TypeTag, Properties::EnableMICP>()>
+    , public BlackOilBioeffectsExtensiveQuantities<TypeTag, getPropValue<TypeTag, Properties::EnableBioeffects>()>
 {
     using MultiPhaseParent = MultiPhaseBaseExtensiveQuantities<TypeTag>;
 
     using Implementation = GetPropType<TypeTag, Properties::ExtensiveQuantities>;
     using ElementContext = GetPropType<TypeTag, Properties::ElementContext>;
-    using FluidSystem = GetPropType<TypeTag, Properties::FluidSystem>;
 
     enum { enableDiffusion = getPropValue<TypeTag, Properties::EnableDiffusion>() };
     using DiffusionExtensiveQuantities = BlackOilDiffusionExtensiveQuantities<TypeTag, enableDiffusion>;

@@ -22,6 +22,8 @@
 
 #include <opm/models/discretization/common/fvbaseparameters.hh>
 
+#include <opm/models/nonlinear/newtonmethodparams.hpp>
+
 #include <opm/models/utils/parametersystem.hpp>
 
 #include <algorithm>
@@ -47,6 +49,10 @@ BlackoilModelParameters<Scalar>::BlackoilModelParameters()
     tolerance_cnv_relaxed_ = std::max(tolerance_cnv_, Parameters::Get<Parameters::ToleranceCnvRelaxed<Scalar>>());
     tolerance_cnv_energy_ = Parameters::Get<Parameters::ToleranceCnvEnergy<Scalar>>();
     tolerance_cnv_energy_relaxed_ = std::max(tolerance_cnv_energy_, Parameters::Get<Parameters::ToleranceCnvEnergyRelaxed<Scalar>>());
+    tolerance_max_dp_ = Parameters::Get<Parameters::ToleranceMaxDp<Scalar>>();
+    tolerance_max_ds_ = Parameters::Get<Parameters::ToleranceMaxDs<Scalar>>();
+    tolerance_max_drs_ = Parameters::Get<Parameters::ToleranceMaxDrs<Scalar>>();
+    tolerance_max_drv_ = Parameters::Get<Parameters::ToleranceMaxDrv<Scalar>>();
     tolerance_wells_ = Parameters::Get<Parameters::ToleranceWells<Scalar>>();
     tolerance_well_control_ = Parameters::Get<Parameters::ToleranceWellControl<Scalar>>();
     max_welleq_iter_ = Parameters::Get<Parameters::MaxWelleqIter>();
@@ -62,6 +68,8 @@ BlackoilModelParameters<Scalar>::BlackoilModelParameters()
     max_niter_inner_well_iter_ = Parameters::Get<Parameters::MaxNewtonIterationsWithInnerWellIterations>();
     shut_unsolvable_wells_ = Parameters::Get<Parameters::ShutUnsolvableWells>();
     max_inner_iter_wells_ = Parameters::Get<Parameters::MaxInnerIterWells>();
+    max_well_status_switch_inner_iter_ = Parameters::Get<Parameters::MaxWellStatusSwitchInInnerIterWells>();
+    max_well_status_switch_ = Parameters::Get<Parameters::MaxWellStatusSwitchForWells>();
     maxSinglePrecisionTimeStep_ = Parameters::Get<Parameters::MaxSinglePrecisionDays<Scalar>>() * 24 * 60 * 60;
     min_strict_cnv_iter_ = Parameters::Get<Parameters::MinStrictCnvIter>();
     min_strict_mb_iter_ = Parameters::Get<Parameters::MinStrictMbIter>();
@@ -91,6 +99,8 @@ BlackoilModelParameters<Scalar>::BlackoilModelParameters()
     max_local_solve_iterations_ = Parameters::Get<Parameters::MaxLocalSolveIterations>();
     local_tolerance_scaling_mb_ = Parameters::Get<Parameters::LocalToleranceScalingMb<Scalar>>();
     local_tolerance_scaling_cnv_ = Parameters::Get<Parameters::LocalToleranceScalingCnv<Scalar>>();
+    newton_max_iter_ = Parameters::Get<Parameters::NewtonMaxIterations>();
+    newton_min_iter_ = Parameters::Get<Parameters::NewtonMinIterations>();
     nldd_num_initial_newton_iter_ = Parameters::Get<Parameters::NlddNumInitialNewtonIter>();
     nldd_relative_mobility_change_tol_ = Parameters::Get<Parameters::NlddRelativeMobilityChangeTol<Scalar>>();
     num_local_domains_ = Parameters::Get<Parameters::NumLocalDomains>();
@@ -131,7 +141,7 @@ void BlackoilModelParameters<Scalar>::registerParameters()
         ("Absolute maximum tolerated for residuals without cutting the time step size");
     Parameters::Register<Parameters::RelaxedMaxPvFraction<Scalar>>
         ("The fraction of the pore volume of the reservoir "
-         "where the volumetric error (CNV) may be voilated "
+         "where the volumetric error (CNV) may be violated "
          "during strict Newton iterations.");
     Parameters::Register<Parameters::ToleranceMb<Scalar>>
         ("Tolerated mass balance error relative to total mass present");
@@ -153,6 +163,22 @@ void BlackoilModelParameters<Scalar>::registerParameters()
     Parameters::Register<Parameters::ToleranceCnvEnergyRelaxed<Scalar>>
         ("Relaxed local energy convergence tolerance that applies for iterations "
          "after the iterations with the strict tolerance");
+    Parameters::Register<Parameters::ToleranceMaxDp<Scalar>>
+        ("Tolerance for max pressure change during a Newton iteration. "
+         "A value greater than 0.0 allows for convergence regardless "
+         "of residual tolerances. Use with care!");
+    Parameters::Register<Parameters::ToleranceMaxDs<Scalar>>
+        ("Tolerance for max saturation change during a Newton iteration. "
+         "A value greater than 0.0 allows for convergence regardless "
+         "of residual tolerances. Use with care!");
+    Parameters::Register<Parameters::ToleranceMaxDrs<Scalar>>
+        ("Tolerance for max RS change during a Newton iteration. "
+         "A value greater than 0.0 allows for convergence regardless "
+         "of residual tolerances. Use with care!");
+    Parameters::Register<Parameters::ToleranceMaxDrv<Scalar>>
+        ("Tolerance for max RV change during a Newton iteration. "
+         "A value greater than 0.0 allows for convergence regardless "
+         "of residual tolerances. Use with care!");
     Parameters::Register<Parameters::ToleranceWells<Scalar>>
         ("Well convergence tolerance");
     Parameters::Register<Parameters::ToleranceWellControl<Scalar>>
@@ -183,6 +209,10 @@ void BlackoilModelParameters<Scalar>::registerParameters()
         ("Shut unsolvable wells");
     Parameters::Register<Parameters::MaxInnerIterWells>
         ("Maximum number of inner iterations for standard wells");
+    Parameters::Register<Parameters::MaxWellStatusSwitchInInnerIterWells>
+        ("Maximum number of status switching (stop<->open) for a well during inner iterations.");
+    Parameters::Register<Parameters::MaxWellStatusSwitchForWells>
+        ("Maximum number of status switching (stop<->open) for a well during a time-step.");
     Parameters::Register<Parameters::AlternativeWellRateInit>
         ("Use alternative well rate initialization procedure");
     Parameters::Register<Parameters::RegularizationFactorWells<Scalar>>
@@ -224,7 +254,7 @@ void BlackoilModelParameters<Scalar>::registerParameters()
     Parameters::Register<Parameters::UseImplicitIpr>
         ("Compute implict IPR for stability checks and stable solution search");
     Parameters::Register<Parameters::CheckGroupConstraintsInnerWellIterations>
-        ("Allow checking of group constraints during inner well iterations");        
+        ("Allow checking of group constraints during inner well iterations");
     Parameters::Register<Parameters::NetworkMaxStrictOuterIterations>
         ("Maximum outer iterations in network solver before relaxing tolerance");
     Parameters::Register<Parameters::NetworkMaxOuterIterations>
@@ -239,6 +269,9 @@ void BlackoilModelParameters<Scalar>::registerParameters()
         ("Choose nonlinear solver. Valid choices are newton or nldd.");
     Parameters::Register<Parameters::LocalSolveApproach>
         ("Choose local solve approach. Valid choices are jacobi and gauss-seidel");
+    Parameters::SetDefault<Parameters::NewtonMaxIterations>(20);
+    Parameters::Register<Parameters::NewtonMinIterations>
+        ("The minimum number of Newton iterations per time step");
     Parameters::Register<Parameters::MaxLocalSolveIterations>
         ("Max iterations for local solves with NLDD nonlinear solver.");
     Parameters::Register<Parameters::LocalToleranceScalingMb<Scalar>>

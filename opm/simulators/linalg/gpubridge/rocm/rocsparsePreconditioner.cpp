@@ -83,7 +83,8 @@ setJacMat(const BlockedMatrix<Scalar>& jMat)
     template class rocsparsePreconditioner<T,3>; \
     template class rocsparsePreconditioner<T,4>; \
     template class rocsparsePreconditioner<T,5>; \
-    template class rocsparsePreconditioner<T,6>;
+    template class rocsparsePreconditioner<T,6>; \
+    template class rocsparsePreconditioner<T,7>;
 
 INSTANTIATE_TYPE(double)
 
@@ -92,4 +93,3 @@ INSTANTIATE_TYPE(float)
 #endif
 
 } //namespace Opm
-

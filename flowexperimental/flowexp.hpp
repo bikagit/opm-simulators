@@ -168,6 +168,8 @@ public:
         Parameters::Hide<Parameters::MaxInnerIterMsWells>();
         Parameters::Hide<Parameters::MaxNewtonIterationsWithInnerWellIterations>();
         Parameters::Hide<Parameters::MaxInnerIterWells>();
+        Parameters::Hide<Parameters::MaxWellStatusSwitchInInnerIterWells>();
+        Parameters::Hide<Parameters::MaxWellStatusSwitchForWells>();
         Parameters::Hide<Parameters::MaxSinglePrecisionDays<Scalar>>();
         Parameters::Hide<Parameters::MinStrictCnvIter>();
         Parameters::Hide<Parameters::MinStrictMbIter>();

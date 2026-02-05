@@ -43,6 +43,7 @@
 #include <opm/material/fluidstates/BlackOilFluidState.hpp>
 #include <opm/material/fluidsystems/BlackOilFluidSystem.hpp>
 
+#include <opm/models/blackoil/blackoilenergymodules.hh>
 #include <opm/models/blackoil/blackoilproperties.hh>
 #include <opm/models/discretization/common/fvbaseproperties.hh>
 #include <opm/models/utils/parametersystem.hpp>
@@ -113,20 +114,20 @@ class OutputBlackOilModule : public GenericOutputBlackoilModule<GetPropType<Type
     static constexpr int gasCompIdx = FluidSystem::gasCompIdx;
     static constexpr int oilCompIdx = FluidSystem::oilCompIdx;
     static constexpr int waterCompIdx = FluidSystem::waterCompIdx;
-    enum { enableEnergy = getPropValue<TypeTag, Properties::EnableEnergy>() };
-    enum { enableMICP = getPropValue<TypeTag, Properties::EnableMICP>() };
+    static constexpr EnergyModules energyModuleType = getPropValue<TypeTag, Properties::EnergyModuleType>();
+    enum { enableBioeffects = getPropValue<TypeTag, Properties::EnableBioeffects>() };
+    enum { enableMICP = Indices::enableMICP };
     enum { enableVapwat = getPropValue<TypeTag, Properties::EnableVapwat>() };
     enum { enableDisgasInWater = getPropValue<TypeTag, Properties::EnableDisgasInWater>() };
     enum { enableDissolvedGas = Indices::compositionSwitchIdx >= 0 };
 
-    template<int idx, class VectorType>
-    static Scalar value_or_zero(const VectorType& v)
+    template<class VectorType>
+    static Scalar value_or_zero(int idx, const VectorType& v)
     {
-        if constexpr (idx == -1) {
+        if (idx == -1) {
             return 0.0;
-        } else {
-            return v.empty() ? 0.0 : v[idx];
         }
+        return v.empty() ? 0.0 : v[idx];
     }
 
 public:
@@ -141,8 +142,9 @@ public:
                    [this](const int idx)
                    { return simulator_.problem().eclWriter().collectOnIORank().localIdxToGlobalIdx(idx); },
                    simulator.vanguard().grid().comm(),
-                   getPropValue<TypeTag, Properties::EnableEnergy>(),
-                   getPropValue<TypeTag, Properties::EnableTemperature>(),
+                   energyModuleType == EnergyModules::FullyImplicitThermal || 
+                   energyModuleType == EnergyModules::SequentialImplicitThermal,
+                   energyModuleType == EnergyModules::ConstantTemperature,
                    getPropValue<TypeTag, Properties::EnableMech>(),
                    getPropValue<TypeTag, Properties::EnableSolvent>(),
                    getPropValue<TypeTag, Properties::EnablePolymer>(),
@@ -150,7 +152,7 @@ public:
                    getPropValue<TypeTag, Properties::EnableBrine>(),
                    getPropValue<TypeTag, Properties::EnableSaltPrecipitation>(),
                    getPropValue<TypeTag, Properties::EnableExtbo>(),
-                   getPropValue<TypeTag, Properties::EnableMICP>())
+                   getPropValue<TypeTag, Properties::EnableBioeffects>())
         , simulator_(simulator)
         , collectOnIORank_(collectOnIORank)
     {
@@ -236,7 +238,7 @@ public:
      */
     void processElement(const ElementContext& elemCtx)
     {
-        OPM_TIMEBLOCK_LOCAL(processElement);
+        OPM_TIMEBLOCK_LOCAL(processElement, Subsystem::Output);
         if (!std::is_same<Discretization, EcfvDiscretization<TypeTag>>::value) {
             return;
         }
@@ -282,7 +284,7 @@ public:
 
     void processElementBlockData(const ElementContext& elemCtx)
     {
-        OPM_TIMEBLOCK_LOCAL(processElementBlockData);
+        OPM_TIMEBLOCK_LOCAL(processElementBlockData, Subsystem::Output);
         if (!std::is_same<Discretization, EcfvDiscretization<TypeTag>>::value) {
             return;
         }
@@ -349,7 +351,7 @@ public:
 
             this->logOutput_.timeStamp("BALANCE", elapsed, reportStepNum, currentDate);
 
-            const auto& initial_inplace = this->initialInplace().value();
+            const auto& initial_inplace = *this->initialInplace();
             this->logOutput_.fip(inplace, initial_inplace, "");
 
             if (fipc.output(FIPConfig::OutputField::FIPNUM)) {
@@ -391,7 +393,7 @@ public:
 
             this->logOutput_.csv_header(csv_stream);
 
-            const auto& initial_inplace = this->initialInplace().value();
+            const auto& initial_inplace = *this->initialInplace();
 
             this->logOutput_.fip_csv(csv_stream, initial_inplace, "FIPNUM");
 
@@ -445,7 +447,7 @@ public:
                        ActiveIndex&&         activeIndex,
                        CartesianIndex&&      cartesianIndex)
     {
-        OPM_TIMEBLOCK_LOCAL(processFluxes);
+        OPM_TIMEBLOCK_LOCAL(processFluxes, Subsystem::Output);
         const auto identifyCell = [&activeIndex, &cartesianIndex](const Element& elem)
             -> InterRegFlowMap::Cell
         {
@@ -534,8 +536,10 @@ public:
             }
         }
 
-        if (!this->temperature_.empty())
-            fs.setTemperature(this->temperature_[elemIdx]);
+        if constexpr (energyModuleType != EnergyModules::NoTemperature) {
+            if (!this->temperature_.empty())
+                fs.setTemperature(this->temperature_[elemIdx]);
+        }
         if constexpr (enableDissolvedGas) {
             if (!this->rs_.empty())
                 fs.setRs(this->rs_[elemIdx]);
@@ -658,6 +662,11 @@ private:
         return this->simulator_.problem().wellModel().isOwner(wname);
     }
 
+    bool isOnCurrentRank(const std::string& wname) const override
+    {
+        return this->simulator_.problem().wellModel().hasLocalCells(wname);
+    }
+
     void updateFluidInPlace_(const ElementContext& elemCtx, const unsigned dofIdx)
     {
         const auto& intQuants = elemCtx.intensiveQuantities(dofIdx, /*timeIdx=*/0);
@@ -671,7 +680,7 @@ private:
                              const IntensiveQuantities& intQuants,
                              const double               totVolume)
     {
-        OPM_TIMEBLOCK_LOCAL(updateFluidInPlace);
+        OPM_TIMEBLOCK_LOCAL(updateFluidInPlace, Subsystem::Output);
 
         this->updateTotalVolumesAndPressures_(globalDofIdx, intQuants, totVolume);
 
@@ -931,22 +940,25 @@ private:
             this->updateCO2InWater(globalDofIdx, pv, fs);
         }
 
-        if constexpr(enableMICP) {
-            const auto surfVolWat = pv * getValue(fs.invB(waterPhaseIdx));
+        if constexpr(enableBioeffects) {
+            const auto surfVolWat = pv * getValue(fs.saturation(waterPhaseIdx)) *
+                                         getValue(fs.invB(waterPhaseIdx));
             if (this->fipC_.hasMicrobialMass()) {
                 this->updateMicrobialMass(globalDofIdx, intQuants, surfVolWat);
-            }
-            if (this->fipC_.hasOxygenMass()) {
-                this->updateOxygenMass(globalDofIdx, intQuants, surfVolWat);
-            }
-            if (this->fipC_.hasUreaMass()) {
-                this->updateUreaMass(globalDofIdx, intQuants, surfVolWat);
             }
             if (this->fipC_.hasBiofilmMass()) {
                 this->updateBiofilmMass(globalDofIdx, intQuants, totVolume);
             }
-            if (this->fipC_.hasCalciteMass()) {
-                this->updateCalciteMass(globalDofIdx, intQuants, totVolume);
+            if constexpr(enableMICP) {
+                if (this->fipC_.hasOxygenMass()) {
+                    this->updateOxygenMass(globalDofIdx, intQuants, surfVolWat);
+                }
+                if (this->fipC_.hasUreaMass()) {
+                    this->updateUreaMass(globalDofIdx, intQuants, surfVolWat);
+                }
+                if (this->fipC_.hasCalciteMass()) {
+                    this->updateCalciteMass(globalDofIdx, intQuants, totVolume);
+                }
             }
         }
 
@@ -1081,7 +1093,7 @@ private:
         const Scalar rhoW = FluidSystem::referenceDensity(waterPhaseIdx, fs.pvtRegionIndex());
 
         this->fipC_.assignWaterMass(globalDofIdx, fip, rhoW);
-    }   
+    }
 
     template <typename IntensiveQuantities>
     void updateMicrobialMass(const unsigned             globalDofIdx,
@@ -1185,7 +1197,7 @@ private:
                              (const unsigned phaseIdx, const Context& ectx)
                              {
                                 const unsigned sIdx = FluidSystem::solventComponentIndex(phaseIdx);
-                                const unsigned activeCompIdx = Indices::canonicalToActiveComponentIndex(sIdx);
+                                const unsigned activeCompIdx = FluidSystem::canonicalToActiveCompIdx(sIdx);
                                 return modelResid[ectx.globalDofIdx][activeCompIdx];
                              }
                   },
@@ -1578,15 +1590,29 @@ private:
                                                  stdVolCo2 * rhoCO2 / stdMassTotal);
                     }, this->extboC_.allocated()
             },
-            Entry{[&micpC = this->micpC_](const Context& ectx)
+            Entry{[&bioeffectsC = this->bioeffectsC_](const Context& ectx)
                   {
-                      micpC.assign(ectx.globalDofIdx,
-                                   ectx.intQuants.microbialConcentration().value(),
-                                   ectx.intQuants.oxygenConcentration().value(),
-                                   ectx.intQuants.ureaConcentration().value(),
-                                   ectx.intQuants.biofilmConcentration().value(),
-                                   ectx.intQuants.calciteConcentration().value());
-                  }, this->micpC_.allocated()
+                      bioeffectsC.assign(ectx.globalDofIdx,
+                                         ectx.intQuants.microbialConcentration().value(),
+                                         ectx.intQuants.biofilmVolumeFraction().value());
+                      if (Indices::enableMICP) {
+                          bioeffectsC.assign(ectx.globalDofIdx,
+                                             ectx.intQuants.oxygenConcentration().value(),
+                                             ectx.intQuants.ureaConcentration().value(),
+                                             ectx.intQuants.calciteVolumeFraction().value());
+                      }
+                  }, this->bioeffectsC_.allocated()
+            },
+            Entry{[&runspec = this->eclState_.runspec(),
+                   &CO2H2C = this->CO2H2C_](const Context& ectx)
+                  {
+                     const auto xwg = FluidSystem::convertRswToXwG(getValue(ectx.fs.Rsw()), ectx.pvtRegionIdx);
+                     const auto xgw = FluidSystem::convertRvwToXgW(getValue(ectx.fs.Rvw()), ectx.pvtRegionIdx);
+                     CO2H2C.assign(ectx.globalDofIdx,
+                                   FluidSystem::convertXwGToxwG(xwg, ectx.pvtRegionIdx),
+                                   FluidSystem::convertXgWToxgW(xgw, ectx.pvtRegionIdx),
+                                   runspec.co2Storage());
+                  }, this->CO2H2C_.allocated()
             },
             Entry{[&rftC = this->rftC_,
                    &vanguard = this->simulator_.vanguard()](const Context& ectx)
@@ -1612,40 +1638,40 @@ private:
             Entry{[&flowsInf = this->simulator_.problem().model().linearizer().getFlowsInfo(),
                    &flowsC = this->flowsC_](const Context& ectx)
                   {
-                      constexpr auto gas_idx = Indices::gasEnabled ?
-                          conti0EqIdx + Indices::canonicalToActiveComponentIndex(gasCompIdx) : -1;
-                      constexpr auto oil_idx = Indices::oilEnabled ?
-                          conti0EqIdx + Indices::canonicalToActiveComponentIndex(oilCompIdx) : -1;
-                      constexpr auto water_idx = Indices::waterEnabled ?
-                          conti0EqIdx + Indices::canonicalToActiveComponentIndex(waterCompIdx) : -1;
+                      const auto gas_idx = Indices::gasEnabled ?
+                          conti0EqIdx + FluidSystem::canonicalToActiveCompIdx(gasCompIdx) : -1;
+                      const auto oil_idx = Indices::oilEnabled ?
+                          conti0EqIdx + FluidSystem::canonicalToActiveCompIdx(oilCompIdx) : -1;
+                      const auto water_idx = Indices::waterEnabled ?
+                          conti0EqIdx + FluidSystem::canonicalToActiveCompIdx(waterCompIdx) : -1;
                       const auto& flowsInfos = flowsInf[ectx.globalDofIdx];
                       for (const auto& flowsInfo : flowsInfos) {
                           flowsC.assignFlows(ectx.globalDofIdx,
                                              flowsInfo.faceId,
                                              flowsInfo.nncId,
-                                             value_or_zero<gas_idx>(flowsInfo.flow),
-                                             value_or_zero<oil_idx>(flowsInfo.flow),
-                                             value_or_zero<water_idx>(flowsInfo.flow));
+                                             value_or_zero(gas_idx, flowsInfo.flow),
+                                             value_or_zero(oil_idx, flowsInfo.flow),
+                                             value_or_zero(water_idx, flowsInfo.flow));
                         }
                  }, !this->simulator_.problem().model().linearizer().getFlowsInfo().empty()
             },
             Entry{[&floresInf = this->simulator_.problem().model().linearizer().getFloresInfo(),
                    &flowsC = this->flowsC_](const Context& ectx)
                   {
-                      constexpr auto gas_idx = Indices::gasEnabled ?
-                          conti0EqIdx + Indices::canonicalToActiveComponentIndex(gasCompIdx) : -1;
-                      constexpr auto oil_idx = Indices::oilEnabled ?
-                          conti0EqIdx + Indices::canonicalToActiveComponentIndex(oilCompIdx) : -1;
-                      constexpr auto water_idx = Indices::waterEnabled ?
-                          conti0EqIdx + Indices::canonicalToActiveComponentIndex(waterCompIdx) : -1;
+                      const auto gas_idx = Indices::gasEnabled ?
+                          conti0EqIdx + FluidSystem::canonicalToActiveCompIdx(gasCompIdx) : -1;
+                      const auto oil_idx = Indices::oilEnabled ?
+                          conti0EqIdx + FluidSystem::canonicalToActiveCompIdx(oilCompIdx) : -1;
+                      const auto water_idx = Indices::waterEnabled ?
+                          conti0EqIdx + FluidSystem::canonicalToActiveCompIdx(waterCompIdx) : -1;
                       const auto& floresInfos = floresInf[ectx.globalDofIdx];
                       for (const auto& floresInfo : floresInfos) {
                           flowsC.assignFlores(ectx.globalDofIdx,
                                               floresInfo.faceId,
                                               floresInfo.nncId,
-                                              value_or_zero<gas_idx>(floresInfo.flow),
-                                              value_or_zero<oil_idx>(floresInfo.flow),
-                                              value_or_zero<water_idx>(floresInfo.flow));
+                                              value_or_zero(gas_idx, floresInfo.flow),
+                                              value_or_zero(oil_idx, floresInfo.flow),
+                                              value_or_zero(water_idx, floresInfo.flow));
                       }
                  }, !this->simulator_.problem().model().linearizer().getFloresInfo().empty()
             },
@@ -2117,6 +2143,7 @@ private:
                               [&model = this->simulator_.model()](const Context& ectx)
                               {
                                   return getValue(ectx.intQuants.microbialConcentration()) *
+                                         getValue(ectx.fs.saturation(waterPhaseIdx)) *
                                          getValue(ectx.intQuants.porosity()) *
                                          model.dofTotalVolume(ectx.globalDofIdx);
                               }
@@ -2235,7 +2262,7 @@ private:
                                   : FluidSystem::convertRvToXgO(getValue(ectx.fs.Rv()), ectx.intQuants.pvtRegionIndex());
                                   return (1.0 - xgW) *
                                          model.dofTotalVolume(ectx.globalDofIdx) *
-                                         getValue(ectx.intQuants.porosity()) * 
+                                         getValue(ectx.intQuants.porosity()) *
                                          getValue(ectx.fs.density(gasPhaseIdx)) *
                                          std::min(strandedGas, sg);
                               }
@@ -2259,7 +2286,7 @@ private:
                                   : FluidSystem::convertRvToXgO(getValue(ectx.fs.Rv()), ectx.intQuants.pvtRegionIndex());
                                   return (1.0 - xgW) *
                                          model.dofTotalVolume(ectx.globalDofIdx) *
-                                         getValue(ectx.intQuants.porosity()) * 
+                                         getValue(ectx.intQuants.porosity()) *
                                          getValue(ectx.fs.density(gasPhaseIdx)) *
                                          std::max(Scalar{0.0}, sg - strandedGas);
                               }
@@ -2281,7 +2308,7 @@ private:
                                   : FluidSystem::convertRvToXgO(getValue(ectx.fs.Rv()), ectx.intQuants.pvtRegionIndex());
                                   return (1.0 - xgW) *
                                          model.dofTotalVolume(ectx.globalDofIdx) *
-                                         getValue(ectx.intQuants.porosity()) * 
+                                         getValue(ectx.intQuants.porosity()) *
                                          getValue(ectx.fs.density(gasPhaseIdx)) *
                                          std::min(trappedGas, getValue(ectx.fs.saturation(gasPhaseIdx)));
                               }
@@ -2303,7 +2330,7 @@ private:
                                   : FluidSystem::convertRvToXgO(getValue(ectx.fs.Rv()), ectx.intQuants.pvtRegionIndex());
                                   return (1.0 - xgW) *
                                          model.dofTotalVolume(ectx.globalDofIdx) *
-                                         getValue(ectx.intQuants.porosity()) * 
+                                         getValue(ectx.intQuants.porosity()) *
                                          getValue(ectx.fs.density(gasPhaseIdx)) *
                                          std::max(Scalar{0.0}, getValue(ectx.fs.saturation(gasPhaseIdx)) - trappedGas);
                               }
@@ -2315,7 +2342,7 @@ private:
                               {
                                   const auto& scaledDrainageInfo = problem.materialLawManager()
                                                                    ->oilWaterScaledEpsInfoDrainage(ectx.dofIdx);
-                                  const Scalar sg = getValue(ectx.fs.saturation(gasPhaseIdx));                                
+                                  const Scalar sg = getValue(ectx.fs.saturation(gasPhaseIdx));
                                   Scalar sgcr = scaledDrainageInfo.Sgcr;
                                   if (problem.materialLawManager()->enableHysteresis()) {
                                       const auto& matParams = problem.materialLawParams(ectx.dofIdx);
@@ -2330,7 +2357,7 @@ private:
                                       : FluidSystem::convertRvToXgO(getValue(ectx.fs.Rv()), ectx.intQuants.pvtRegionIndex());
                                       return (1.0 - xgW) *
                                              model.dofTotalVolume(ectx.globalDofIdx) *
-                                             getValue(ectx.intQuants.porosity()) * 
+                                             getValue(ectx.intQuants.porosity()) *
                                              getValue(ectx.fs.density(gasPhaseIdx)) *
                                              getValue(ectx.fs.saturation(gasPhaseIdx));
                                   }
@@ -2343,7 +2370,7 @@ private:
                               {
                                   const auto& scaledDrainageInfo = problem.materialLawManager()
                                                                    ->oilWaterScaledEpsInfoDrainage(ectx.dofIdx);
-                                  const Scalar sg = getValue(ectx.fs.saturation(gasPhaseIdx));                                
+                                  const Scalar sg = getValue(ectx.fs.saturation(gasPhaseIdx));
                                   Scalar sgcr = scaledDrainageInfo.Sgcr;
                                   if (problem.materialLawManager()->enableHysteresis()) {
                                       const auto& matParams = problem.materialLawParams(ectx.dofIdx);
@@ -2358,7 +2385,7 @@ private:
                                       : FluidSystem::convertRvToXgO(getValue(ectx.fs.Rv()), ectx.intQuants.pvtRegionIndex());
                                       return (1.0 - xgW) *
                                              model.dofTotalVolume(ectx.globalDofIdx) *
-                                             getValue(ectx.intQuants.porosity()) * 
+                                             getValue(ectx.intQuants.porosity()) *
                                              getValue(ectx.fs.density(gasPhaseIdx)) *
                                              getValue(ectx.fs.saturation(gasPhaseIdx));
                                   }
@@ -2381,7 +2408,7 @@ private:
                                   : FluidSystem::convertRvToXgO(getValue(ectx.fs.Rv()), ectx.intQuants.pvtRegionIndex());
                                   return (1.0 - xgW) *
                                          model.dofTotalVolume(ectx.globalDofIdx) *
-                                         getValue(ectx.intQuants.porosity()) * 
+                                         getValue(ectx.intQuants.porosity()) *
                                          getValue(ectx.fs.density(gasPhaseIdx)) *
                                          std::min(sgcr, getValue(ectx.fs.saturation(gasPhaseIdx))) /
                                          FluidSystem::molarMass(gasCompIdx, ectx.intQuants.pvtRegionIndex());
@@ -2404,7 +2431,7 @@ private:
                                   : FluidSystem::convertRvToXgO(getValue(ectx.fs.Rv()), ectx.intQuants.pvtRegionIndex());
                                   return (1.0 - xgW) *
                                          model.dofTotalVolume(ectx.globalDofIdx) *
-                                         getValue(ectx.intQuants.porosity()) * 
+                                         getValue(ectx.intQuants.porosity()) *
                                          getValue(ectx.fs.density(gasPhaseIdx)) *
                                          std::max(Scalar{0.0}, getValue(ectx.fs.saturation(gasPhaseIdx)) - sgcr) /
                                          FluidSystem::molarMass(gasCompIdx, ectx.intQuants.pvtRegionIndex());
@@ -2417,7 +2444,7 @@ private:
                               {
                                   const auto& scaledDrainageInfo = problem.materialLawManager()
                                                                    ->oilWaterScaledEpsInfoDrainage(ectx.dofIdx);
-                                  const Scalar sg = getValue(ectx.fs.saturation(gasPhaseIdx));                                
+                                  const Scalar sg = getValue(ectx.fs.saturation(gasPhaseIdx));
                                   Scalar sgcr = scaledDrainageInfo.Sgcr;
                                   if (problem.materialLawManager()->enableHysteresis()) {
                                       const auto& matParams = problem.materialLawParams(ectx.dofIdx);
@@ -2432,7 +2459,7 @@ private:
                                       : FluidSystem::convertRvToXgO(getValue(ectx.fs.Rv()), ectx.intQuants.pvtRegionIndex());
                                       return (1.0 - xgW) *
                                              model.dofTotalVolume(ectx.globalDofIdx) *
-                                             getValue(ectx.intQuants.porosity()) * 
+                                             getValue(ectx.intQuants.porosity()) *
                                              getValue(ectx.fs.density(gasPhaseIdx)) *
                                              getValue(ectx.fs.saturation(gasPhaseIdx)) /
                                              FluidSystem::molarMass(gasCompIdx, ectx.intQuants.pvtRegionIndex());
@@ -2446,7 +2473,7 @@ private:
                               {
                                   const auto& scaledDrainageInfo = problem.materialLawManager()
                                                                    ->oilWaterScaledEpsInfoDrainage(ectx.dofIdx);
-                                  const Scalar sg = getValue(ectx.fs.saturation(gasPhaseIdx));                                
+                                  const Scalar sg = getValue(ectx.fs.saturation(gasPhaseIdx));
                                   Scalar sgcr = scaledDrainageInfo.Sgcr;
                                   if (problem.materialLawManager()->enableHysteresis()) {
                                       const auto& matParams = problem.materialLawParams(ectx.dofIdx);
@@ -2461,7 +2488,7 @@ private:
                                       : FluidSystem::convertRvToXgO(getValue(ectx.fs.Rv()), ectx.intQuants.pvtRegionIndex());
                                       return (1.0 - xgW) *
                                              model.dofTotalVolume(ectx.globalDofIdx) *
-                                             getValue(ectx.intQuants.porosity()) * 
+                                             getValue(ectx.intQuants.porosity()) *
                                              getValue(ectx.fs.density(gasPhaseIdx)) *
                                              getValue(ectx.fs.saturation(gasPhaseIdx)) /
                                              FluidSystem::molarMass(gasCompIdx, ectx.intQuants.pvtRegionIndex());

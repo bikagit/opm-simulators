@@ -32,23 +32,23 @@ namespace Opm {
 
 class DeferredLogger;
 template<class Scalar> class GroupState;
-struct PhaseUsage;
+template<typename IndexTraits> class PhaseUsageInfo;
+template<typename Scalar, typename IndexTraits> class GroupStateHelper;
 
-namespace WGHelpers {
+namespace GroupStateHelpers
+ {
 
 /// Based on a group control mode, extract or calculate rates, and
 /// provide other conveniences.
-template<class Scalar>
+template<typename Scalar, typename IndexTraits>
 class TargetCalculator
 {
 public:
-    TargetCalculator(const Group::ProductionCMode cmode,
-                     const PhaseUsage& pu,
+    using GroupStateHelperType = Opm::GroupStateHelper<Scalar, IndexTraits>;
+
+    TargetCalculator(const GroupStateHelperType& groupStateHelper,
                      const std::vector<Scalar>& resv_coeff,
-                     const Scalar group_grat_target_from_sales,
-                     const std::string& group_name,
-                     const GroupState<Scalar>& group_state,
-                     const bool use_gpmaint);
+                     const Group& group);
 
     template <typename RateType>
     RateType calcModeRateFromRates(const std::vector<RateType>& rates) const
@@ -59,36 +59,34 @@ public:
     template <typename RateType>
     RateType calcModeRateFromRates(const RateType* rates) const;
 
-    Scalar groupTarget(const std::optional<Group::ProductionControls>& ctrl,
-                       DeferredLogger& deferred_logger) const;
+    Scalar groupTarget() const;
 
     GuideRateModel::Target guideTargetMode() const;
 
+    DeferredLogger& deferredLogger() const
+    {
+        return this->groupStateHelper_.deferredLogger();
+    }
+
 private:
     Group::ProductionCMode cmode_;
-    const PhaseUsage& pu_;
+    const GroupStateHelperType& groupStateHelper_;
     const std::vector<Scalar>& resv_coeff_;
-    const Scalar group_grat_target_from_sales_;
-    const std::string& group_name_;
-    const GroupState<Scalar>& group_state_;
-    bool use_gpmaint_;
+    const Group& group_;
 };
 
 /// Based on a group control mode, extract or calculate rates, and
 /// provide other conveniences.
-template<class Scalar>
+template<typename Scalar, typename IndexTraits>
 class InjectionTargetCalculator
 {
 public:
-    InjectionTargetCalculator(const Group::InjectionCMode& cmode,
-                              const PhaseUsage& pu,
+    using GroupStateHelperType = GroupStateHelper<Scalar, IndexTraits>;
+
+    InjectionTargetCalculator(const GroupStateHelperType& groupStateHelper,
                               const std::vector<Scalar>& resv_coeff,
-                              const std::string& group_name,
-                              const Scalar sales_target,
-                              const GroupState<Scalar>& group_state,
-                              const Phase& injection_phase,
-                              const bool use_gpmaint,
-                              DeferredLogger& deferred_logger);
+                              const Group& group,
+                              const Phase& injection_phase);
 
     template <typename RateVec>
     auto calcModeRateFromRates(const RateVec& rates) const
@@ -96,24 +94,27 @@ public:
         return rates[pos_];
     }
 
-    Scalar groupTarget(const std::optional<Group::InjectionControls>& ctrl,
-                       DeferredLogger& deferred_logger) const;
+    Scalar groupTarget() const;
 
     GuideRateModel::Target guideTargetMode() const;
 
+    DeferredLogger& deferredLogger() const
+    {
+        return this->groupStateHelper_.deferredLogger();
+    }
+
 private:
-    Group::InjectionCMode cmode_;
-    const PhaseUsage& pu_;
+    const GroupStateHelperType& groupStateHelper_;
     const std::vector<Scalar>& resv_coeff_;
-    const std::string& group_name_;
-    Scalar sales_target_;
-    const GroupState<Scalar>& group_state_;
-    bool use_gpmaint_;
+    const Group& group_;
+    const Phase injection_phase_;
+    Group::InjectionCMode cmode_;
     int pos_;
     GuideRateModel::Target target_;
 };
 
-} // namespace WGHelpers
+} // namespace GroupStateHelpers
+
 
 } // namespace Opm
 

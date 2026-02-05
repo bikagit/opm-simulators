@@ -188,6 +188,15 @@ add_test_compare_parallel_simulation(CASENAME spe1_thermal
                                      DIR spe1
                                      TEST_ARGS --linear-solver-reduction=1e-7 --tolerance-cnv=5e-6 --tolerance-mb=1e-8)
 
+add_test_compare_parallel_simulation(CASENAME spe1_temp
+                                     FILENAME SPE1CASE2_TEMP
+                                     SIMULATOR flow
+                                     ABS_TOL ${abs_tol}
+                                     REL_TOL ${coarse_rel_tol_parallel}
+                                     DIR spe1
+                                     TEST_ARGS --linear-solver-reduction=1e-7 --tolerance-cnv=5e-6 --tolerance-mb=1e-8)
+
+
 add_test_compare_parallel_simulation(CASENAME spe1_thermal_onephase
                                      FILENAME SPE1CASE2_THERMAL_ONEPHASE
                                      SIMULATOR flow
@@ -284,6 +293,15 @@ add_test_compare_parallel_simulation(CASENAME 6_uda_model5_stdw
   TEST_ARGS --enable-tuning=true
 )
 
+add_test_compare_parallel_simulation(CASENAME GSATPROD6
+  FILENAME GSATPROD6
+  SIMULATOR flow
+  ABS_TOL ${abs_tol_parallel}
+  REL_TOL ${rel_tol_parallel}
+  DIR satellite
+  TEST_ARGS --enable-tuning=true --linear-solver-reduction=1e-7
+)
+
 foreach(templ_case RANGE 1 6)
   add_test_compare_parallel_simulation(CASENAME actionx_well_templ_0${templ_case}
     FILENAME ACTIONX_WELL_TEMPL-0${templ_case}
@@ -348,6 +366,14 @@ add_test_compare_parallel_simulation(CASENAME rxft
                                      ABS_TOL ${abs_tol_parallel}
                                      REL_TOL 1.0e-3
                                      DIR rxft_smry
+                                     TEST_ARGS --enable-tuning=true --linear-solver-reduction=1e-7)
+
+add_test_compare_parallel_simulation(CASENAME gconinje_resv_gas_01
+                                     FILENAME GCONINJE_RESV_GAS-01
+                                     SIMULATOR flow
+                                     ABS_TOL ${abs_tol_parallel}
+                                     REL_TOL ${rel_tol_parallel}
+                                     DIR resv_ctrl
                                      TEST_ARGS --enable-tuning=true --linear-solver-reduction=1e-7)
 
 opm_set_test_driver(${PROJECT_SOURCE_DIR}/tests/run-comparison.sh "")

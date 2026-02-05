@@ -32,8 +32,8 @@
 #define RESERVOIR_COUPLING_ENABLED
 #endif
 #ifdef RESERVOIR_COUPLING_ENABLED
-#include <opm/simulators/flow/ReservoirCouplingMaster.hpp>
-#include <opm/simulators/flow/ReservoirCouplingSlave.hpp>
+#include <opm/simulators/flow/rescoup/ReservoirCouplingMaster.hpp>
+#include <opm/simulators/flow/rescoup/ReservoirCouplingSlave.hpp>
 #endif
 
 #include <dune/common/parallel/mpihelper.hh>
@@ -101,7 +101,7 @@ public:
 
     explicit Simulator(bool verbose = true)
         : Simulator(Communication(), verbose)
-    {  
+    {
     }
 
     explicit Simulator(Communication comm, bool verbose = true)
@@ -392,7 +392,7 @@ public:
      * size won't exceed the episode or the end of the simulation,
      * though.
      *
-     * \param timeStepSize The new value for the time step size \f$\mathrm{[s]}\f$
+     * \param value The new value for the time step size \f$\mathrm{[s]}\f$
      */
     void setTimeStepSize(Scalar value)
     { timeStepSize_ = value; }
@@ -400,7 +400,7 @@ public:
     /*!
      * \brief Set the current time step index to a given value.
      *
-     * \param timeStepIndex The new value for the time step index
+     * \param value The new value for the time step index
      */
     void setTimeStepIndex(unsigned value)
     { timeStepIdx_ = value; }
@@ -826,19 +826,19 @@ public:
     }
 
 #ifdef RESERVOIR_COUPLING_ENABLED
-    ReservoirCouplingMaster* reservoirCouplingMaster() const
+    ReservoirCouplingMaster<Scalar>* reservoirCouplingMaster() const
     {
         return reservoirCouplingMaster_;
     }
-    ReservoirCouplingSlave* reservoirCouplingSlave() const
+    ReservoirCouplingSlave<Scalar>* reservoirCouplingSlave() const
     {
         return reservoirCouplingSlave_;
     }
-    void setReservoirCouplingMaster(ReservoirCouplingMaster *reservoirCouplingMaster)
+    void setReservoirCouplingMaster(ReservoirCouplingMaster<Scalar> *reservoirCouplingMaster)
     {
         this->reservoirCouplingMaster_ = reservoirCouplingMaster;
     }
-    void setReservoirCouplingSlave(ReservoirCouplingSlave *reservoirCouplingSlave)
+    void setReservoirCouplingSlave(ReservoirCouplingSlave<Scalar> *reservoirCouplingSlave)
     {
         this->reservoirCouplingSlave_ = reservoirCouplingSlave;
     }
@@ -960,8 +960,8 @@ private:
     bool verbose_;
 
 #ifdef RESERVOIR_COUPLING_ENABLED
-    ReservoirCouplingMaster *reservoirCouplingMaster_ = nullptr;
-    ReservoirCouplingSlave *reservoirCouplingSlave_ = nullptr;
+    ReservoirCouplingMaster<Scalar> *reservoirCouplingMaster_ = nullptr;
+    ReservoirCouplingSlave<Scalar> *reservoirCouplingSlave_ = nullptr;
 #endif
 
 };

@@ -16,18 +16,15 @@
   You should have received a copy of the GNU General Public License
   along with OPM.  If not, see <http://www.gnu.org/licenses/>.
 */
-#include <chrono>
 #include <config.h>
 #include <dune/common/fmatrix.hh>
 #include <dune/istl/bcrsmatrix.hh>
 #include <fmt/core.h>
-#include <functional>
-#include <limits>
 #include <opm/common/ErrorMacros.hpp>
 #include <opm/common/TimingMacros.hpp>
 #include <opm/simulators/linalg/GraphColoring.hpp>
 #include <opm/simulators/linalg/gpuistl/GpuDILU.hpp>
-#include <opm/simulators/linalg/gpuistl/GpuSparseMatrix.hpp>
+#include <opm/simulators/linalg/gpuistl/GpuSparseMatrixWrapper.hpp>
 #include <opm/simulators/linalg/gpuistl/GpuVector.hpp>
 #include <opm/simulators/linalg/gpuistl/detail/autotuner.hpp>
 #include <opm/simulators/linalg/gpuistl/detail/coloringAndReorderingUtils.hpp>
@@ -87,10 +84,10 @@ GpuDILU<M, X, Y, l>::GpuDILU(const typename GpuDILU<M, X, Y, l>::GPUMatrix& gpuM
         if (m_splitMatrix) {
             m_gpuMatrixReorderedDiag = std::make_unique<GpuVector<field_type>>(blocksize_ * blocksize_ * cpuMatrix.N());
             std::tie(m_gpuMatrixReorderedLower, m_gpuMatrixReorderedUpper)
-                = detail::extractLowerAndUpperMatrices<M, field_type, GpuSparseMatrix<field_type>>(cpuMatrix,
+                = detail::extractLowerAndUpperMatrices<M, field_type,GpuSparseMatrixWrapper<field_type>>(cpuMatrix,
                                                                                                 m_reorderedToNatural);
         } else {
-            m_gpuMatrixReordered = detail::createReorderedMatrix<M, field_type, GpuSparseMatrix<field_type>>(
+            m_gpuMatrixReordered = detail::createReorderedMatrix<M, field_type,GpuSparseMatrixWrapper<field_type>>(
                 cpuMatrix, m_reorderedToNatural);
         }
 
@@ -551,6 +548,7 @@ INSTANTIATE_CUDILU_DUNE(double, 3);
 INSTANTIATE_CUDILU_DUNE(double, 4);
 INSTANTIATE_CUDILU_DUNE(double, 5);
 INSTANTIATE_CUDILU_DUNE(double, 6);
+INSTANTIATE_CUDILU_DUNE(double, 7);
 
 INSTANTIATE_CUDILU_DUNE(float, 1);
 INSTANTIATE_CUDILU_DUNE(float, 2);
@@ -558,3 +556,4 @@ INSTANTIATE_CUDILU_DUNE(float, 3);
 INSTANTIATE_CUDILU_DUNE(float, 4);
 INSTANTIATE_CUDILU_DUNE(float, 5);
 INSTANTIATE_CUDILU_DUNE(float, 6);
+INSTANTIATE_CUDILU_DUNE(float, 7);

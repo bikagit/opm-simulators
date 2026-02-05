@@ -3,7 +3,7 @@
 /*
   Copyright 2023 INRIA
   Copyright 2024 SINTEF Digital
-  
+
   This file is part of the Open Porous Media project (OPM).
 
   OPM is free software: you can redistribute it and/or modify
@@ -52,6 +52,8 @@
 #include <opm/simulators/flow/MixingRateControls.hpp>
 #include <opm/simulators/flow/OutputBlackoilModule.hpp>
 #include <opm/simulators/flow/VtkTracerModule.hpp>
+#include <opm/simulators/flow/HybridNewton.hpp>
+#include <opm/simulators/flow/HybridNewtonConfig.hpp>
 
 #include <opm/simulators/utils/satfunc/SatfuncConsistencyCheckManager.hpp>
 
@@ -99,11 +101,12 @@ private:
     using FlowProblemType::numComponents;
 
     // TODO: potentially some cleaning up depending on the usage later here
-    using FlowProblemType::enableConvectiveMixing;
+    using FlowProblemType::enableBioeffects;
     using FlowProblemType::enableBrine;
+    using FlowProblemType::enableConvectiveMixing;
     using FlowProblemType::enableDiffusion;
     using FlowProblemType::enableDispersion;
-    using FlowProblemType::enableEnergy;
+    using FlowProblemType::energyModuleType;
     using FlowProblemType::enableExperiments;
     using FlowProblemType::enableExtbo;
     using FlowProblemType::enableFoam;
@@ -112,7 +115,6 @@ private:
     using FlowProblemType::enablePolymerMolarWeight;
     using FlowProblemType::enableSaltPrecipitation;
     using FlowProblemType::enableSolvent;
-    using FlowProblemType::enableTemperature;
     using FlowProblemType::enableThermalFluxBoundaries;
 
     using FlowProblemType::gasPhaseIdx;
@@ -142,14 +144,16 @@ private:
     using FoamModule = BlackOilFoamModule<TypeTag>;
     using BrineModule = BlackOilBrineModule<TypeTag>;
     using ExtboModule = BlackOilExtboModule<TypeTag>;
-    using MICPModule = BlackOilMICPModule<TypeTag>;
+    using BioeffectsModule = BlackOilBioeffectsModule<TypeTag>;
     using DispersionModule = BlackOilDispersionModule<TypeTag, enableDispersion>;
     using DiffusionModule = BlackOilDiffusionModule<TypeTag, enableDiffusion>;
     using ConvectiveMixingModule = BlackOilConvectiveMixingModule<TypeTag, enableConvectiveMixing>;
     using ModuleParams = typename BlackOilLocalResidualTPFA<TypeTag>::ModuleParams;
+    using HybridNewton = BlackOilHybridNewton<TypeTag>;
 
     using InitialFluidState = typename EquilInitializer<TypeTag>::ScalarFluidState;
     using EclWriterType = EclWriter<TypeTag, OutputBlackOilModule<TypeTag> >;
+    using IndexTraits = typename FluidSystem::IndexTraitsType;
 #if HAVE_DAMARIS
     using DamarisWriterType = DamarisWriter<TypeTag>;
 #endif
@@ -186,6 +190,7 @@ public:
                          simulator.vanguard().summaryState(),
                          this->wellModel_,
                          simulator.vanguard().grid().comm())
+        , hybridNewton_(simulator)
     {
         this->model().addOutputModule(std::make_unique<VtkTracerModule<TypeTag>>(simulator));
 
@@ -208,9 +213,9 @@ public:
         foamParams.template initFromState<enableFoam>(vanguard.eclState());
         FoamModule::setParams(std::move(foamParams));
 
-        BlackOilMICPParams<Scalar> micpParams;
-        micpParams.template initFromState<enableMICP>(vanguard.eclState());
-        MICPModule::setParams(std::move(micpParams));
+        BlackOilBioeffectsParams<Scalar> bioeffectsParams;
+        bioeffectsParams.template initFromState<enableBioeffects, enableMICP>(vanguard.eclState());
+        BioeffectsModule::setParams(std::move(bioeffectsParams));
 
         BlackOilPolymerParams<Scalar> polymerParams;
         polymerParams.template initFromState<enablePolymer, enablePolymerMolarWeight>(vanguard.eclState());
@@ -260,6 +265,15 @@ public:
 
         ConvectiveMixingModule::beginEpisode(simulator.vanguard().eclState(), schedule, episodeIdx,
                                              this->moduleParams_.convectiveMixingModuleParam);
+    }
+
+    /*!
+     * \brief Called by the simulator before each time integration.
+     */
+    void beginTimeStep() override
+    {
+        FlowProblemType::beginTimeStep();
+        hybridNewton_.tryApplyHybridNewton();
     }
 
     /*!
@@ -339,7 +353,12 @@ public:
             this->maxTimeStepAfterWellEvent_ = tuning.TMAXWC;
         }
 
-        this->initFluidSystem_();
+        // conserve inner energy instead of enthalpy if TEMP is used
+        // or THERMAL and parameter ConserveInnerEnergyThermal is true (default false)
+        bool isThermal = eclState.getSimulationConfig().isThermal();
+        bool isTemp = eclState.getSimulationConfig().isTemp();
+        bool conserveInnerEnergy = isTemp || (isThermal && Parameters::Get<Parameters::ConserveInnerEnergyThermal>());
+        FluidSystem::setEnergyEqualEnthalpy(conserveInnerEnergy);
 
         if (FluidSystem::phaseIsActive(FluidSystem::oilPhaseIdx) &&
             FluidSystem::phaseIsActive(FluidSystem::gasPhaseIdx)) {
@@ -374,7 +393,7 @@ public:
         else {
             this->readInitialCondition_();
         }
-
+        this->temperatureModel_.init();
         this->tracerModel_.prepareTracerBatches();
 
         this->updatePffDofData_();
@@ -391,7 +410,7 @@ public:
         // compute and set eq weights based on initial b values
         this->computeAndSetEqWeights_();
 
-        if (this->enableDriftCompensation_) {
+        if (this->enableDriftCompensation_ || this->enableDriftCompensationTemp_) {
             this->drift_.resize(this->model().numGridDof());
             this->drift_ = 0.0;
         }
@@ -434,6 +453,17 @@ public:
             simulator.setTimeStepSize(0.0);
             simulator.model().applyInitialSolution();
             FlowProblemType::writeOutput(true);
+        }
+
+        if (!eclState.getIOConfig().initOnly()) {
+            if (!this->enableTuning_ && eclState.getSimulationConfig().anyTUNING()) {
+                OpmLog::info("\nThe deck has TUNING in the SCHEDULE section, but "
+                             "it is ignored due\nto the flag --enable-tuning=false. "
+                             "Set this flag to true to activate it.\n"
+                             "Manually tuning the simulator with the TUNING keyword may "
+                             "increase run time.\nIt is recommended using the simulator's "
+                             "default tuning (--enable-tuning=false).");
+            }
         }
     }
 
@@ -608,7 +638,7 @@ public:
                 if constexpr (getPropValue<TypeTag, Properties::BlackoilConserveSurfaceVolume>()) {
                     mass_rate /= FluidSystem::referenceDensity(phaseIdx, pvtRegionIdx);
                 }
-                rate[Indices::canonicalToActiveComponentIndex(compIdx)] += mass_rate;
+                rate[FluidSystem::canonicalToActiveCompIdx(compIdx)] += mass_rate;
             }
 
             if constexpr (enableSolvent) {
@@ -627,7 +657,7 @@ public:
                 rate[Indices::oxygenConcentrationIdx] += source.rate(ijk, SourceComponent::OXYG) / this->model().dofTotalVolume(globalDofIdx);
                 rate[Indices::ureaConcentrationIdx] += source.rate(ijk, SourceComponent::UREA) / (this->model().dofTotalVolume(globalDofIdx));
             }
-            if constexpr (enableEnergy) {
+            if constexpr (energyModuleType == EnergyModules::FullyImplicitThermal) {
                 for (unsigned i = 0; i < phidx_map.size(); ++i) {
                     const auto phaseIdx = phidx_map[i];
                     if (!FluidSystem::phaseIsActive(phaseIdx)) {
@@ -685,23 +715,21 @@ public:
 
     /*!
      * \brief Calculate the transmissibility multiplier due to porosity reduction.
-     *
-     * TODO: The API of this is a bit ad-hoc, it would be better to use context objects.
      */
-    template <class LhsEval>
-    LhsEval permFactTransMultiplier(const IntensiveQuantities& intQuants, unsigned elementIdx) const
+    template <class LhsEval, class Callback>
+    LhsEval permFactTransMultiplier(const IntensiveQuantities& intQuants, unsigned elementIdx, Callback& obtain) const
     {
-        OPM_TIMEBLOCK_LOCAL(permFactTransMultiplier);
+        OPM_TIMEBLOCK_LOCAL(permFactTransMultiplier, Subsystem::PvtProps);
         if constexpr (enableSaltPrecipitation) {
             const auto& fs = intQuants.fluidState();
             unsigned tableIdx = this->simulator().problem().satnumRegionIndex(elementIdx);
-            LhsEval porosityFactor = decay<LhsEval>(1. - fs.saltSaturation());
+            LhsEval porosityFactor = obtain(1. - fs.saltSaturation());
             porosityFactor = min(porosityFactor, 1.0);
             const auto& permfactTable = BrineModule::permfactTable(tableIdx);
             return permfactTable.eval(porosityFactor, /*extrapolation=*/true);
         }
-        else if constexpr (enableMICP) {
-            return intQuants.permFactor().value();
+        else if constexpr (enableBioeffects) {
+            return obtain(intQuants.permFactor());
         }
         else {
             return 1.0;
@@ -729,7 +757,7 @@ public:
 
     InitialFluidState boundaryFluidState(unsigned globalDofIdx, const int directionId) const
     {
-        OPM_TIMEBLOCK_LOCAL(boundaryFluidState);
+        OPM_TIMEBLOCK_LOCAL(boundaryFluidState, Subsystem::Assembly);
         const auto& bcprop = this->simulator().vanguard().schedule()[this->episodeIndex()].bcprop;
         if (bcprop.size() > 0) {
             FaceDir::DirEnum dir = FaceDir::FromIntersectionIndex(directionId);
@@ -795,12 +823,13 @@ public:
                         //single (water) phase
                         fluidState.setPressure(phaseIdx, pressure);
                 }
-
-                double temperature = initialFluidStates_[globalDofIdx].temperature(0); // we only have one temperature
-                const auto temperature_input = bc.temperature;
-                if(temperature_input)
-                    temperature = *temperature_input;
-                fluidState.setTemperature(temperature);
+                if constexpr (energyModuleType != EnergyModules::NoTemperature) {
+                    double temperature = initialFluidStates_[globalDofIdx].temperature(0); // we only have one temperature
+                    const auto temperature_input = bc.temperature;
+                    if(temperature_input)
+                        temperature = *temperature_input;
+                    fluidState.setTemperature(temperature);
+                }
 
                 if constexpr (enableDissolvedGas) {
                     if (FluidSystem::enableDissolvedGas()) {
@@ -827,7 +856,7 @@ public:
 
                     const auto& rho = FluidSystem::density(fluidState, phaseIdx, pvtRegionIdx);
                     fluidState.setDensity(phaseIdx, rho);
-                    if constexpr (enableEnergy) {
+                    if constexpr (energyModuleType == EnergyModules::SequentialImplicitThermal || energyModuleType == EnergyModules::FullyImplicitThermal) {
                         const auto& h = FluidSystem::enthalpy(fluidState, phaseIdx, pvtRegionIdx);
                         fluidState.setEnthalpy(phaseIdx, h);
                     }
@@ -918,12 +947,14 @@ public:
             }
         }
 
-        if constexpr (enableMICP){
-            values[Indices::microbialConcentrationIdx] = this->micp_.microbialConcentration[globalDofIdx];
-            values[Indices::oxygenConcentrationIdx]= this->micp_.oxygenConcentration[globalDofIdx];
-            values[Indices::ureaConcentrationIdx]= this->micp_.ureaConcentration[globalDofIdx];
-            values[Indices::calciteConcentrationIdx]= this->micp_.calciteConcentration[globalDofIdx];
-            values[Indices::biofilmConcentrationIdx]= this->micp_.biofilmConcentration[globalDofIdx];
+        if constexpr (enableBioeffects) {
+            values[Indices::microbialConcentrationIdx] = this->bioeffects_.microbialConcentration[globalDofIdx];
+            values[Indices::biofilmVolumeFractionIdx]= this->bioeffects_.biofilmVolumeFraction[globalDofIdx];
+            if constexpr (enableMICP) {
+                values[Indices::oxygenConcentrationIdx]= this->bioeffects_.oxygenConcentration[globalDofIdx];
+                values[Indices::ureaConcentrationIdx]= this->bioeffects_.ureaConcentration[globalDofIdx];
+                values[Indices::calciteVolumeFractionIdx]= this->bioeffects_.calciteVolumeFraction[globalDofIdx];
+            }
         }
 
         values.checkDefined();
@@ -952,11 +983,11 @@ public:
                   unsigned spaceIdx,
                   unsigned timeIdx) const
     {
-        OPM_TIMEBLOCK_LOCAL(eclProblemBoundary);
+        OPM_TIMEBLOCK_LOCAL(eclProblemBoundary, Subsystem::Assembly);
         if (!context.intersection(spaceIdx).boundary())
             return;
 
-        if constexpr (!enableEnergy || !enableThermalFluxBoundaries)
+        if constexpr (energyModuleType != EnergyModules::FullyImplicitThermal || !enableThermalFluxBoundaries)
             values.setNoFlow();
         else {
             // in the energy case we need to specify a non-trivial boundary condition
@@ -1011,15 +1042,15 @@ public:
             this->polymer_.moleWeight.resize(numElems, 0.0);
         }
 
-        if constexpr (enableMICP) {
-            this->micp_.resize(numElems);
+        if constexpr (enableBioeffects) {
+            this->bioeffects_.resize(numElems);
         }
 
         // Initialize mixing controls before trying to set any lastRx valuesx
         this->mixControls_.init(numElems, restart_step, eclState.runspec().tabdims().getNumPVTTables());
 
-        if constexpr (enableMICP) {
-            this->micp_ = this->eclWriter_->outputModule().getMICP().getSolution();
+        if constexpr (enableBioeffects) {
+            this->bioeffects_ = this->eclWriter_->outputModule().getBioeffects().getSolution();
         }
 
         for (std::size_t elemIdx = 0; elemIdx < numElems; ++elemIdx) {
@@ -1048,11 +1079,12 @@ public:
             }
 
             // For CO2STORE and H2STORE we need to set the initial temperature for isothermal simulations
-            bool isThermal = eclState.getSimulationConfig().isThermal();
-            bool needTemperature = (eclState.runspec().co2Storage() || eclState.runspec().h2Storage());
-            if (!isThermal && needTemperature) {
-                const auto& fp = simulator.vanguard().eclState().fieldProps();
-                elemFluidState.setTemperature(fp.get_double("TEMPI")[elemIdx]);
+            if constexpr (energyModuleType != EnergyModules::NoTemperature) {
+                bool needTemperature = (eclState.runspec().co2Storage() || eclState.runspec().h2Storage());
+                if (needTemperature) {
+                    const auto& fp = simulator.vanguard().eclState().fieldProps();
+                    elemFluidState.setTemperature(fp.get_double("TEMPI")[elemIdx]);
+                }
             }
 
             this->mixControls_.updateLastValues(elemIdx, elemFluidState.Rs(), elemFluidState.Rv());
@@ -1177,8 +1209,8 @@ protected:
                 continue;
 
             Scalar avgB = numTotalDof / sumInvB[phaseIdx];
-            unsigned solventCompIdx = FluidSystem::solventComponentIndex(phaseIdx);
-            unsigned activeSolventCompIdx = Indices::canonicalToActiveComponentIndex(solventCompIdx);
+            const unsigned solventCompIdx = FluidSystem::solventComponentIndex(phaseIdx);
+            const unsigned activeSolventCompIdx = FluidSystem::canonicalToActiveCompIdx(solventCompIdx);
             this->model().setEqWeight(activeSolventCompIdx, avgB);
         }
     }
@@ -1367,10 +1399,12 @@ protected:
             //////
             // set temperature
             //////
-            Scalar temperatureLoc = tempiData[dofIdx];
-            if (!std::isfinite(temperatureLoc) || temperatureLoc <= 0)
-                temperatureLoc = FluidSystem::surfaceTemperature;
-            dofFluidState.setTemperature(temperatureLoc);
+            if constexpr (energyModuleType != EnergyModules::NoTemperature) {
+                Scalar temperatureLoc = tempiData[dofIdx];
+                if (!std::isfinite(temperatureLoc) || temperatureLoc <= 0)
+                    temperatureLoc = FluidSystem::surfaceTemperature;
+                dofFluidState.setTemperature(temperatureLoc);
+            }
 
             //////
             // set salt concentration
@@ -1513,11 +1547,12 @@ protected:
     {
         FlowProblemType::readInitialCondition_();
 
-        if constexpr (enableSolvent || enablePolymer || enablePolymerMolarWeight || enableMICP)
+        if constexpr (enableSolvent || enablePolymer || enablePolymerMolarWeight || enableBioeffects)
             this->readBlackoilExtentionsInitialConditions_(this->model().numGridDof(),
                                                            enableSolvent,
                                                            enablePolymer,
                                                            enablePolymerMolarWeight,
+                                                           enableBioeffects,
                                                            enableMICP);
 
     }
@@ -1677,9 +1712,11 @@ protected:
 #endif
     MixingRateControls<FluidSystem> mixControls_;
 
-    ActionHandler<Scalar> actionHandler_;
+    ActionHandler<Scalar, IndexTraits> actionHandler_;
 
     ModuleParams moduleParams_;
+
+    HybridNewton hybridNewton_;
 
 private:
     /// Whether or not the current epsiode will end at the end of the

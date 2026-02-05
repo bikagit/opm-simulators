@@ -37,18 +37,31 @@ macro (ADD_CUDA_OR_HIP_FILE LIST DIR FILE)
     # and include the correct path which is in the build/binary dir
     string(REPLACE ".cu" ".hip" HIP_SOURCE_FILE ${FILE})
     set (hip_file_path "${PROJECT_BINARY_DIR}/${DIR}/gpuistl_hip/${HIP_SOURCE_FILE}")
-    file(RELATIVE_PATH relpath ${PROJECT_SOURCE_DIR} ${hip_file_path})
 
     # add a custom command that will hipify
     add_custom_command(
-        OUTPUT ${hip_file_path}
-        COMMAND bash "${PROJECT_SOURCE_DIR}/bin/hipify_file.sh" ${cuda_file_path} ${hip_file_path}
-        DEPENDS ${cuda_file_path}
-        COMMENT "Rehipifying because of change in ${cuda_file_path}"
+        OUTPUT
+          ${hip_file_path}
+        COMMAND
+          bash
+          ${PROJECT_SOURCE_DIR}/bin/hipify_file.sh
+          ${cuda_file_path}
+          ${hip_file_path}
+          $<TARGET_FILE:hipify-perl>
+        DEPENDS
+          ${cuda_file_path}
+        COMMENT
+          "Rehipifying because of change in ${cuda_file_path}"
     )
 
     # set_source_files_properties(${relpath} PROPERTIES LANGUAGE HIP)
-    list(APPEND ${LIST} ${relpath})
+    if("${LIST}" STREQUAL "PUBLIC_HEADER_FILES")
+      file(RELATIVE_PATH relpath ${PROJECT_BINARY_DIR} ${hip_file_path})
+      list(APPEND GENERATED_HEADER_FILES ${relpath})
+    else()
+      file(RELATIVE_PATH relpath ${PROJECT_SOURCE_DIR} ${hip_file_path})
+      list(APPEND ${LIST} ${relpath})
+    endif()
     list(APPEND ${LIST}_HIPIFIED ${hip_file_path})
   endif()
 endmacro()
@@ -77,15 +90,15 @@ list (APPEND MAIN_SOURCE_FILES
   flowexperimental/FIBlackOilModelNoCache.hpp
   flowexperimental/flowexp.hpp
   flowexperimental/FlowExpNewtonMethod.hpp
+  opm/models/blackoil/blackoilbioeffectsparams.cpp
   opm/models/blackoil/blackoilbrineparams.cpp
   opm/models/blackoil/blackoilextboparams.cpp
   opm/models/blackoil/blackoilfoamparams.cpp
-  opm/models/blackoil/blackoilmicpparams.cpp
   opm/models/blackoil/blackoilnewtonmethodparams.cpp
   opm/models/blackoil/blackoilpolymerparams.cpp
   opm/models/blackoil/blackoilsolventparams.cpp
+  opm/models/io/vtkblackoilbioeffectsparams.cpp
   opm/models/io/vtkblackoilenergyparams.cpp
-  opm/models/io/vtkblackoilmicpparams.cpp
   opm/models/io/vtkblackoilpolymerparams.cpp
   opm/models/io/vtkblackoilparams.cpp
   opm/models/io/vtkblackoilsolventparams.cpp
@@ -108,8 +121,10 @@ list (APPEND MAIN_SOURCE_FILES
   opm/models/utils/timer.cpp
   opm/simulators/flow/ActionHandler.cpp
   opm/simulators/flow/Banners.cpp
+  opm/simulators/flow/BioeffectsContainer.cpp
   opm/simulators/flow/BlackoilModelParameters.cpp
   opm/simulators/flow/BlackoilModelConvergenceMonitor.cpp
+  opm/simulators/flow/CO2H2Container.cpp
   opm/simulators/flow/CollectDataOnIORank.cpp
   opm/simulators/flow/CompositionalContainer.cpp
   opm/simulators/flow/ConvergenceOutputConfiguration.cpp
@@ -124,14 +139,15 @@ list (APPEND MAIN_SOURCE_FILES
   opm/simulators/flow/FlowUtils.cpp
   opm/simulators/flow/GenericCpGridVanguard.cpp
   opm/simulators/flow/GenericOutputBlackoilModule.cpp
+  opm/simulators/flow/GenericTemperatureModel.cpp
   opm/simulators/flow/GenericThresholdPressure.cpp
   opm/simulators/flow/GenericTracerModel.cpp
+  opm/simulators/flow/HybridNewtonConfig.cpp
   opm/simulators/flow/InterRegFlows.cpp
   opm/simulators/flow/KeywordValidation.cpp
   opm/simulators/flow/LogOutputHelper.cpp
   opm/simulators/flow/Main.cpp
   opm/simulators/flow/MechContainer.cpp
-  opm/simulators/flow/MICPContainer.cpp
   opm/simulators/flow/MixingRateControls.cpp
   opm/simulators/flow/NlddReporting.cpp
   opm/simulators/flow/NonlinearSolver.cpp
@@ -156,6 +172,7 @@ list (APPEND MAIN_SOURCE_FILES
   opm/simulators/linalg/FlexibleSolver4.cpp
   opm/simulators/linalg/FlexibleSolver5.cpp
   opm/simulators/linalg/FlexibleSolver6.cpp
+  opm/simulators/linalg/FlexibleSolver7.cpp
   opm/simulators/linalg/FlowLinearSolverParameters.cpp
   opm/simulators/linalg/ISTLSolver.cpp
   opm/simulators/linalg/MILU.cpp
@@ -167,6 +184,7 @@ list (APPEND MAIN_SOURCE_FILES
   opm/simulators/linalg/PreconditionerFactory4.cpp
   opm/simulators/linalg/PreconditionerFactory5.cpp
   opm/simulators/linalg/PreconditionerFactory6.cpp
+  opm/simulators/linalg/PreconditionerFactory7.cpp
   opm/simulators/linalg/PropertyTree.cpp
   opm/simulators/linalg/setupPropertyTree.cpp
   opm/simulators/timestepping/AdaptiveSimulatorTimer.cpp
@@ -178,7 +196,6 @@ list (APPEND MAIN_SOURCE_FILES
   opm/simulators/timestepping/SimulatorTimerInterface.cpp
   opm/simulators/timestepping/TimeStepControl.cpp
   opm/simulators/timestepping/gatherConvergenceReport.cpp
-  opm/simulators/utils/BlackoilPhases.cpp
   opm/simulators/utils/ComponentName.cpp
   opm/simulators/utils/DeferredLogger.cpp
   opm/simulators/utils/FullySupportedFlowKeywords.cpp
@@ -191,7 +208,6 @@ list (APPEND MAIN_SOURCE_FILES
   opm/simulators/utils/UnsupportedFlowKeywords.cpp
   opm/simulators/utils/compressPartition.cpp
   opm/simulators/utils/gatherDeferredLogger.cpp
-  opm/simulators/utils/phaseUsageFromDeck.cpp
   opm/simulators/utils/readDeck.cpp
   opm/simulators/utils/satfunc/RelpermDiagnostics.cpp
   opm/simulators/wells/ALQState.cpp
@@ -199,6 +215,7 @@ list (APPEND MAIN_SOURCE_FILES
   opm/simulators/wells/BlackoilWellModelGasLift.cpp
   opm/simulators/wells/BlackoilWellModelGeneric.cpp
   opm/simulators/wells/BlackoilWellModelGuideRates.cpp
+  opm/simulators/wells/BlackoilWellModelNetworkGeneric.cpp
   opm/simulators/wells/BlackoilWellModelNldd.cpp
   opm/simulators/wells/BlackoilWellModelRestart.cpp
   opm/simulators/wells/BlackoilWellModelWBP.cpp
@@ -212,6 +229,7 @@ list (APPEND MAIN_SOURCE_FILES
   opm/simulators/wells/GlobalWellInfo.cpp
   opm/simulators/wells/GroupEconomicLimitsChecker.cpp
   opm/simulators/wells/GroupState.cpp
+  opm/simulators/wells/GroupStateHelper.cpp
   opm/simulators/wells/MSWellHelpers.cpp
   opm/simulators/wells/MultisegmentWellAssemble.cpp
   opm/simulators/wells/MultisegmentWellEquations.cpp
@@ -244,7 +262,6 @@ list (APPEND MAIN_SOURCE_FILES
   opm/simulators/wells/WellFilterCake.cpp
   opm/simulators/wells/WellGroupConstraints.cpp
   opm/simulators/wells/WellGroupControls.cpp
-  opm/simulators/wells/WellGroupHelpers.cpp
   opm/simulators/wells/WellHelpers.cpp
   opm/simulators/wells/WellInterfaceFluidSystem.cpp
   opm/simulators/wells/WellInterfaceGeneric.cpp
@@ -254,6 +271,15 @@ list (APPEND MAIN_SOURCE_FILES
   opm/simulators/wells/WellTest.cpp
   opm/simulators/wells/WGState.cpp
   )
+
+if (HAVE_AVX2_EXTENSION)
+  set (AVX2_SOURCE_FILES
+    opm/simulators/linalg/mixed/bsr.c
+    opm/simulators/linalg/mixed/prec.c
+    opm/simulators/linalg/mixed/bslv.c)
+  list (APPEND MAIN_SOURCE_FILES
+    ${AVX2_SOURCE_FILES})
+endif()
 
 if (HAVE_ECL_INPUT)
   list (APPEND MAIN_SOURCE_FILES
@@ -288,7 +314,6 @@ if (HAVE_CUDA)
   ADD_CUDA_OR_HIP_FILE(MAIN_SOURCE_FILES opm/simulators/linalg detail/CuBlasHandle.cpp)
   ADD_CUDA_OR_HIP_FILE(MAIN_SOURCE_FILES opm/simulators/linalg detail/gpusparse_matrix_operations.cu)
   ADD_CUDA_OR_HIP_FILE(MAIN_SOURCE_FILES opm/simulators/linalg detail/CuSparseHandle.cpp)
-  ADD_CUDA_OR_HIP_FILE(MAIN_SOURCE_FILES opm/simulators/linalg GpuBuffer.cpp)
   ADD_CUDA_OR_HIP_FILE(MAIN_SOURCE_FILES opm/simulators/linalg detail/preconditionerKernels/DILUKernels.cu)
   ADD_CUDA_OR_HIP_FILE(MAIN_SOURCE_FILES opm/simulators/linalg detail/preconditionerKernels/ILU_variants_helper_kernels.cu)
   ADD_CUDA_OR_HIP_FILE(MAIN_SOURCE_FILES opm/simulators/linalg detail/preconditionerKernels/ILU0Kernels.cu)
@@ -296,8 +321,10 @@ if (HAVE_CUDA)
   ADD_CUDA_OR_HIP_FILE(MAIN_SOURCE_FILES opm/simulators/linalg detail/kernel_enums.hpp)
   ADD_CUDA_OR_HIP_FILE(MAIN_SOURCE_FILES opm/simulators/linalg GpuVector.cpp)
   ADD_CUDA_OR_HIP_FILE(MAIN_SOURCE_FILES opm/simulators/linalg GpuView.cpp)
+  ADD_CUDA_OR_HIP_FILE(MAIN_SOURCE_FILES opm/simulators/linalg detail/cpr_amg_operations.cu)
   ADD_CUDA_OR_HIP_FILE(MAIN_SOURCE_FILES opm/simulators/linalg detail/vector_operations.cu)
   ADD_CUDA_OR_HIP_FILE(MAIN_SOURCE_FILES opm/simulators/linalg GpuSparseMatrix.cpp)
+  ADD_CUDA_OR_HIP_FILE(MAIN_SOURCE_FILES opm/simulators/linalg GpuSparseMatrixGeneric.cpp)
   ADD_CUDA_OR_HIP_FILE(MAIN_SOURCE_FILES opm/simulators/linalg GpuDILU.cpp)
   ADD_CUDA_OR_HIP_FILE(MAIN_SOURCE_FILES opm/simulators/linalg OpmGpuILU0.cpp)
   ADD_CUDA_OR_HIP_FILE(MAIN_SOURCE_FILES opm/simulators/linalg GpuJac.cpp)
@@ -313,6 +340,7 @@ if (HAVE_CUDA)
   ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg detail/coloringAndReorderingUtils.hpp)
   ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg detail/gpu_safe_call.hpp)
   ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg detail/gpusparse_matrix_operations.hpp)
+  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg detail/gpusparse_matrix_utilities.hpp)
   ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg detail/cusparse_safe_call.hpp)
   ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg detail/cublas_safe_call.hpp)
   ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg detail/cuda_check_last_error.hpp)
@@ -329,14 +357,20 @@ if (HAVE_CUDA)
   ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg GpuVector.hpp)
   ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg GpuView.hpp)
   ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg GpuSparseMatrix.hpp)
+  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg GpuSparseMatrixWrapper.hpp)
+  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg GpuSparseMatrixGeneric.hpp)
+  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg MiniMatrix.hpp)
+  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg MiniVector.hpp)
   ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg detail/CuMatrixDescription.hpp)
   ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg detail/CuSparseResource.hpp)
   ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg detail/CuSparseResource_impl.hpp)
   ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg detail/safe_conversion.hpp)
+  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg detail/gpu_type_detection.hpp)
   ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg detail/cublas_wrapper.hpp)
   ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg detail/cusparse_wrapper.hpp)
-  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg detail/cusparse_constants.hpp)
+  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg detail/gpu_constants.hpp)
   ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg detail/vector_operations.hpp)
+  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg detail/cpr_amg_operations.hpp)
   ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg detail/has_function.hpp)
   ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg detail/preconditioner_should_call_post_pre.hpp)
   ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg detail/deviceBlockOperations.hpp)
@@ -355,8 +389,19 @@ if (HAVE_CUDA)
   ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg PreconditionerCPUMatrixToGPUMatrix.hpp)
   ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg ISTLSolverGPUISTL.hpp)
   ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg detail/FlexibleSolverWrapper.hpp)
+  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg AmgxInterface.hpp)
+  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg HypreInterface.hpp)
+  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg hypreinterface/HypreCpuTransfers.hpp)
+  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg hypreinterface/HypreDataStructures.hpp)
+  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg hypreinterface/HypreErrorHandling.hpp)
+  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg hypreinterface/HypreGpuTransfers.hpp)
+  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg hypreinterface/HypreSetup.hpp)
+  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg hypreinterface/HypreUtils.hpp)
+  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg PinnedMemoryHolder.hpp)
+  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg GpuPressureTransferPolicy.hpp)
+  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg detail/gpu_preconditioner_utils.hpp)
+  ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg MiniVector.hpp)
 
-  
   if(MPI_FOUND)
     ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg GpuOwnerOverlapCopy.hpp)
     ADD_CUDA_OR_HIP_FILE(PUBLIC_HEADER_FILES opm/simulators/linalg GpuSender.hpp)
@@ -436,9 +481,11 @@ list (APPEND TEST_SOURCE_FILES
   tests/test_convergencereport.cpp
   tests/test_deferredlogger.cpp
   tests/test_dilu.cpp
+  tests/test_group_higher_constraints.cpp
   tests/test_equil.cpp
   tests/test_extractMatrix.cpp
   tests/test_flexiblesolver.cpp
+  tests/test_gconsump.cpp
   tests/test_glift1.cpp
   tests/test_graphcoloring.cpp
   tests/test_GroupState.cpp
@@ -460,6 +507,7 @@ list (APPEND TEST_SOURCE_FILES
   tests/test_region_phase_pvaverage.cpp
   tests/test_relpermdiagnostics.cpp
   tests/test_RestartSerialization.cpp
+  tests/test_rftcontainer.cpp
   tests/test_RunningStatistics.cpp
   tests/test_rstconv.cpp
   tests/test_stoppedwells.cpp
@@ -510,7 +558,8 @@ if (HAVE_CUDA)
   ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_GpuSeqILU0.cpp)
   ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_cusparse_handle.cpp)
   ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_cuSparse_matrix_operations.cpp)
-  ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_GpuSparseMatrix.cpp)
+  ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_GpuSparseMatrix.cu)
+  ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_GpuSparseTable.cu)
   ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_GpuVector.cpp)
   ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_cuVector_operations.cpp)
   ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_safe_conversion.cpp)
@@ -522,8 +571,16 @@ if (HAVE_CUDA)
   ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_gpu_resources.cu)
   ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_is_gpu_pointer.cpp)
   ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_throw_macros_on_gpu.cu)
+  ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_blackoilfluidstategpu.cu)
+  ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_conditional_storage.cu)
   ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_preconditioner_factory_gpu.cpp)
   ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_gpuBlackOilFluidSystem.cu)
+  ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_GpuPressureTransferPolicy.cpp)
+  ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_deviceBlockOperations.cu)
+  ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_primaryvarswithdifferentvector.cpp)
+  ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_primary_variables_gpu.cu)
+  ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_MiniMatrix.cu)
+  ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_MiniVector.cu)
 
   if(MPI_FOUND)
     ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_GpuOwnerOverlapCopy.cpp)
@@ -535,11 +592,24 @@ if (HAVE_CUDA)
       tests/gpuistl/test_gpu_ad.cu
       tests/gpuistl/test_gpu_linear_two_phase_material.cu
       tests/gpuistl/test_gpuPvt.cu
-      tests/gpuistl/test_gpuBlackOilFluidSystem
+      tests/gpuistl/test_gpuBlackOilFluidSystem.cu
+      tests/gpuistl/test_GpuSparseMatrix.cu
+      tests/gpuistl/test_GpuSparseTable.cu
+      tests/gpuistl/test_blackoilfluidstategpu.cu
     )
 
     foreach(file ${CU_FILES_NEEDING_RELAXED_CONSTEXPR})
         set_source_files_properties(${file} PROPERTIES COMPILE_FLAGS "--expt-relaxed-constexpr")
+    endforeach()
+
+    set(CU_FILES_NEEDING_FPERMISSIVE
+      tests/gpuistl/test_primary_variables_gpu.cu
+    )
+
+    foreach(file ${CU_FILES_NEEDING_FPERMISSIVE})
+      # Certain structures in OPM requires the -fpermissive flag to compile with nvcc,
+      # this enables this for the specific files
+      set_source_files_properties(${file} PROPERTIES COMPILE_FLAGS "-fpermissive --expt-relaxed-constexpr -Xcompiler=-fpermissive")
     endforeach()
   endif()
 endif()
@@ -606,6 +676,9 @@ list (APPEND TEST_DATA_FILES
   tests/rhs3rep.txt
   tests/options_flexiblesolver.json
   tests/options_flexiblesolver_simple.json
+  tests/GCONSUMP.DATA
+  tests/GCONSUMP_COMPLEX.DATA
+  tests/GROUP_HIGHER_CONSTRAINTS.DATA
   tests/GLIFT1.DATA
   tests/RC-01_MAST_PRED.DATA
   tests/include/flowl_b_vfp.ecl
@@ -653,6 +726,8 @@ list (APPEND TEST_DATA_FILES
 # originally generated with the command:
 # find opm -name '*.h*' -a ! -name '*-pch.hpp' -printf '\t%p\n' | sort
 list (APPEND PUBLIC_HEADER_FILES
+  opm/models/blackoil/blackoilbioeffectsmodules.hh
+  opm/models/blackoil/blackoilbioeffectsparams.hpp
   opm/models/blackoil/blackoilboundaryratevector.hh
   opm/models/blackoil/blackoilbrinemodules.hh
   opm/models/blackoil/blackoilbrineparams.hpp
@@ -670,8 +745,7 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/models/blackoil/blackoilintensivequantities.hh
   opm/models/blackoil/blackoillocalresidual.hh
   opm/models/blackoil/blackoillocalresidualtpfa.hh
-  opm/models/blackoil/blackoilmicpmodules.hh
-  opm/models/blackoil/blackoilmicpparams.hpp
+  opm/models/blackoil/blackoilmeanings.hh
   opm/models/blackoil/blackoilmodel.hh
   opm/models/blackoil/blackoilnewtonmethod.hpp
   opm/models/blackoil/blackoilnewtonmethodparams.hpp
@@ -768,10 +842,10 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/models/io/simplexvanguard.hh
   opm/models/io/structuredgridvanguard.hh
   opm/models/io/unstructuredgridvanguard.hh
+  opm/models/io/vtkblackoilbioeffectsmodule.hpp
+  opm/models/io/vtkblackoilbioeffectsparams.hpp
   opm/models/io/vtkblackoilenergymodule.hpp
   opm/models/io/vtkblackoilenergyparams.hpp
-  opm/models/io/vtkblackoilmicpmodule.hpp
-  opm/models/io/vtkblackoilmicpparams.hpp
   opm/models/io/vtkblackoilmodule.hpp
   opm/models/io/vtkblackoilparams.hpp
   opm/models/io/vtkblackoilpolymermodule.hpp
@@ -868,12 +942,14 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/simulators/flow/AluGridVanguard.hpp
   opm/simulators/flow/Banners.hpp
   opm/simulators/flow/BaseAquiferModel.hpp
+  opm/simulators/flow/BioeffectsContainer.hpp
   opm/simulators/flow/BlackoilModel.hpp
   opm/simulators/flow/BlackoilModel_impl.hpp
   opm/simulators/flow/BlackoilModelConvergenceMonitor.hpp
   opm/simulators/flow/BlackoilModelNldd.hpp
   opm/simulators/flow/BlackoilModelParameters.hpp
   opm/simulators/flow/BlackoilModelProperties.hpp
+  opm/simulators/flow/CO2H2Container.hpp
   opm/simulators/flow/CollectDataOnIORank.hpp
   opm/simulators/flow/CollectDataOnIORank_impl.hpp
   opm/simulators/flow/CompositionalContainer.hpp
@@ -908,16 +984,19 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/simulators/flow/FlowThresholdPressure.hpp
   opm/simulators/flow/GenericCpGridVanguard.hpp
   opm/simulators/flow/GenericOutputBlackoilModule.hpp
+  opm/simulators/flow/GenericTemperatureModel.hpp
+  opm/simulators/flow/GenericTemperatureModel_impl.hpp
   opm/simulators/flow/GenericThresholdPressure.hpp
   opm/simulators/flow/GenericThresholdPressure_impl.hpp
   opm/simulators/flow/GenericTracerModel.hpp
   opm/simulators/flow/GenericTracerModel_impl.hpp
+  opm/simulators/flow/HybridNewton.hpp
+  opm/simulators/flow/HybridNewtonConfig.hpp
   opm/simulators/flow/InterRegFlows.hpp
   opm/simulators/flow/KeywordValidation.hpp
   opm/simulators/flow/LogOutputHelper.hpp
   opm/simulators/flow/Main.hpp
   opm/simulators/flow/MechContainer.hpp
-  opm/simulators/flow/MICPContainer.hpp
   opm/simulators/flow/MixingRateControls.hpp
   opm/simulators/flow/NewTranFluxModule.hpp
   opm/simulators/flow/NlddReporting.hpp
@@ -938,7 +1017,10 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/simulators/flow/SolutionContainers.hpp
   opm/simulators/flow/SubDomain.hpp
   opm/simulators/flow/TTagFlowProblemTPFA.hpp
+  opm/simulators/flow/TTagFlowProblemGasWater.hpp
+  opm/simulators/flow/TTagFlowProblemOnePhase.hpp
   opm/simulators/flow/TracerContainer.hpp
+  opm/simulators/flow/TemperatureModel.hpp
   opm/simulators/flow/TracerModel.hpp
   opm/simulators/flow/Transmissibility.hpp
   opm/simulators/flow/Transmissibility_impl.hpp
@@ -969,6 +1051,7 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/simulators/linalg/DILU.hpp
   opm/simulators/linalg/domesticoverlapfrombcrsmatrix.hh
   opm/simulators/linalg/elementborderlistfromgrid.hh
+  opm/simulators/linalg/exportSystem.hpp
   opm/simulators/linalg/extractMatrix.hpp
   opm/simulators/linalg/ExtractParallelGridInformationToISTL.hpp
   opm/simulators/linalg/ExtraSmoothers.hpp
@@ -1045,7 +1128,6 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/simulators/timestepping/SimulatorReport.hpp
   opm/simulators/timestepping/SimulatorTimerInterface.hpp
   opm/simulators/timestepping/gatherConvergenceReport.hpp
-  opm/simulators/utils/BlackoilPhases.hpp
   opm/simulators/utils/ComponentName.hpp
   opm/simulators/utils/DeferredLogger.hpp
   opm/simulators/utils/DeferredLoggingErrorHelpers.hpp
@@ -1060,7 +1142,6 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/simulators/utils/compressPartition.hpp
   opm/simulators/utils/gatherDeferredLogger.hpp
   opm/simulators/utils/moduleVersion.hpp
-  opm/simulators/utils/phaseUsageFromDeck.hpp
   opm/simulators/utils/ParallelCommunication.hpp
   opm/simulators/utils/ParallelSerialization.hpp
   opm/simulators/utils/readDeck.hpp
@@ -1073,6 +1154,9 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/simulators/wells/BlackoilWellModelGasLift_impl.hpp
   opm/simulators/wells/BlackoilWellModelGeneric.hpp
   opm/simulators/wells/BlackoilWellModelGuideRates.hpp
+  opm/simulators/wells/BlackoilWellModelNetwork.hpp
+  opm/simulators/wells/BlackoilWellModelNetwork_impl.hpp
+  opm/simulators/wells/BlackoilWellModelNetworkGeneric.hpp
   opm/simulators/wells/BlackoilWellModelNldd.hpp
   opm/simulators/wells/BlackoilWellModelNldd_impl.hpp
   opm/simulators/wells/BlackoilWellModelRestart.hpp
@@ -1091,6 +1175,7 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/simulators/wells/GlobalWellInfo.hpp
   opm/simulators/wells/GroupEconomicLimitsChecker.hpp
   opm/simulators/wells/GroupState.hpp
+  opm/simulators/wells/GroupStateHelper.hpp
   opm/simulators/wells/GuideRateHandler.hpp
   opm/simulators/wells/MSWellHelpers.hpp
   opm/simulators/wells/MultisegmentWell.hpp
@@ -1134,7 +1219,6 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/simulators/wells/WellFilterCake.hpp
   opm/simulators/wells/WellGroupConstraints.hpp
   opm/simulators/wells/WellGroupControls.hpp
-  opm/simulators/wells/WellGroupHelpers.hpp
   opm/simulators/wells/WellHelpers.hpp
   opm/simulators/wells/WellInterfaceFluidSystem.hpp
   opm/simulators/wells/WellInterfaceGeneric.hpp
@@ -1197,6 +1281,16 @@ if (HAVE_ECL_INPUT)
     opm/simulators/utils/satfunc/ThreePointHorizontalConsistencyChecks.hpp
     opm/simulators/utils/satfunc/UnscaledSatfuncCheckPoint.hpp
     opm/simulators/utils/satfunc/WaterPhaseConsistencyChecks.hpp
+  )
+endif()
+
+if (HAVE_AVX2_EXTENSION)
+  list (APPEND PUBLIC_HEADER_FILES
+    opm/simulators/linalg/mixed/bslv.h
+    opm/simulators/linalg/mixed/bsr.h
+    opm/simulators/linalg/mixed/prec.h
+    opm/simulators/linalg/mixed/vec.h
+    opm/simulators/linalg/mixed/wrapper.hpp
   )
 endif()
 
@@ -1284,17 +1378,36 @@ if(dune-alugrid_FOUND)
 endif()
 if(MPI_FOUND)
   list (APPEND MAIN_SOURCE_FILES
-    opm/simulators/flow/ReservoirCoupling.cpp
-    opm/simulators/flow/ReservoirCouplingMaster.cpp
-    opm/simulators/flow/ReservoirCouplingSlave.cpp
-    opm/simulators/flow/ReservoirCouplingSpawnSlaves.cpp
+    opm/simulators/flow/rescoup/ReservoirCoupling.cpp
+    opm/simulators/flow/rescoup/ReservoirCouplingMaster.cpp
+    opm/simulators/flow/rescoup/ReservoirCouplingMasterReportStep.cpp
+    opm/simulators/flow/rescoup/ReservoirCouplingSlave.cpp
+    opm/simulators/flow/rescoup/ReservoirCouplingSlaveReportStep.cpp
+    opm/simulators/flow/rescoup/ReservoirCouplingSpawnSlaves.cpp
+    opm/simulators/flow/rescoup/ReservoirCouplingTimeStepper.cpp
+    opm/simulators/wells/GroupTargetCalculator.cpp
+    opm/simulators/wells/rescoup/RescoupReceiveGroupTargets.cpp
+    opm/simulators/wells/rescoup/RescoupReceiveSlaveGroupData.cpp
+    opm/simulators/wells/rescoup/RescoupSendSlaveGroupData.cpp
+    opm/simulators/wells/rescoup/RescoupTargetCalculator.cpp
   )
   list (APPEND PUBLIC_HEADER_FILES
-    opm/simulators/flow/ReservoirCoupling.hpp
-    opm/simulators/flow/ReservoirCouplingMpiTraits.hpp
-    opm/simulators/flow/ReservoirCouplingMaster.hpp
-    opm/simulators/flow/ReservoirCouplingSlave.hpp
-    opm/simulators/flow/ReservoirCouplingSpawnSlaves.hpp
+    opm/simulators/flow/rescoup/ReservoirCoupling.hpp
+    opm/simulators/flow/rescoup/ReservoirCouplingEnabled.hpp
+    opm/simulators/flow/rescoup/ReservoirCouplingErrorMacros.hpp
+    opm/simulators/flow/rescoup/ReservoirCouplingMpiTraits.hpp
+    opm/simulators/flow/rescoup/ReservoirCouplingMaster.hpp
+    opm/simulators/flow/rescoup/ReservoirCouplingMasterReportStep.hpp
+    opm/simulators/flow/rescoup/ReservoirCouplingSlave.hpp
+    opm/simulators/flow/rescoup/ReservoirCouplingSlaveReportStep.hpp
+    opm/simulators/flow/rescoup/ReservoirCouplingSpawnSlaves.hpp
+    opm/simulators/flow/rescoup/ReservoirCouplingTimeStepper.hpp
+    opm/simulators/wells/GroupTargetCalculator.hpp
+    opm/simulators/wells/rescoup/RescoupProxy.hpp
+    opm/simulators/wells/rescoup/RescoupReceiveSlaveGroupData.hpp
+    opm/simulators/wells/rescoup/RescoupReceiveGroupTargets.hpp
+    opm/simulators/wells/rescoup/RescoupSendSlaveGroupData.hpp
+    opm/simulators/wells/rescoup/RescoupTargetCalculator.hpp
     )
   list (APPEND TEST_SOURCE_FILES
     tests/rescoup/test_chopstep.cpp

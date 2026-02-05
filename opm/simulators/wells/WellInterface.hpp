@@ -54,7 +54,6 @@ namespace Opm {
 
 #include <opm/simulators/timestepping/ConvergenceReport.hpp>
 
-#include <opm/simulators/utils/BlackoilPhases.hpp>
 #include <opm/simulators/utils/DeferredLogger.hpp>
 
 #include <dune/common/fmatrix.hh>
@@ -70,6 +69,7 @@ namespace Opm
 
 class WellInjectionProperties;
 class WellProductionProperties;
+template<typename Scalar, typename IndexTraits> class GroupStateHelper;
 
 template<typename TypeTag>
 class WellInterface : public WellInterfaceIndices<GetPropType<TypeTag, Properties::FluidSystem>,
@@ -82,19 +82,24 @@ public:
     using Simulator = GetPropType<TypeTag, Properties::Simulator>;
     using Scalar = GetPropType<TypeTag, Properties::Scalar>;
     using FluidSystem = GetPropType<TypeTag, Properties::FluidSystem>;
+    using IndexTraits = typename FluidSystem::IndexTraitsType;
     using Indices = GetPropType<TypeTag, Properties::Indices>;
     using IntensiveQuantities = GetPropType<TypeTag, Properties::IntensiveQuantities>;
     using MaterialLaw = GetPropType<TypeTag, Properties::MaterialLaw>;
     using SparseMatrixAdapter = GetPropType<TypeTag, Properties::SparseMatrixAdapter>;
     using RateVector = GetPropType<TypeTag, Properties::RateVector>;
     using GasLiftSingleWell = ::Opm::GasLiftSingleWell<TypeTag>;
-    using GLiftEclWells = typename GasLiftGroupInfo<Scalar>::GLiftEclWells;
+    using GLiftEclWells = typename GasLiftGroupInfo<Scalar, IndexTraits>::GLiftEclWells;
 
     using VectorBlockType = Dune::FieldVector<Scalar, Indices::numEq>;
     using MatrixBlockType = Dune::FieldMatrix<Scalar, Indices::numEq, Indices::numEq>;
     using Eval = typename Base::Eval;
     using BVector = Dune::BlockVector<VectorBlockType>;
     using PressureMatrix = Dune::BCRSMatrix<Opm::MatrixBlock<Scalar, 1, 1>>;
+
+    using WellStateType = WellState<Scalar, IndexTraits>;
+    using SingleWellStateType = SingleWellState<Scalar, IndexTraits>;
+    using GroupStateHelperType = GroupStateHelper<Scalar, IndexTraits>;
 
     using RateConverterType =
     typename WellInterfaceFluidSystem<FluidSystem>::RateConverterType;
@@ -108,8 +113,9 @@ public:
     static constexpr bool has_solvent = getPropValue<TypeTag, Properties::EnableSolvent>();
     static constexpr bool has_zFraction = getPropValue<TypeTag, Properties::EnableExtbo>();
     static constexpr bool has_polymer = getPropValue<TypeTag, Properties::EnablePolymer>();
-    static constexpr bool has_energy = getPropValue<TypeTag, Properties::EnableEnergy>();
-    static const bool has_temperature = getPropValue<TypeTag, Properties::EnableTemperature>();
+    static constexpr EnergyModules energyModuleType = getPropValue<TypeTag, Properties::EnergyModuleType>();
+    static constexpr bool has_energy = energyModuleType == EnergyModules::FullyImplicitThermal;
+
     // flag for polymer molecular weight related
     static constexpr bool has_polymermw = getPropValue<TypeTag, Properties::EnablePolymerMW>();
     static constexpr bool has_foam = getPropValue<TypeTag, Properties::EnableFoam>();
@@ -117,13 +123,14 @@ public:
     static constexpr bool has_watVapor = getPropValue<TypeTag, Properties::EnableVapwat>();
     static constexpr bool has_disgas_in_water = getPropValue<TypeTag, Properties::EnableDisgasInWater>();
     static constexpr bool has_saltPrecip = getPropValue<TypeTag, Properties::EnableSaltPrecipitation>();
-    static constexpr bool has_micp = getPropValue<TypeTag, Properties::EnableMICP>();
+    static constexpr bool has_bioeffects = getPropValue<TypeTag, Properties::EnableBioeffects>();
+    static constexpr bool has_micp = Indices::enableMICP;
 
     // For the conversion between the surface volume rate and reservoir voidage rate
     using FluidState = BlackOilFluidState<Eval,
                                           FluidSystem,
-                                          has_temperature,
-                                          has_energy,
+                                          energyModuleType == EnergyModules::ConstantTemperature,
+                                          (energyModuleType == EnergyModules::FullyImplicitThermal || energyModuleType == EnergyModules::SequentialImplicitThermal),
                                           Indices::compositionSwitchIdx >= 0,
                                           has_watVapor,
                                           has_brine,
@@ -137,7 +144,7 @@ public:
                   const ModelParameters& param,
                   const RateConverterType& rate_converter,
                   const int pvtRegionIdx,
-                  const int num_components,
+                  const int num_conservation_quantities,
                   const int num_phases,
                   const int index_of_well,
                   const std::vector<PerforationData<Scalar>>& perf_data);
@@ -145,41 +152,35 @@ public:
     /// Virtual destructor
     virtual ~WellInterface() = default;
 
-    virtual void init(const PhaseUsage* phase_usage_arg,
-                      const std::vector<Scalar>& depth_arg,
+    virtual void init(const std::vector<Scalar>& depth_arg,
                       const Scalar gravity_arg,
                       const std::vector<Scalar>& B_avg,
                       const bool changed_to_open_this_step);
 
-    virtual ConvergenceReport getWellConvergence(const Simulator& simulator,
-                                                 const WellState<Scalar>& well_state,
+    virtual ConvergenceReport getWellConvergence(const GroupStateHelperType& groupStateHelper,
                                                  const std::vector<Scalar>& B_avg,
-                                                 DeferredLogger& deferred_logger,
                                                  const bool relax_tolerance) const = 0;
 
     virtual void solveEqAndUpdateWellState(const Simulator& simulator,
-                                           WellState<Scalar>& well_state,
-                                           DeferredLogger& deferred_logger) = 0;
+                                           const GroupStateHelperType& groupStateHelper,
+                                           WellStateType& well_state) = 0;
 
     void assembleWellEq(const Simulator& simulator,
                         const double dt,
-                        WellState<Scalar>& well_state,
-                        const GroupState<Scalar>& group_state,
-                        DeferredLogger& deferred_logger);
+                        const GroupStateHelperType& groupStateHelper,
+                        WellStateType& well_state);
 
     void assembleWellEqWithoutIteration(const Simulator& simulator,
+                                        const GroupStateHelperType& groupStateHelper,
                                         const double dt,
-                                        WellState<Scalar>& well_state,
-                                        const GroupState<Scalar>& group_state,
-                                        DeferredLogger& deferred_logger);
+                                        WellStateType& well_state,
+                                        const bool solving_with_zero_rate);
 
     // TODO: better name or further refactoring the function to make it more clear
     void prepareWellBeforeAssembling(const Simulator& simulator,
                                      const double dt,
-                                     WellState<Scalar>& well_state,
-                                     const GroupState<Scalar>& group_state,
-                                     DeferredLogger& deferred_logger);
-
+                                     const GroupStateHelperType& groupStateHelper,
+                                     WellStateType& well_state);
 
     virtual void computeWellRatesWithBhp(const Simulator& ebosSimulator,
                                          const Scalar& bhp,
@@ -188,17 +189,23 @@ public:
 
     virtual std::optional<Scalar>
     computeBhpAtThpLimitProdWithAlq(const Simulator& ebos_simulator,
+                                    const GroupStateHelperType& groupStateHelper,
                                     const SummaryState& summary_state,
                                     const Scalar alq_value,
-                                    DeferredLogger& deferred_logger,
                                     bool iterate_if_no_solution) const = 0;
 
+    std::optional<Scalar>
+    computeBhpAtThpLimitProdWithAlqUsingIPR(const Simulator& simulator,
+                                            const WellStateType& well_state,
+                                            Scalar bhp,
+                                            const SummaryState& summary_state,
+                                            const Scalar alq_value);
     /// using the solution x to recover the solution xw for wells and applying
     /// xw to update Well State
     virtual void recoverWellSolutionAndUpdateWellState(const Simulator& simulator,
                                                        const BVector& x,
-                                                       WellState<Scalar>& well_state,
-                                                       DeferredLogger& deferred_logger) = 0;
+                                                       const GroupStateHelperType& groupStateHelper,
+                                                       WellStateType& well_state) = 0;
 
     /// Ax = Ax - C D^-1 B x
     virtual void apply(const BVector& x, BVector& Ax) const = 0;
@@ -208,65 +215,56 @@ public:
 
     // TODO: before we decide to put more information under mutable, this function is not const
     virtual void computeWellPotentials(const Simulator& simulator,
-                                       const WellState<Scalar>& well_state,
-                                       std::vector<Scalar>& well_potentials,
-                                       DeferredLogger& deferred_logger) = 0;
+                                       const WellStateType& well_state,
+                                       const GroupStateHelperType& groupStateHelper,
+                                       std::vector<Scalar>& well_potentials) = 0;
 
     virtual void updateWellStateWithTarget(const Simulator& simulator,
-                                           const GroupState<Scalar>& group_state,
-                                           WellState<Scalar>& well_state,
-                                           DeferredLogger& deferred_logger) const;
+                                           const GroupStateHelperType& groupStateHelper,
+                                           WellStateType& well_state) const;
+
+    virtual void scaleSegmentRatesAndPressure(WellStateType& well_state) const;
 
     virtual void computeWellRatesWithBhpIterations(const Simulator& simulator,
                                                    const Scalar& bhp,
-                                                   std::vector<Scalar>& well_flux,
-                                                   DeferredLogger& deferred_logger) const = 0;
+                                                   const GroupStateHelperType& groupStateHelper,
+                                                   std::vector<Scalar>& well_flux) const = 0;
 
-    bool wellUnderZeroRateTarget(const Simulator& simulator,
-                                 const WellState<Scalar>& well_state,
-                                 DeferredLogger& deferred_logger) const;
+    bool wellUnderZeroRateTarget(const GroupStateHelperType& groupStateHelper) const;
 
-    bool wellUnderZeroGroupRateTarget(const Simulator& simulator,
-                                      const WellState<Scalar>& well_state,
-                                      DeferredLogger& deferred_logger,
-                                      std::optional<bool> group_control = std::nullopt) const;
-
-    bool stoppedOrZeroRateTarget(const Simulator& simulator,
-                                 const WellState<Scalar>& well_state,
-                                 DeferredLogger& deferred_logger) const;
+    bool stoppedOrZeroRateTarget(const GroupStateHelperType& groupStateHelper) const;
 
     bool updateWellStateWithTHPTargetProd(const Simulator& simulator,
-                                          WellState<Scalar>& well_state,
-                                          DeferredLogger& deferred_logger) const;
+                                          WellStateType& well_state,
+                                          const GroupStateHelperType& groupStateHelper) const;
+
+    bool wellUnderZeroGroupRateTarget(const GroupStateHelperType& groupStateHelper,
+                                      const std::optional<bool> group_control = std::nullopt) const;
 
     enum class IndividualOrGroup { Individual, Group, Both };
     bool updateWellControl(const Simulator& simulator,
                            const IndividualOrGroup iog,
-                           WellState<Scalar>& well_state,
-                           const GroupState<Scalar>& group_state,
-                           DeferredLogger& deferred_logger) /* const */;
+                           const GroupStateHelperType& groupStateHelper,
+                           WellStateType& well_state) /* const */;
 
     bool updateWellControlAndStatusLocalIteration(const Simulator& simulator,
-                                                  WellState<Scalar>& well_state,
-                                                  const GroupState<Scalar>& group_state,
+                                                  const GroupStateHelperType& groupStateHelper,
                                                   const Well::InjectionControls& inj_controls,
                                                   const Well::ProductionControls& prod_controls,
                                                   const Scalar WQTotal,
-                                                  DeferredLogger& deferred_logger, 
-                                                  const bool fixed_control = false, 
-                                                  const bool fixed_status = false);
+                                                  WellStateType& well_state,
+                                                  const bool fixed_control,
+                                                  const bool fixed_status,
+                                                  const bool solving_with_zero_rate);
 
-    virtual void updatePrimaryVariables(const Simulator& simulator,
-                                        const WellState<Scalar>& well_state,
-                                        DeferredLogger& deferred_logger) = 0;
+    virtual void updatePrimaryVariables(const GroupStateHelperType& groupStateHelper) = 0;
 
     virtual void calculateExplicitQuantities(const Simulator& simulator,
-                                             const WellState<Scalar>& well_state,
-                                             DeferredLogger& deferred_logger) = 0; // should be const?
+                                             const GroupStateHelperType& groupStateHelper) = 0; // should be const?
 
     virtual void updateProductivityIndex(const Simulator& simulator,
                                          const WellProdIndexCalculator<Scalar>& wellPICalc,
-                                         WellState<Scalar>& well_state,
+                                         WellStateType& well_state,
                                          DeferredLogger& deferred_logger) const = 0;
 
     // Add well contributions to matrix
@@ -276,9 +274,9 @@ public:
                                           const BVector& x,
                                           const int pressureVarIndex,
                                           const bool use_well_weights,
-                                          const WellState<Scalar>& well_state) const = 0;
+                                          const WellStateType& well_state) const = 0;
 
-    void addCellRates(RateVector& rates, int cellIdx) const;
+    void addCellRates(std::map<int, RateVector>& cellRates_) const;
 
     Scalar volumetricSurfaceRateForConnection(int cellIdx, int phaseIdx) const;
 
@@ -286,38 +284,34 @@ public:
     // Simulator is not const is because that assembleWellEq is non-const Simulator
     void wellTesting(const Simulator& simulator,
                      const double simulation_time,
-                     /* const */ WellState<Scalar>& well_state,
-                     const GroupState<Scalar>& group_state,
+                     const GroupStateHelperType& groupStateHelper,
+                     WellStateType& well_state,
                      WellTestState& welltest_state,
-                     const PhaseUsage& phase_usage,
                      GLiftEclWells& ecl_well_map,
-                     std::map<std::string, double>& open_times,
-                     DeferredLogger& deferred_logger);
+                     std::map<std::string, double>& open_times);
 
     void checkWellOperability(const Simulator& simulator,
-                              const WellState<Scalar>& well_state,
-                              DeferredLogger& deferred_logger);
+                              const WellStateType& well_state,
+                              const GroupStateHelperType& groupStateHelper);
 
     void gliftBeginTimeStepWellTestUpdateALQ(const Simulator& simulator,
-                                             WellState<Scalar>& well_state,
+                                             WellStateType& well_state,
                                              const GroupState<Scalar>& group_state,
-                                             const PhaseUsage& phase_usage,
                                              GLiftEclWells& ecl_well_map,
                                              DeferredLogger& deferred_logger);
 
     // check whether the well is operable under the current reservoir condition
     // mostly related to BHP limit and THP limit
     void updateWellOperability(const Simulator& simulator,
-                               const WellState<Scalar>& well_state,
-                               DeferredLogger& deferred_logger);
+                               const WellStateType& well_state,
+                               const GroupStateHelperType& groupStateHelper);
 
     bool updateWellOperabilityFromWellEq(const Simulator& simulator,
-                                         const WellState<Scalar>& well_state,
-                                         DeferredLogger& deferred_logger);
+                                         const GroupStateHelperType& groupStateHelper);
 
     // update perforation water throughput based on solved water rate
     virtual void updateWaterThroughput(const double dt,
-                                       WellState<Scalar>& well_state) const = 0;
+                                       WellStateType& well_state) const = 0;
 
     /// Compute well rates based on current reservoir conditions and well variables.
     /// Used in updateWellStateRates().
@@ -329,45 +323,47 @@ public:
     /// If so, that rate is kept as is, but the others are set proportionally
     /// to the rates at bhp limit or bhp 1 bar.
     void initializeProducerWellState(const Simulator& simulator,
-                                     WellState<Scalar>& well_state,
+                                     WellStateType& well_state,
                                      DeferredLogger& deferred_logger) const;
 
     void solveWellEquation(const Simulator& simulator,
-                           WellState<Scalar>& well_state,
-                           const GroupState<Scalar>& group_state,
-                           DeferredLogger& deferred_logger);
+                           const GroupStateHelperType& groupStateHelper,
+                           WellStateType& well_state);
 
     const std::vector<RateVector>& connectionRates() const
     {
         return connectionRates_;
     }
 
-    std::vector<Scalar> wellIndex(const int perf,
-                                  const IntensiveQuantities& intQuants,
-                                  const Scalar trans_mult,
-                                  const SingleWellState<Scalar>& ws) const;
-
     void updateConnectionDFactor(const Simulator& simulator,
-                                 SingleWellState<Scalar>& ws) const;
+                                 SingleWellStateType& ws) const;
 
     void updateConnectionTransmissibilityFactor(const Simulator& simulator,
-                                                SingleWellState<Scalar>& ws) const;
+                                                SingleWellStateType& ws) const;
 
     virtual bool iterateWellEqWithSwitching(const Simulator& simulator,
                                             const double dt,
                                             const WellInjectionControls& inj_controls,
                                             const WellProductionControls& prod_controls,
-                                            WellState<Scalar>& well_state,
-                                            const GroupState<Scalar>& group_state,
-                                            DeferredLogger& deferred_logger, 
-                                            const bool fixed_control = false,
-                                            const bool fixed_status = false) = 0;
+                                            const GroupStateHelperType& groupStateHelper,
+                                            WellStateType& well_state,
+                                            const bool fixed_control,
+                                            const bool fixed_status,
+                                            const bool solving_with_zero_rate) = 0;
+
+    virtual Scalar maxPerfPress(const Simulator& simulator) const = 0;
+
+    virtual void updateIPRImplicit(const Simulator& simulator,
+                                   const GroupStateHelperType& groupStateHelper,
+                                   WellStateType& well_state) = 0;
+
 protected:
     // simulation parameters
     std::vector<RateVector> connectionRates_;
     std::vector<Scalar> B_avg_;
     bool changed_to_stopped_this_step_ = false;
     bool thp_update_iterations = false;
+    int number_of_well_reopenings_{0};
 
     Scalar wpolymer() const;
     Scalar wfoam() const;
@@ -380,89 +376,95 @@ protected:
 
     std::vector<Scalar>
     initialWellRateFractions(const Simulator& ebosSimulator,
-                             const WellState<Scalar>& well_state) const;
+                             const WellStateType& well_state) const;
 
     // check whether the well is operable under BHP limit with current reservoir condition
-    virtual void checkOperabilityUnderBHPLimit(const WellState<Scalar>& well_state,
+    virtual void checkOperabilityUnderBHPLimit(const WellStateType& well_state,
                                                const Simulator& simulator,
                                                DeferredLogger& deferred_logger) = 0;
 
     // check whether the well is operable under THP limit with current reservoir condition
     virtual void checkOperabilityUnderTHPLimit(const Simulator& simulator,
-                                               const WellState<Scalar>& well_state,
-                                               DeferredLogger& deferred_logger) = 0;
+                                               const WellStateType& well_state,
+                                               const GroupStateHelperType& groupStateHelper) = 0;
 
     virtual void updateIPR(const Simulator& simulator,
                            DeferredLogger& deferred_logger) const = 0;
 
     virtual void assembleWellEqWithoutIteration(const Simulator& simulator,
+                                                const GroupStateHelperType& groupStateHelper,
                                                 const double dt,
                                                 const WellInjectionControls& inj_controls,
                                                 const WellProductionControls& prod_controls,
-                                                WellState<Scalar>& well_state,
-                                                const GroupState<Scalar>& group_state,
-                                                DeferredLogger& deferred_logger) = 0;
+                                                WellStateType& well_state,
+                                                const bool solving_with_zero_rate) = 0;
 
     // iterate well equations with the specified control until converged
     virtual bool iterateWellEqWithControl(const Simulator& simulator,
                                           const double dt,
                                           const WellInjectionControls& inj_controls,
                                           const WellProductionControls& prod_controls,
-                                          WellState<Scalar>& well_state,
-                                          const GroupState<Scalar>& group_state,
-                                          DeferredLogger& deferred_logger) = 0;
-
-    virtual void updateIPRImplicit(const Simulator& simulator,
-                                   WellState<Scalar>& well_state,
-                                   DeferredLogger& deferred_logger) = 0;                                            
+                                          const GroupStateHelperType& groupStateHelper,
+                                          WellStateType& well_state) = 0;
 
     bool iterateWellEquations(const Simulator& simulator,
                               const double dt,
-                              WellState<Scalar>& well_state,
-                              const GroupState<Scalar>& group_state,
-                              DeferredLogger& deferred_logger);
+                              const GroupStateHelperType& groupStateHelper,
+                              WellStateType& well_state);
 
     bool solveWellWithOperabilityCheck(const Simulator& simulator,
                                        const double dt,
                                        const Well::InjectionControls& inj_controls,
                                        const Well::ProductionControls& prod_controls,
-                                       WellState<Scalar>& well_state,
-                                       const GroupState<Scalar>& group_state,
-                                       DeferredLogger& deferred_logger);
+                                       const GroupStateHelperType& groupStateHelper,
+                                       WellStateType& well_state);
 
     std::optional<Scalar>
     estimateOperableBhp(const Simulator& ebos_simulator,
                         const double dt,
-                        WellState<Scalar>& well_state,
+                        const GroupStateHelperType& groupStateHelper,
                         const SummaryState& summary_state,
-                        DeferredLogger& deferred_logger);
+                        WellStateType& well_state);
 
     bool solveWellWithBhp(const Simulator& simulator,
                           const double dt,
                           const Scalar bhp,
-                          WellState<Scalar>& well_state,
-                          DeferredLogger& deferred_logger);         
+                          const GroupStateHelperType& groupStateHelper,
+                          WellStateType& well_state);
 
     bool solveWellWithZeroRate(const Simulator& simulator,
                                const double dt,
-                               WellState<Scalar>& well_state,
-                               DeferredLogger& deferred_logger);                                                                                                       
+                               const GroupStateHelperType& groupStateHelper,
+                               WellStateType& well_state);
 
     bool solveWellForTesting(const Simulator& simulator,
-                             WellState<Scalar>& well_state,
-                             const GroupState<Scalar>& group_state,
-                             DeferredLogger& deferred_logger);
-    
+                             const GroupStateHelperType& groupStateHelper,
+                             WellStateType& well_state);
+
 
     template<class GasLiftSingleWell>
     std::unique_ptr<GasLiftSingleWell> initializeGliftWellTest_(const Simulator& simulator,
-                                                                WellState<Scalar>& well_state,
+                                                                WellStateType& well_state,
                                                                 const GroupState<Scalar>& group_state,
-                                                                const PhaseUsage& phase_usage,
                                                                 GLiftEclWells& ecl_well_map,
                                                                 DeferredLogger& deferred_logger);
 
     Eval getPerfCellPressure(const FluidState& fs) const;
+
+    // get the transmissibility multiplier for specific perforation
+    template<class Value, class Callback>
+    void getTransMult(Value& trans_mult,
+                      const Simulator& simulator,
+                      const int cell_idx,
+                      Callback& extendEval) const;
+
+    // get the well transmissibility for specific perforation
+    template<class Value>
+    void getTw(std::vector<Value>&         wi,
+               const int                   perf,
+               const IntensiveQuantities&  intQuants,
+               const Value&                trans_mult,
+               const SingleWellStateType&  ws) const;
 
     // get the mobility for specific perforation
     template<class Value, class Callback>
@@ -486,7 +488,7 @@ protected:
 
     Scalar computeConnectionDFactor(const int perf,
                                     const IntensiveQuantities& intQuants,
-                                    const SingleWellState<Scalar>& ws) const;
+                                    const SingleWellStateType& ws) const;
 };
 
 } // namespace Opm

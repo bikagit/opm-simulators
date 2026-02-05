@@ -57,19 +57,18 @@ class BlackOilBoundaryRateVector : public GetPropType<TypeTag, Properties::RateV
 
     enum { numEq = getPropValue<TypeTag, Properties::NumEq>() };
     enum { numPhases = getPropValue<TypeTag, Properties::NumPhases>() };
-    enum { numComponents = getPropValue<TypeTag, Properties::NumComponents>() };
     enum { enableSolvent = getPropValue<TypeTag, Properties::EnableSolvent>() };
     enum { enablePolymer = getPropValue<TypeTag, Properties::EnablePolymer>() };
-    enum { enableEnergy = getPropValue<TypeTag, Properties::EnableEnergy>() };
-    enum { conti0EqIdx = Indices::conti0EqIdx };
+    enum { enableFullyImplicitThermal = (getPropValue<TypeTag, Properties::EnergyModuleType>() == EnergyModules::FullyImplicitThermal) };
     enum { contiEnergyEqIdx = Indices::contiEnergyEqIdx };
     enum { enableFoam = getPropValue<TypeTag, Properties::EnableFoam>() };
-    enum { enableMICP = getPropValue<TypeTag, Properties::EnableMICP>() };
+    enum { enableMICP = Indices::enableMICP };
 
     static constexpr bool blackoilConserveSurfaceVolume =
         getPropValue<TypeTag, Properties::BlackoilConserveSurfaceVolume>();
 
-    using EnergyModule = BlackOilEnergyModule<TypeTag, enableEnergy>;
+    static constexpr EnergyModules energyModuleType = getPropValue<TypeTag, Properties::EnergyModuleType>();
+    using EnergyModule = BlackOilEnergyModule<TypeTag, energyModuleType>;
 
 public:
     /*!
@@ -142,7 +141,7 @@ public:
             }
 
             // energy conservation
-            if constexpr (enableEnergy) {
+            if constexpr (enableFullyImplicitThermal) {
                 Evaluation density;
                 Evaluation specificEnthalpy;
                 if (pBoundary > pInside) {
@@ -200,7 +199,7 @@ public:
         LocalResidual::adaptMassConservationQuantities_(*this, insideIntQuants.pvtRegionIndex());
 
         // heat conduction
-        if constexpr (enableEnergy) {
+        if constexpr (enableFullyImplicitThermal) {
             EnergyModule::addToEnthalpyRate(*this, extQuants.energyFlux() *
                                                    getPropValue<TypeTag, Properties::BlackOilEnergyScalingFactor>());
         }
@@ -270,7 +269,7 @@ public:
         setNoFlow();
 
         // if we do not conserve energy there is nothing we should do in addition
-        if constexpr (enableEnergy) {
+        if constexpr (enableFullyImplicitThermal) {
             ExtensiveQuantities extQuants;
             extQuants.updateBoundary(context, bfIdx, timeIdx, boundaryFluidState);
 

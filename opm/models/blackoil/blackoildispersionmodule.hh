@@ -52,7 +52,7 @@ namespace Opm {
  * \ingroup Dispersion
  * \class Opm::BlackOilDispersionModule
  * \brief Provides the auxiliary methods required for consideration of the
- * dispersion equation. 
+ * dispersion equation.
  */
 template <class TypeTag, bool enableDispersion>
 class BlackOilDispersionModule;
@@ -71,8 +71,6 @@ class BlackOilDispersionModule<TypeTag, /*enableDispersion=*/false>
     using FluidSystem = GetPropType<TypeTag, Properties::FluidSystem>;
     using Evaluation = GetPropType<TypeTag, Properties::Evaluation>;
     using IntensiveQuantities = GetPropType<TypeTag, Properties::IntensiveQuantities>;
-
-    enum { numPhases = FluidSystem::numPhases };
 
 public:
     using ExtensiveQuantities = BlackOilDispersionExtensiveQuantities<TypeTag,false>;
@@ -116,7 +114,6 @@ class BlackOilDispersionModule<TypeTag, /*enableDispersion=*/true>
     using FluidSystem = GetPropType<TypeTag, Properties::FluidSystem>;
     using Model = GetPropType<TypeTag, Properties::Model>;
     using Simulator = GetPropType<TypeTag, Properties::Simulator>;
-    using EqVector = GetPropType<TypeTag, Properties::EqVector>;
     using RateVector = GetPropType<TypeTag, Properties::RateVector>;
     using Indices = GetPropType<TypeTag, Properties::Indices>;
 
@@ -124,7 +121,8 @@ class BlackOilDispersionModule<TypeTag, /*enableDispersion=*/true>
     enum { numComponents = FluidSystem::numComponents };
     enum { conti0EqIdx = Indices::conti0EqIdx };
     enum { enableDispersion = getPropValue<TypeTag, Properties::EnableDispersion>() };
-    enum { enableMICP = getPropValue<TypeTag, Properties::EnableMICP>() };
+    enum { enableBioeffects = getPropValue<TypeTag, Properties::EnableBioeffects>() };
+    enum { enableMICP = Indices::enableMICP };
 
     static constexpr unsigned contiMicrobialEqIdx = Indices::contiMicrobialEqIdx;
     static constexpr unsigned contiOxygenEqIdx = Indices::contiOxygenEqIdx;
@@ -201,7 +199,7 @@ public:
         const auto& inFs = inIq.fluidState();
         const auto& exFs = exIq.fluidState();
         Evaluation diffR = 0.0;
-        if constexpr(enableMICP) {
+        if constexpr(enableBioeffects) {
             // The dispersion coefficients are given for mass concentrations
             const Evaluation bAvg = (inFs.invB(waterPhaseIdx) + Toolbox::value(exFs.invB(waterPhaseIdx))) / 2;
             diffR = inIq.microbialConcentration() - Toolbox::value(exIq.microbialConcentration());
@@ -210,19 +208,21 @@ public:
                  normVelocityAvg[waterPhaseIdx] *
                  dispersivity *
                  diffR;
-            diffR = inIq.oxygenConcentration() - Toolbox::value(exIq.oxygenConcentration());
-            flux[contiOxygenEqIdx] +=
-                 bAvg *
-                 normVelocityAvg[waterPhaseIdx] *
-                 dispersivity *
-                 diffR;
-            diffR = inIq.ureaConcentration() - Toolbox::value(exIq.ureaConcentration());
-            flux[contiUreaEqIdx] +=
-                 bAvg *
-                 normVelocityAvg[waterPhaseIdx] *
-                 dispersivity *
-                 diffR;
-            return;
+            if constexpr(enableMICP) {
+                diffR = inIq.oxygenConcentration() - Toolbox::value(exIq.oxygenConcentration());
+                flux[contiOxygenEqIdx] +=
+                    bAvg *
+                    normVelocityAvg[waterPhaseIdx] *
+                    dispersivity *
+                    diffR;
+                diffR = inIq.ureaConcentration() - Toolbox::value(exIq.ureaConcentration());
+                flux[contiUreaEqIdx] +=
+                    bAvg *
+                    normVelocityAvg[waterPhaseIdx] *
+                    dispersivity *
+                    diffR;
+                return;
+            }
         }
 
         unsigned pvtRegionIndex = inFs.pvtRegionIndex();
@@ -280,7 +280,7 @@ public:
 
             // mass flux of solvent component
             const unsigned solventCompIdx = FluidSystem::solventComponentIndex(phaseIdx);
-            const unsigned activeSolventCompIdx = Indices::canonicalToActiveComponentIndex(solventCompIdx);
+            const unsigned activeSolventCompIdx = FluidSystem::canonicalToActiveCompIdx(solventCompIdx);
             flux[conti0EqIdx + activeSolventCompIdx] +=
                     -bAvg *
                     normVelocityAvg[phaseIdx] *
@@ -290,7 +290,7 @@ public:
 
             // mass flux of solute component
             const unsigned soluteCompIdx = FluidSystem::soluteComponentIndex(phaseIdx);
-            const unsigned activeSoluteCompIdx = Indices::canonicalToActiveComponentIndex(soluteCompIdx);
+            const unsigned activeSoluteCompIdx = FluidSystem::canonicalToActiveCompIdx(soluteCompIdx);
             flux[conti0EqIdx + activeSoluteCompIdx] +=
                     bAvg *
                     normVelocityAvg[phaseIdx] *
@@ -334,7 +334,6 @@ class BlackOilDispersionIntensiveQuantities<TypeTag, /*enableDispersion=*/false>
 {
     using Scalar = GetPropType<TypeTag, Properties::Scalar>;
     using ElementContext = GetPropType<TypeTag, Properties::ElementContext>;
-    using FluidSystem = GetPropType<TypeTag, Properties::FluidSystem>;
 
 public:
     /*!
@@ -365,11 +364,10 @@ template <class TypeTag>
 class BlackOilDispersionIntensiveQuantities<TypeTag, /*enableDispersion=*/true>
 {
     using Scalar = GetPropType<TypeTag, Properties::Scalar>;
-    using Evaluation = GetPropType<TypeTag, Properties::Evaluation>;
     using ElementContext = GetPropType<TypeTag, Properties::ElementContext>;
     using FluidSystem = GetPropType<TypeTag, Properties::FluidSystem>;
-    using IntensiveQuantities = GetPropType<TypeTag, Properties::IntensiveQuantities>;
     using Indices = GetPropType<TypeTag, Properties::Indices>;
+
     enum { numPhases = FluidSystem::numPhases };
     enum { numComponents = FluidSystem::numComponents };
     enum { oilPhaseIdx = FluidSystem::oilPhaseIdx };
@@ -381,7 +379,7 @@ class BlackOilDispersionIntensiveQuantities<TypeTag, /*enableDispersion=*/true>
     enum { conti0EqIdx = Indices::conti0EqIdx };
     enum { enableDispersion = getPropValue<TypeTag, Properties::EnableDispersion>() };
 
-public:    
+public:
     /*!
      * \brief Returns the max. norm of the filter velocity of the cell.
      */
@@ -420,9 +418,9 @@ protected:
         for (const auto& velocityInfo : velocityInfos) {
             for (unsigned i = 0; i < phaseIdxs.size(); ++i) {
                 if (FluidSystem::phaseIsActive(phaseIdxs[i])) {
-                    normVelocityCell_[phaseIdxs[i]] = max( normVelocityCell_[phaseIdxs[i]], 
+                    normVelocityCell_[phaseIdxs[i]] = std::max(normVelocityCell_[phaseIdxs[i]],
                         std::abs(velocityInfo.velocity[conti0EqIdx +
-                                 Indices::canonicalToActiveComponentIndex(compIdxs[i])]));
+                                 FluidSystem::canonicalToActiveCompIdx(compIdxs[i])]));
                 }
             }
         }
@@ -448,7 +446,6 @@ template <class TypeTag>
 class BlackOilDispersionExtensiveQuantities<TypeTag, /*enableDispersion=*/false>
 {
     using Scalar = GetPropType<TypeTag, Properties::Scalar>;
-    using Evaluation = GetPropType<TypeTag, Properties::Evaluation>;
     using ElementContext = GetPropType<TypeTag, Properties::ElementContext>;
     using FluidSystem = GetPropType<TypeTag, Properties::FluidSystem>;
     using IntensiveQuantities = GetPropType<TypeTag, Properties::IntensiveQuantities>;
@@ -511,19 +508,10 @@ template <class TypeTag>
 class BlackOilDispersionExtensiveQuantities<TypeTag, /*enableDispersion=*/true>
 {
     using Scalar = GetPropType<TypeTag, Properties::Scalar>;
-    using Evaluation = GetPropType<TypeTag, Properties::Evaluation>;
-    using ElementContext = GetPropType<TypeTag, Properties::ElementContext>;
-    using GridView = GetPropType<TypeTag, Properties::GridView>;
     using FluidSystem = GetPropType<TypeTag, Properties::FluidSystem>;
-    using Toolbox = MathToolbox<Evaluation>;
     using IntensiveQuantities = GetPropType<TypeTag, Properties::IntensiveQuantities>;
 
-    enum { dimWorld = GridView::dimensionworld };
     enum { numPhases = getPropValue<TypeTag, Properties::NumPhases>() };
-    enum { numComponents = getPropValue<TypeTag, Properties::NumComponents>() };
-
-    using DimVector = Dune::FieldVector<Scalar, dimWorld>;
-    using DimEvalVector = Dune::FieldVector<Evaluation, dimWorld>;
 
 public:
     using ScalarArray = std::array<Scalar, numPhases>;
@@ -533,16 +521,6 @@ public:
     {
         for (unsigned phaseIdx = 0; phaseIdx < numPhases; ++phaseIdx) {
             if (!FluidSystem::phaseIsActive(phaseIdx)) {
-                continue;
-            }
-            // no dispersion in water for blackoil models unless water can contain dissolved gas
-            if (!FluidSystem::enableDissolvedGasInWater() && FluidSystem::waterPhaseIdx == phaseIdx) {
-                continue;
-            }
-            // adding dispersion in the gas phase leads to
-            // convergence issues and unphysical results.
-            // we disable dispersion in the gas phase for now
-            if (FluidSystem::gasPhaseIdx == phaseIdx) {
                 continue;
             }
             // use the arithmetic average for the effective

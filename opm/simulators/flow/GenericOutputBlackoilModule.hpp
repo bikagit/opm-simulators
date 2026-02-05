@@ -32,13 +32,14 @@
 #include <opm/output/data/Wells.hpp>
 #include <opm/output/eclipse/Inplace.hpp>
 
+#include <opm/simulators/flow/BioeffectsContainer.hpp>
+#include <opm/simulators/flow/CO2H2Container.hpp>
 #include <opm/simulators/flow/ExtboContainer.hpp>
 #include <opm/simulators/flow/FIPContainer.hpp>
 #include <opm/simulators/flow/FlowsContainer.hpp>
 #include <opm/simulators/flow/InterRegFlows.hpp>
 #include <opm/simulators/flow/LogOutputHelper.hpp>
 #include <opm/simulators/flow/MechContainer.hpp>
-#include <opm/simulators/flow/MICPContainer.hpp>
 #include <opm/simulators/flow/RegionPhasePVAverage.hpp>
 #include <opm/simulators/flow/RFTContainer.hpp>
 #include <opm/simulators/flow/RSTConv.hpp>
@@ -121,7 +122,28 @@ public:
                          std::map<std::string, std::vector<double>>& regionData,
                          const Parallel::Communication& comm);
 
+    /// Emit well specification report
+    ///
+    /// Includes well level, connection level, and segment level information
+    /// for structurally changed wells.  Also includes contents of well
+    /// lists for structurally changed well lists.
+    ///
+    /// \param[in] changedWells Wells whose structures differ from those of
+    /// the previous well specification report.
+    ///
+    /// \param[in] changedWellLists Whether or not any of the run's current
+    /// well lists changed structurally since the previous well
+    /// specification report.
+    ///
+    /// \param[in] reportStepNum One-based report step index.
+    ///
+    /// \param[in] elapsed Simulated time, in seconds, since start of
+    /// simulation run.
+    ///
+    /// \param[in] currentDate Time point at which this well specification
+    /// report is emitted.
     void outputWellspecReport(const std::vector<std::string>& changedWells,
+                              const bool changedWellLists,
                               const std::size_t reportStepNum,
                               const double elapsed,
                               boost::posix_time::ptime currentDate) const;
@@ -201,8 +223,11 @@ public:
     const std::vector<Scalar>& getFluidPressure() const
     { return fluidPressure_; }
 
-    const MICPContainer<Scalar>& getMICP() const
-    { return this->micpC_; }
+    const BioeffectsContainer<Scalar>& getBioeffects() const
+    { return this->bioeffectsC_; }
+
+    const CO2H2Container<Scalar>& getCO2H2() const
+    { return this->CO2H2C_; }
 
     const FlowsContainer<FluidSystem>& getFlows() const
     { return this->flowsC_; }
@@ -222,9 +247,11 @@ public:
         return extraBlockData_;
     }
 
-    const std::optional<Inplace>& initialInplace() const
+    const Inplace* initialInplace() const
     {
-        return this->initialInplace_;
+        return this->initialInplace_.has_value()
+            ? &*this->initialInplace_
+            : nullptr;
     }
 
     bool localDataValid() const{
@@ -278,7 +305,7 @@ protected:
                                 RSTConv::LocalToGlobalCellFunc globalCell,
                                 const Parallel::Communication& comm,
                                 bool enableEnergy,
-                                bool enableTemperature,
+                                bool constantTemperature,
                                 bool enableMech,
                                 bool enableSolvent,
                                 bool enablePolymer,
@@ -286,7 +313,7 @@ protected:
                                 bool enableBrine,
                                 bool enableSaltPrecipitation,
                                 bool enableExtbo,
-                                bool enableMICP);
+                                bool enableBioeffects);
 
     void doAllocBuffers(unsigned bufferSize,
                         unsigned reportStepNum,
@@ -332,6 +359,7 @@ protected:
 
     virtual bool isDefunctParallelWell(const std::string& wname) const = 0;
     virtual bool isOwnedByCurrentRank(const std::string& wname) const = 0;
+    virtual bool isOnCurrentRank(const std::string& wname) const = 0;
 
     const EclipseState& eclState_;
     const Schedule& schedule_;
@@ -343,7 +371,7 @@ protected:
     LogOutputHelper<Scalar> logOutput_;
 
     bool enableEnergy_{false};
-    bool enableTemperature_{false};
+    bool constantTemperature_{false};
     bool enableMech_{false};
 
     bool enableSolvent_{false};
@@ -352,7 +380,7 @@ protected:
     bool enableBrine_{false};
     bool enableSaltPrecipitation_{false};
     bool enableExtbo_{false};
-    bool enableMICP_{false};
+    bool enableBioeffects_{false};
 
     bool forceDisableFipOutput_{false};
     bool forceDisableFipresvOutput_{false};
@@ -408,7 +436,8 @@ protected:
     ScalarBuffer minimumOilPressure_;
     ScalarBuffer saturatedOilFormationVolumeFactor_;
     ScalarBuffer rockCompTransMultiplier_;
-    MICPContainer<Scalar> micpC_;
+    BioeffectsContainer<Scalar> bioeffectsC_;
+    CO2H2Container<Scalar> CO2H2C_;
     ScalarBuffer pcgw_;
     ScalarBuffer pcow_;
     ScalarBuffer pcog_;

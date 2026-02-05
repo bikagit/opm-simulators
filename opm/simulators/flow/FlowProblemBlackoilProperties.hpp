@@ -82,10 +82,12 @@ private:
     using Traits = ThreePhaseMaterialTraits<Scalar,
                                             /*wettingPhaseIdx=*/FluidSystem::waterPhaseIdx,
                                             /*nonWettingPhaseIdx=*/FluidSystem::oilPhaseIdx,
-                                            /*gasPhaseIdx=*/FluidSystem::gasPhaseIdx>;
+                                            /*gasPhaseIdx=*/FluidSystem::gasPhaseIdx,
+                                            getPropValue<TypeTag, Properties::EnableHysteresis>(),
+                                            getPropValue<TypeTag, Properties::EnableEndpointScaling>()>;
 
 public:
-    using EclMaterialLawManager = ::Opm::EclMaterialLawManager<Traits>;
+    using EclMaterialLawManager = ::Opm::EclMaterialLaw::Manager<Traits>;
 
     using type = typename EclMaterialLawManager::MaterialLaw;
 };

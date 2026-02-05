@@ -56,7 +56,7 @@ namespace Opm
     {
     public:
         static constexpr TimeStepControlType Type = TimeStepControlType::SimpleIterationCount;
-        
+
         SimpleIterationCountTimeStepControl() = default;
 
         /// \brief constructor
@@ -76,7 +76,7 @@ namespace Opm
                                    const int iterations,
                                    const RelativeChangeInterface& /* relativeChange */,
                                    const AdaptiveSimulatorTimer& /* substepTimer */ ) const override;
-        
+
         bool timeStepAccepted(const double /* error */,
                               const double /* timeStepJustCompleted */) const override { return true; }
 
@@ -129,6 +129,8 @@ namespace Opm
         static PIDTimeStepControl serializationTestObject();
 
         /// \brief \copydoc TimeStepControlInterface::computeTimeStepSize
+        /// \param dt Time step length
+        /// \param relativeChange Relative change handler
         double computeTimeStepSize(const double dt,
                                    const int /* iterations */,
                                    const RelativeChangeInterface& relativeChange,
@@ -185,6 +187,9 @@ namespace Opm
         static PIDAndIterationCountTimeStepControl serializationTestObject();
 
         /// \brief \copydoc TimeStepControlInterface::computeTimeStepSize
+        /// \param dt Time step length
+        /// \param iterations Number of iterations used
+        /// \param relativeChange Relative change handler
         double computeTimeStepSize(const double dt,
                                    const int iterations,
                                    const RelativeChangeInterface& relativeChange,
@@ -225,7 +230,7 @@ namespace Opm
         static constexpr TimeStepControlType Type = TimeStepControlType::General3rdOrder;
 
         General3rdOrderController() = default;
-        
+
         /// \brief constructor
         /// \param tolerance                    tolerance for the relative changes of the numerical solution to be
         ///                                     accepted in one time step
@@ -302,7 +307,7 @@ namespace Opm
     {
     public:
         static constexpr TimeStepControlType Type = TimeStepControlType::HardCodedTimeStep;
-        
+
         HardcodedTimeStepControl() = default;
 
         /// \brief constructor
@@ -312,6 +317,8 @@ namespace Opm
         static HardcodedTimeStepControl serializationTestObject();
 
         /// \brief \copydoc TimeStepControlInterface::computeTimeStepSize
+        /// \param dt Time step length
+        /// \param substepTimer Sub step timer
         double computeTimeStepSize(const double dt,
                                    const int /* iterations */,
                                    const RelativeChangeInterface& /*relativeChange */,
@@ -336,4 +343,3 @@ namespace Opm
 
 } // end namespace Opm
 #endif
-

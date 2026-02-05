@@ -32,6 +32,10 @@
 #include <opm/simulators/linalg/PreconditionerFactoryGPUIncludeWrapper.hpp>
 #include <opm/simulators/linalg/is_gpu_operator.hpp>
 
+#if HAVE_AVX2_EXTENSION
+#include <opm/simulators/linalg/mixed/wrapper.hpp>
+#endif
+
 #include <dune/common/fmatrix.hh>
 #include <dune/istl/bcrsmatrix.hh>
 #include <dune/istl/solvers.hh>
@@ -168,8 +172,8 @@ namespace Dune
         const int verbosity = is_iorank ? prm.get<int>("verbosity", 0) : 0;
         const std::string solver_type = prm.get<std::string>("solver", "bicgstab");
 
-        
-        // make sure it is nullptr at the start (used for error checking in the end). 
+
+        // make sure it is nullptr at the start (used for error checking in the end).
         // while the linSolver_ is initalized as a nullptr, we want to make sure it is reset here,
         // simply because we will check if it is at the end of this function and need to keep this invariant
         // (that it is nullptr at the start of this function).
@@ -181,6 +185,24 @@ namespace Dune
                                                                             tol, // desired residual reduction factor
                                                                             maxiter, // maximum number of iterations
                                                                             verbosity);
+#if HAVE_AVX2_EXTENSION
+          } else if (solver_type == "mixed-bicgstab") {
+              if constexpr (Opm::is_gpu_operator_v<Operator>) {
+                OPM_THROW(std::invalid_argument, "mixed-bicgstab solver not supported for GPU operatorsg");
+            } else if constexpr (std::is_same_v<typename VectorType::field_type, float>){
+                OPM_THROW(std::invalid_argument, "mixed-bicgstab solver not supported for single precision.");
+            } else {
+                const std::string prec_type = prm.get<std::string>("preconditioner.type", "error");
+                bool use_mixed_dilu= (prec_type=="mixed-dilu");
+                using MatrixType = decltype(linearoperator_for_solver_->getmat());
+                linsolver_ = std::make_shared<Dune::MixedSolver<VectorType,MatrixType>>(
+                                                                            linearoperator_for_solver_->getmat(),
+                                                                            tol,
+                                                                            maxiter,
+                                                                            use_mixed_dilu
+                                                                        );
+            }
+#endif
         } else if (solver_type == "loopsolver") {
             linsolver_ = std::make_shared<Dune::LoopSolver<VectorType>>(*linearoperator_for_solver_,
                                                                         *scalarproduct_,
@@ -197,7 +219,6 @@ namespace Dune
                                                                                   restart,
                                                                                   maxiter, // maximum number of iterations
                                                                                   verbosity);
-         
         } else {
             if constexpr (!Opm::is_gpu_operator_v<Operator>) {
                 if (solver_type == "flexgmres") {

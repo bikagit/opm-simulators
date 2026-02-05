@@ -40,7 +40,8 @@
 #include <opm/output/eclipse/Inplace.hpp>
 #include <opm/output/eclipse/RestartValue.hpp>
 
-#include <opm/models/blackoil/blackoilproperties.hh> // Properties::EnableMech, EnableTemperature, EnableSolvent
+#include <opm/models/blackoil/blackoilenergymodules.hh>
+#include <opm/models/blackoil/blackoilproperties.hh> // Properties::EnableMech, EnableSolvent
 #include <opm/models/common/multiphasebaseproperties.hh> // Properties::FluidSystem
 
 #include <opm/simulators/flow/CollectDataOnIORank.hpp>
@@ -76,7 +77,7 @@ struct EclOutputDoublePrecision { static constexpr bool value = false; };
 struct EnableWriteAllSolutions { static constexpr bool value = false; };
 
 // Write ESMRY file for fast loading of summary data
-struct EnableEsmry { static constexpr bool value = false; };
+struct EnableEsmry { static constexpr bool value = true; };
 
 } // namespace Opm::Parameters
 
@@ -127,9 +128,9 @@ class EclWriter : public EclGenericWriter<GetPropType<TypeTag, Properties::Grid>
 
     typedef Dune::MultipleCodimMultipleGeomTypeMapper< GridView > VertexMapper;
 
-    enum { enableEnergy = getPropValue<TypeTag, Properties::EnableEnergy>() };
+    enum { enableEnergy = getPropValue<TypeTag, Properties::EnergyModuleType>() == EnergyModules::FullyImplicitThermal || 
+           getPropValue<TypeTag, Properties::EnergyModuleType>() == EnergyModules::SequentialImplicitThermal };
     enum { enableMech = getPropValue<TypeTag, Properties::EnableMech>() };
-    enum { enableTemperature = getPropValue<TypeTag, Properties::EnableTemperature>() };
     enum { enableSolvent = getPropValue<TypeTag, Properties::EnableSolvent>() };
 
 public:
@@ -376,13 +377,16 @@ public:
             fip.output(FIPConfig::OutputField::RESV))
         {
             OPM_TIMEBLOCK(outputFipLogAndFipresvLog);
-            boost::posix_time::ptime start_time =
-                boost::posix_time::from_time_t(simulator_.vanguard().schedule().getStartTime());
+
+            const auto start_time = boost::posix_time::
+                from_time_t(simulator_.vanguard().schedule().getStartTime());
 
             if (this->collectOnIORank_.isIORank()) {
-                inplace_ = outputModule_->initialInplace().value();
-                outputModule_->outputFipAndResvLog(inplace_, 0, 0.0, start_time,
-                                                  false, simulator_.gridView().comm());
+                this->inplace_ = *this->outputModule_->initialInplace();
+
+                this->outputModule_->
+                    outputFipAndResvLog(this->inplace_, 0, 0.0, start_time,
+                                        false, simulator_.gridView().comm());
             }
         }
 
@@ -595,6 +599,7 @@ public:
                 }
 
                 this->simulator_.problem().readSolutionFromOutputModule(0, true);
+                this->simulator_.problem().temperatureModel().init();
                 ElementContext elemCtx(this->simulator_);
                 for (const auto& elem : elements(gridView, Dune::Partitions::interior)) {
                     elemCtx.updatePrimaryStencil(elem);
@@ -703,8 +708,8 @@ public:
         this->outputModule_->calc_initial_inplace(this->simulator_.gridView().comm());
 
         if (this->collectOnIORank_.isIORank()) {
-            if (this->outputModule_->initialInplace().has_value()) {
-                this->inplace_ = this->outputModule_->initialInplace().value();
+            if (const auto* iip = this->outputModule_->initialInplace(); iip != nullptr) {
+                this->inplace_ = *iip;
             }
         }
     }
@@ -849,11 +854,15 @@ private:
         const auto changedWells = this->schedule_
             .changed_wells(timer.reportStepNum(), this->initialStep());
 
-        if (changedWells.empty()) {
+        const auto changedWellLists = this->schedule_
+            .changedWellLists(timer.reportStepNum(), this->initialStep());
+
+        if (changedWells.empty() && !changedWellLists) {
             return;
         }
 
         this->outputModule_->outputWellspecReport(changedWells,
+                                                  changedWellLists,
                                                   timer.reportStepNum(),
                                                   timer.simulationTimeElapsed(),
                                                   timer.currentDateTime());

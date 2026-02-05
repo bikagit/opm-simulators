@@ -25,6 +25,7 @@
 
 #include <dune/grid/common/mcmgmapper.hh>
 
+#include <opm/grid/cpgrid/LgrOutputHelpers.hpp>
 #include <opm/grid/GridHelpers.hpp>
 #include <opm/grid/utility/cartesianToCompressed.hpp>
 
@@ -147,7 +148,7 @@ struct EclWriteTasklet : public Opm::TaskletInterface
     std::optional<int> timeStepNum_;
     bool isSubStep_;
     double secondsElapsed_;
-    Opm::RestartValue restartValue_;
+    std::vector<Opm::RestartValue> restartValue_;
     bool writeDoublePrecision_;
 
     explicit EclWriteTasklet(const Opm::Action::State& actionState,
@@ -159,7 +160,7 @@ struct EclWriteTasklet : public Opm::TaskletInterface
                              std::optional<int> timeStepNum,
                              bool isSubStep,
                              double secondsElapsed,
-                             Opm::RestartValue restartValue,
+                             std::vector<Opm::RestartValue> restartValue,
                              bool writeDoublePrecision)
         : actionState_(actionState)
         , wtestState_(wtestState)
@@ -177,17 +178,30 @@ struct EclWriteTasklet : public Opm::TaskletInterface
     // callback to eclIO serial writeTimeStep method
     void run() override
     {
-        this->eclIO_.writeTimeStep(this->actionState_,
-                                   this->wtestState_,
-                                   this->summaryState_,
-                                   this->udqState_,
-                                   this->reportStepNum_,
-                                   this->isSubStep_,
-                                   this->secondsElapsed_,
-                                   std::move(this->restartValue_),
-                                   this->writeDoublePrecision_,
-                                   this->timeStepNum_
-);
+        if (this->restartValue_.size() == 1) {
+            this->eclIO_.writeTimeStep(this->actionState_,
+                                       this->wtestState_,
+                                       this->summaryState_,
+                                       this->udqState_,
+                                       this->reportStepNum_,
+                                       this->isSubStep_,
+                                       this->secondsElapsed_,
+                                       std::move(this->restartValue_.back()),
+                                       this->writeDoublePrecision_,
+                                       this->timeStepNum_);
+        }
+        else{
+            this->eclIO_.writeTimeStep(this->actionState_,
+                                       this->wtestState_,
+                                       this->summaryState_,
+                                       this->udqState_,
+                                       this->reportStepNum_,
+                                       this->isSubStep_,
+                                       this->secondsElapsed_,
+                                       std::move(this->restartValue_),
+                                       this->writeDoublePrecision_,
+                                       this->timeStepNum_);
+        }
     }
 };
 
@@ -329,6 +343,9 @@ computeTrans_(const std::unordered_map<int,int>& cartesianToActive,
         for (const auto& is : intersections(globalGridView, elem)) {
             if (!is.neighbor())
                 continue; // intersection is on the domain boundary
+
+            if ( (is.inside().level()>0) || (is.outside().level()>0))
+                continue; // for CpGrid with LGRs, we only care about level zero cells, for now.
 
             // Not 'const' because remapped if 'map' is non-null.
             unsigned c1 = globalElemMapper.index(is.inside());
@@ -476,6 +493,9 @@ exportNncStructure_(const std::unordered_map<int,int>& cartesianToActive,
             if (!is.neighbor())
                 continue; // intersection is on the domain boundary
 
+            if ( (is.inside().level()>0) || (is.outside().level()>0))
+                continue; // for CpGrid with LGRs, we only care about level zero cells, for now.
+
             // Not 'const' because remapped if 'map' is non-null.
             unsigned c1 = globalElemMapper.index(is.inside());
             unsigned c2 = globalElemMapper.index(is.outside());
@@ -600,6 +620,21 @@ doWriteOutput(const int                          reportStepNum,
             restartValue.addExtra(flores.name, UnitSystem::measure::rate, flores.values);
         }
     }
+
+    std::vector<Opm::RestartValue> restartValues{};
+    // only serial, only CpGrid (for now)
+    if ( !isParallel && !needsReordering && (this->eclState_.getLgrs().size()>0) && (this->grid_.maxLevel()>0) ) {
+        // Level cells that appear on the leaf grid view get the data::Solution values from there.
+        // Other cells (i.e., parent cells that vanished due to refinement) get rubbish values for now.
+        // Only data::Solution is restricted to the level grids. Well, GroupAndNetwork, Aquifer are
+        // not modified in this method.
+        Opm::Lgr::extractRestartValueLevelGrids<Grid>(this->grid_, restartValue, restartValues);
+    }
+    else {
+        restartValues.reserve(1); // minimum size
+        restartValues.push_back(std::move(restartValue)); // no LGRs-> only one restart value
+    }
+
     // make sure that the previous I/O request has been completed
     // and the number of incomplete tasklets does not increase between
     // time steps
@@ -615,7 +650,7 @@ doWriteOutput(const int                          reportStepNum,
         actionState,
         isParallel ? this->collectOnIORank_.globalWellTestState() : std::move(localWTestState),
         summaryState, udqState, *this->eclIO_,
-        reportStepNum, timeStepNum, isSubStep, curTime, std::move(restartValue), doublePrecision);
+        reportStepNum, timeStepNum, isSubStep, curTime, std::move(restartValues), doublePrecision);
 
     // finally, start a new output writing job
     this->taskletRunner_->dispatch(std::move(eclWriteTasklet));
@@ -633,7 +668,7 @@ evalSummary(const int                                            reportStepNum,
             const std::map<std::string, double>&                 miscSummaryData,
             const std::map<std::string, std::vector<double>>&    regionData,
             const Inplace&                                       inplace,
-            const std::optional<Inplace>&                        initialInPlace,
+            const Inplace*                                       initialInPlace,
             const InterRegFlowMap&                               interRegFlows,
             SummaryState&                                        summaryState,
             UDQState&                                            udqState)
@@ -657,19 +692,24 @@ evalSummary(const int                                            reportStepNum,
             ? this->collectOnIORank_.globalAquiferData()
             : localAquiferData;
 
-        summary.eval(summaryState,
-                     reportStepNum,
-                     curTime,
-                     wellData,
-                     wbpData,
-                     groupAndNetworkData,
-                     miscSummaryData,
-                     initialInPlace,
-                     inplace,
-                     regionData,
-                     blockData,
-                     aquiferData,
-                     getInterRegFlowsAsMap(interRegFlows));
+        const auto interreg_flows = getInterRegFlowsAsMap(interRegFlows);
+
+        const auto values = out::Summary::DynamicSimulatorState {
+            /* well_solution           = */ &wellData,
+            /* wbp                     = */ &wbpData,
+            /* group_and_nwrk_solution = */ &groupAndNetworkData,
+            /* single_values           = */ &miscSummaryData,
+            /* region_values           = */ &regionData,
+            /* block_values            = */ &blockData,
+            /* aquifer_values          = */ &aquiferData,
+            /* interreg_flows          = */ &interreg_flows,
+            /* inplace                 = */ {
+                /* current = */ &inplace,
+                /* initial = */ initialInPlace
+            }
+        };
+
+        summary.eval(reportStepNum, curTime, values, summaryState);
 
         // Off-by-one-fun: The reportStepNum argument corresponds to the
         // report step these results will be written to, whereas the

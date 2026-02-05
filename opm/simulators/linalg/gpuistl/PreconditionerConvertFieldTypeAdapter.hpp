@@ -22,11 +22,11 @@
 #include <dune/istl/bcrsmatrix.hh>
 #include <dune/istl/preconditioner.hh>
 #include <opm/simulators/linalg/PreconditionerWithUpdate.hpp>
-#include <opm/simulators/linalg/gpuistl/GpuSparseMatrix.hpp>
+#include <opm/simulators/linalg/gpuistl/GpuSparseMatrixWrapper.hpp>
 #include <opm/simulators/linalg/gpuistl/detail/CuMatrixDescription.hpp>
 #include <opm/simulators/linalg/gpuistl/detail/CuSparseHandle.hpp>
 #include <opm/simulators/linalg/gpuistl/detail/CuSparseResource.hpp>
-#include <opm/simulators/linalg/gpuistl/detail/cusparse_constants.hpp>
+#include <opm/simulators/linalg/gpuistl/detail/gpu_constants.hpp>
 #include <opm/simulators/linalg/gpuistl/detail/cusparse_safe_call.hpp>
 #include <opm/simulators/linalg/gpuistl/detail/preconditioner_should_call_post_pre.hpp>
 
@@ -112,7 +112,7 @@ public:
 
     //! \brief Constructor.
     //!
-    //! \param A The matrix to operate on.
+    //! \param matrix The matrix to operate on.
     //!
     //! \note After the PreconditionerConvertFieldTypeAdapter you can get the converted matrix
     //! by calling getConvertedMatrix(), which in turn can be used to create the underlying preconditioner.

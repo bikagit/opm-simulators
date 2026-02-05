@@ -24,8 +24,6 @@
 #ifndef OPM_WELL_ASSEMBLE_HEADER_INCLUDED
 #define OPM_WELL_ASSEMBLE_HEADER_INCLUDED
 
-#include <opm/simulators/utils/BlackoilPhases.hpp>
-
 #include <opm/input/eclipse/Schedule/ScheduleTypes.hpp>
 #include <opm/input/eclipse/Schedule/Well/WellEnums.hpp>
 
@@ -39,44 +37,39 @@ class Group;
 template<class Scalar> class GroupState;
 class Schedule;
 class SummaryState;
-template<class FluidSystem> class WellInterfaceFluidSystem;
-template<class Scalar> class WellState;
+template<typename FluidSystem> class WellInterfaceFluidSystem;
+template<typename Scalar, typename IndexTraits> class WellState;
+template<typename Scalar, typename IndexTraits> class GroupStateHelper;
 struct WellInjectionControls;
 struct WellProductionControls;
 
-template<class FluidSystem>
+template<typename FluidSystem>
 class WellAssemble {
-    static constexpr int Water = BlackoilPhases::Aqua;
-    static constexpr int Oil = BlackoilPhases::Liquid;
-    static constexpr int Gas = BlackoilPhases::Vapour;
+    static constexpr int Water = FluidSystem::waterPhaseIdx;
+    static constexpr int Oil = FluidSystem::oilPhaseIdx;
+    static constexpr int Gas = FluidSystem::gasPhaseIdx;
     using Scalar = typename FluidSystem::Scalar;
+    using IndexTraits = typename FluidSystem::IndexTraitsType;
+    using GroupStateHelperType = GroupStateHelper<Scalar, IndexTraits>;
 
 public:
     explicit WellAssemble(const WellInterfaceFluidSystem<FluidSystem>& well);
 
     template<class EvalWell>
-    void assembleControlEqProd(const WellState<Scalar>& well_state,
-                               const GroupState<Scalar>& group_state,
-                               const Schedule& schedule,
-                               const SummaryState& summaryState,
+    void assembleControlEqProd(const GroupStateHelperType& groupStateHelper,
                                const WellProductionControls& controls,
                                const EvalWell& bhp,
                                const std::vector<EvalWell>& rates, // Always 3 canonical rates.
                                const std::function<EvalWell()>& bhp_from_thp,
-                               EvalWell& control_eq,
-                               DeferredLogger& deferred_logger) const;
+                               EvalWell& control_eq) const;
 
     template<class EvalWell>
-    void assembleControlEqInj(const WellState<Scalar>& well_state,
-                              const GroupState<Scalar>& group_state,
-                              const Schedule& schedule,
-                              const SummaryState& summaryState,
+    void assembleControlEqInj(const GroupStateHelperType& groupStateHelper,
                               const WellInjectionControls& controls,
                               const EvalWell& bhp,
                               const EvalWell& injection_rate,
                               const std::function<EvalWell()>& bhp_from_thp,
-                              EvalWell& control_eq,
-                              DeferredLogger& deferred_logger) const;
+                              EvalWell& control_eq) const;
 
 private:
     const WellInterfaceFluidSystem<FluidSystem>& well_;

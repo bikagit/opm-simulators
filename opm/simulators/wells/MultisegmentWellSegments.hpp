@@ -31,10 +31,9 @@
 namespace Opm {
 
     class  AutoICD;
-    struct PhaseUsage;
     template<class Scalar> class SegmentState;
     class  UnitSystem;
-    template<class Scalar> class WellInterfaceGeneric;
+    template<typename Scalar, typename IndexTraits> class WellInterfaceGeneric;
     class  SummaryState;
 
 } // namespace Opm
@@ -47,16 +46,16 @@ class MultisegmentWellSegments
     using PrimaryVariables = MultisegmentWellPrimaryVariables<FluidSystem,Indices>;
     using Scalar = typename FluidSystem::Scalar;
     using EvalWell = typename PrimaryVariables::EvalWell;
+    using IndexTraits = typename FluidSystem::IndexTraitsType;
 
 public:
     MultisegmentWellSegments(const int numSegments,
                              const ParallelWellInfo<Scalar>& parallel_well_info,
-                             WellInterfaceGeneric<Scalar>& well);
+                             WellInterfaceGeneric<Scalar, IndexTraits>& well);
 
     void computeFluidProperties(const EvalWell& temperature,
                                 const EvalWell& saltConcentration,
                                 const PrimaryVariables& primary_variables,
-                                int pvt_region_index,
                                 DeferredLogger& deferred_logger);
 
     //! \brief Update upwinding segments.
@@ -72,10 +71,10 @@ public:
     EvalWell getSurfaceVolume(const EvalWell& temperature,
                               const EvalWell& saltConcentration,
                               const PrimaryVariables& primary_variables,
-                              const int pvt_region_index,
-                              const int seg_idx) const;
+                              const int seg_idx,
+                              DeferredLogger& deferred_logger) const;
 
-    EvalWell getFrictionPressureLoss(const int seg, 
+    EvalWell getFrictionPressureLoss(const int seg,
                                      const bool extra_reverse_flow_derivatives = false) const;
 
     // pressure drop for Spiral ICD segment (WSEGSICD)
@@ -88,7 +87,7 @@ public:
                                  const bool extra_reverse_flow_derivatives = false) const;
 
     // pressure drop for sub-critical valve (WSEGVALV)
-    EvalWell pressureDropValve(const int seg, 
+    EvalWell pressureDropValve(const int seg,
                                const SummaryState& st,
                                const bool extra_reverse_flow_derivatives = false) const;
 
@@ -132,8 +131,7 @@ public:
         return local_perforation_depth_diffs_[local_perf_index];
     }
 
-    void copyPhaseDensities(const PhaseUsage& pu,
-                            SegmentState<Scalar>& segSol) const;
+    void copyPhaseDensities(SegmentState<Scalar>& segSol) const;
 
 private:
     // TODO: trying to use the information from the Well opm-parser as much
@@ -160,6 +158,8 @@ private:
 
     std::vector<Scalar> depth_diffs_;
 
+    std::vector<Scalar> surface_densities_;
+
     // the densities of segment fluids
     // we should not have this member variable
     std::vector<EvalWell> densities_;
@@ -177,7 +177,7 @@ private:
     std::vector<std::vector<EvalWell>> phase_fractions_;
     std::vector<std::vector<EvalWell>> phase_viscosities_;
 
-    WellInterfaceGeneric<Scalar>& well_;
+    WellInterfaceGeneric<Scalar, IndexTraits>& well_;
 
     void copyPhaseDensities(const unsigned    phaseIdx,
                             const std::size_t stride,
@@ -186,6 +186,34 @@ private:
     Scalar mixtureDensity(const int seg) const;
     Scalar mixtureDensityWithExponents(const int seg) const;
     Scalar mixtureDensityWithExponents(const AutoICD& aicd, const int seg) const;
+
+    // this class is used to store the result of phase property calculation
+    struct PhaseCalcResult {
+        explicit PhaseCalcResult(const std::size_t num_quantities)
+            : b(num_quantities, 0.0)
+            , mix(num_quantities, 0.0)
+            , mix_s(num_quantities, 0.0)
+            , phase_viscosities(num_quantities, 0.0)
+            , phase_densities(num_quantities, 0.0)
+        {}
+
+        void clear();
+
+        std::vector<EvalWell> b;
+        std::vector<EvalWell> mix;
+        std::vector<EvalWell> mix_s;
+        std::vector<EvalWell> phase_viscosities;
+        std::vector<EvalWell> phase_densities;
+        EvalWell vol_ratio{0.};
+    };
+
+    void calculatePhaseProperties(PhaseCalcResult& result,
+                                  const EvalWell& temperature,
+                                  const EvalWell& saltConcentration,
+                                  const PrimaryVariables& primary_variables,
+                                  int seg,
+                                  bool update_visc_and_den,
+                                  DeferredLogger& deferred_logger) const;
 };
 
 } // namespace Opm

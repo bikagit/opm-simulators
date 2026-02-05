@@ -53,17 +53,20 @@ private:
     // messages unfortunately are *really* confusing and not really helpful.
     using BaseTypeTag = TTag::FlowProblem;
     using FluidSystem = GetPropType<BaseTypeTag, Properties::FluidSystem>;
-
+    static constexpr EnergyModules energyModuleType = getPropValue<TypeTag, Properties::EnergyModuleType>();
+    static constexpr int numEnergyVars = energyModuleType == EnergyModules::FullyImplicitThermal;
+    static constexpr bool enableSeqImpEnergy = energyModuleType == EnergyModules::SequentialImplicitThermal;
 public:
     using type = BlackOilTwoPhaseIndices<0,
                                          0,
                                          2,
-                                         0,
+                                         numEnergyVars,
+                                         enableSeqImpEnergy,
                                          getPropValue<TypeTag, Properties::EnableFoam>(),
                                          getPropValue<TypeTag, Properties::EnableBrine>(),
                                          /*PVOffset=*/0,
                                          /*disabledCompIdx=*/FluidSystem::gasCompIdx,
-                                         getPropValue<TypeTag, Properties::EnableMICP>()>;
+                                         getPropValue<TypeTag, Properties::EnableBioeffects>()>;
 };
 }}
 

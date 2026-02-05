@@ -96,6 +96,7 @@ struct OpenclPlatformId { static constexpr int value = 0; };
 struct OpenclIluParallel { static constexpr bool value = true; }; // note: false should only be used in debug
 struct GpuAwareMpi { static constexpr bool value = false; };
 struct VerifyGpuAwareMpi { static constexpr bool value = false; };
+struct CprWeightsThreadParallel { static constexpr bool value = false; };
 } // namespace Opm::Parameters
 
 namespace Opm {
@@ -135,6 +136,7 @@ struct FlowLinearSolverParameters
     Parameters::LinearSolverAcceleratorType linear_solver_accelerator_;
     bool gpu_aware_mpi_;
     bool verify_gpu_aware_mpi_;
+    bool cpr_weights_thread_parallel_;
 
     FlowLinearSolverParameters() { reset(); }
 

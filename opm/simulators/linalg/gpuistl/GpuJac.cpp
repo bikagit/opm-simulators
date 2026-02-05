@@ -16,16 +16,22 @@
   You should have received a copy of the GNU General Public License
   along with OPM.  If not, see <http://www.gnu.org/licenses/>.
 */
+
+#include <config.h>
+#include <opm/simulators/linalg/gpuistl/GpuJac.hpp>
+
 #include <dune/common/fmatrix.hh>
 #include <dune/istl/bcrsmatrix.hh>
-#include <fmt/core.h>
+
 #include <opm/common/ErrorMacros.hpp>
-#include <opm/simulators/linalg/gpuistl/GpuJac.hpp>
 #include <opm/simulators/linalg/gpuistl/GpuVector.hpp>
 #include <opm/simulators/linalg/gpuistl/detail/preconditionerKernels/JacKernels.hpp>
 #include <opm/simulators/linalg/gpuistl/detail/vector_operations.hpp>
 #include <opm/simulators/linalg/matrixblock.hh>
+
 #include <stdexcept>
+
+#include <fmt/core.h>
 
 namespace Opm::gpuistl
 {
@@ -105,14 +111,14 @@ template <class M, class X, class Y, int l>
 void
 GpuJac<M, X, Y, l>::invertDiagonalAndFlatten()
 {
-    dispatchInvertDiagonalAndFlatten<6>();   
+    dispatchInvertDiagonalAndFlatten<6>();
 }
 
 } // namespace Opm::gpuistl
 #define INSTANTIATE_CUJAC_DUNE(realtype)                                                         \
-    template class ::Opm::gpuistl::GpuJac<::Opm::gpuistl::GpuSparseMatrix<realtype>,             \
+    template class ::Opm::gpuistl::GpuJac<::Opm::gpuistl::GpuSparseMatrixWrapper<realtype>,             \
                                         ::Opm::gpuistl::GpuVector<realtype>,                     \
                                         ::Opm::gpuistl::GpuVector<realtype>>
-   
+
 INSTANTIATE_CUJAC_DUNE(double);
 INSTANTIATE_CUJAC_DUNE(float);

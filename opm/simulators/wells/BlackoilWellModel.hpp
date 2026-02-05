@@ -23,13 +23,7 @@
 #ifndef OPM_BLACKOILWELLMODEL_HEADER_INCLUDED
 #define OPM_BLACKOILWELLMODEL_HEADER_INCLUDED
 
-#if HAVE_MPI
-#define RESERVOIR_COUPLING_ENABLED
-#endif
-#ifdef RESERVOIR_COUPLING_ENABLED
-#include <opm/simulators/flow/ReservoirCouplingMaster.hpp>
-#include <opm/simulators/flow/ReservoirCouplingSlave.hpp>
-#endif
+#include <opm/simulators/wells/rescoup/RescoupProxy.hpp>
 
 #include <dune/common/fmatrix.hh>
 #include <dune/istl/bcrsmatrix.hh>
@@ -57,6 +51,7 @@
 #include <opm/simulators/wells/BlackoilWellModelGasLift.hpp>
 #include <opm/simulators/wells/BlackoilWellModelGeneric.hpp>
 #include <opm/simulators/wells/BlackoilWellModelGuideRates.hpp>
+#include <opm/simulators/wells/BlackoilWellModelNetwork.hpp>
 #include <opm/simulators/wells/GasLiftGroupInfo.hpp>
 #include <opm/simulators/wells/GasLiftSingleWell.hpp>
 #include <opm/simulators/wells/GasLiftSingleWellGeneric.hpp>
@@ -72,7 +67,7 @@
 #include <opm/simulators/wells/VFPInjProperties.hpp>
 #include <opm/simulators/wells/VFPProdProperties.hpp>
 #include <opm/simulators/wells/WellConnectionAuxiliaryModule.hpp>
-#include <opm/simulators/wells/WellGroupHelpers.hpp>
+#include <opm/simulators/wells/GroupStateHelper.hpp>
 #include <opm/simulators/wells/WellInterface.hpp>
 #include <opm/simulators/wells/WellProdIndexCalculator.hpp>
 #include <opm/simulators/wells/WellState.hpp>
@@ -81,6 +76,7 @@
 #include <cstddef>
 #include <map>
 #include <memory>
+#include <optional>
 #include <string>
 #include <tuple>
 #include <vector>
@@ -88,7 +84,7 @@
 namespace Opm {
 
 template<class Scalar> class BlackoilWellModelNldd;
-template<class T> class SparseTable;
+template<class T, template <typename, typename...> class Storage> class SparseTable;
 
 #if COMPILE_GPU_BRIDGE
 template<class Scalar> class WellContributions;
@@ -97,8 +93,8 @@ template<class Scalar> class WellContributions;
         /// Class for handling the blackoil well model.
         template<typename TypeTag>
         class BlackoilWellModel : public WellConnectionAuxiliaryModule<TypeTag, BlackoilWellModel<TypeTag>>
-                                , public BlackoilWellModelGeneric<GetPropType<TypeTag,
-                                                                              Properties::Scalar>>
+                                , public BlackoilWellModelGeneric<GetPropType<TypeTag, Properties::Scalar>,
+                                                                  typename GetPropType<TypeTag, Properties::FluidSystem>::IndexTraitsType>
         {
         public:
             // ---------      Types      ---------
@@ -115,6 +111,8 @@ template<class Scalar> class WellContributions;
             using ModelParameters = BlackoilModelParameters<Scalar>;
 
             using WellConnectionModule = WellConnectionAuxiliaryModule<TypeTag, BlackoilWellModel<TypeTag>>;
+            using IndexTraits = typename FluidSystem::IndexTraitsType;
+            using GroupStateHelperType = GroupStateHelper<Scalar, IndexTraits>;
 
             constexpr static std::size_t pressureVarIndex = GetPropType<TypeTag, Properties::Indices>::pressureSwitchIdx;
 
@@ -122,8 +120,9 @@ template<class Scalar> class WellContributions;
             static const int solventSaturationIdx = Indices::solventSaturationIdx;
             static constexpr bool has_solvent_ = getPropValue<TypeTag, Properties::EnableSolvent>();
             static constexpr bool has_polymer_ = getPropValue<TypeTag, Properties::EnablePolymer>();
-            static constexpr bool has_energy_ = getPropValue<TypeTag, Properties::EnableEnergy>();
-            static constexpr bool has_micp_ = getPropValue<TypeTag, Properties::EnableMICP>();
+            static constexpr EnergyModules energyModuleType_ = getPropValue<TypeTag, Properties::EnergyModuleType>();
+            static constexpr bool has_energy_ = (energyModuleType_ == EnergyModules::FullyImplicitThermal);
+            static constexpr bool has_micp_ = Indices::enableMICP;
 
             // TODO: where we should put these types, WellInterface or Well Model?
             // or there is some other strategy, like TypeTag
@@ -131,7 +130,7 @@ template<class Scalar> class WellContributions;
             using BVector = Dune::BlockVector<VectorBlockType>;
 
             using PolymerModule = BlackOilPolymerModule<TypeTag>;
-            using MICPModule = BlackOilMICPModule<TypeTag>;
+            using BioeffectsModule = BlackOilBioeffectsModule<TypeTag>;
 
             // For the conversion between the surface volume rate and reservoir voidage rate
             using RateConverterType = RateConverter::
@@ -185,9 +184,9 @@ template<class Scalar> class WellContributions;
                                          unsigned timeIdx) const;
 
 
-            using WellInterfacePtr = std::shared_ptr<WellInterface<TypeTag> >;
+            using WellInterfacePtr = std::unique_ptr<WellInterface<TypeTag>>;
 
-            using BlackoilWellModelGeneric<Scalar>::initFromRestartFile;
+            using BlackoilWellModelGeneric<Scalar, IndexTraits>::initFromRestartFile;
             void initFromRestartFile(const RestartValue& restartValues)
             {
                 initFromRestartFile(restartValues,
@@ -197,7 +196,7 @@ template<class Scalar> class WellContributions;
                                     this->simulator_.vanguard().enableDistributedWells());
             }
 
-            using BlackoilWellModelGeneric<Scalar>::prepareDeserialize;
+            using BlackoilWellModelGeneric<Scalar, IndexTraits>::prepareDeserialize;
             void prepareDeserialize(const int report_step)
             {
                 prepareDeserialize(report_step, grid().size(0),
@@ -251,7 +250,7 @@ template<class Scalar> class WellContributions;
 #endif
 
             // Check if well equations is converged.
-            ConvergenceReport getWellConvergence(const std::vector<Scalar>& B_avg, const bool checkWellGroupControls = false) const;
+            ConvergenceReport getWellConvergence(const std::vector<Scalar>& B_avg, const bool checkWellGroupControlsAndNetwork = false) const;
 
             const SimulatorReportSingle& lastReport() const;
 
@@ -269,7 +268,7 @@ template<class Scalar> class WellContributions;
             // twice at the beginning of the time step
             /// Calculating the explict quantities used in the well calculation. By explicit, we mean they are cacluated
             /// at the beginning of the time step and no derivatives are included in these quantities
-            void calculateExplicitQuantities(DeferredLogger& deferred_logger) const;
+            void calculateExplicitQuantities() const;
             // some preparation work, mostly related to group control and RESV,
             // at the beginning of each time step (Not report step)
             void prepareTimeStep(DeferredLogger& deferred_logger);
@@ -277,20 +276,15 @@ template<class Scalar> class WellContributions;
             bool
             updateWellControls(DeferredLogger& deferred_logger);
 
-            std::tuple<bool, Scalar>
-            updateNetworks(const bool mandatory_network_balance, DeferredLogger& deferred_logger, const bool relax_network_tolerance = false);
-
-
             void updateAndCommunicate(const int reportStepIdx,
-                                      const int iterationIdx,
-                                      DeferredLogger& deferred_logger);
+                                      const int iterationIdx);
 
             bool updateGroupControls(const Group& group,
                                     DeferredLogger& deferred_logger,
                                     const int reportStepIdx,
                                     const int iterationIdx);
 
-            WellInterfacePtr getWell(const std::string& well_name) const;
+            const WellInterface<TypeTag>& getWell(const std::string& well_name) const;
 
             using PressureMatrix = Dune::BCRSMatrix<Opm::MatrixBlock<Scalar, 1, 1>>;
 
@@ -353,7 +347,7 @@ template<class Scalar> class WellContributions;
             int compressedIndexForInteriorLGR(const std::string& lgr_tag, const Connection& conn) const override
             {
                 return simulator_.vanguard().compressedIndexForInteriorLGR(lgr_tag, conn);
-            }            
+            }
 
             // using the solution x to recover the solution xw for wells and applying
             // xw to update Well State
@@ -363,6 +357,12 @@ template<class Scalar> class WellContributions;
             // xw to update Well State
             void recoverWellSolutionAndUpdateWellStateDomain(const BVector& x,
                                                              const int domainIdx);
+            // Update cellRates_ with contributions from all wells
+            void updateCellRates();
+
+            // Update cellRates_ with contributions from wells in a specific domain
+            void updateCellRatesForDomain(int domainIndex,
+                                          const std::map<std::string, int>& well_domain_map);
 
             const Grid& grid() const
             { return simulator_.vanguard().grid(); }
@@ -373,28 +373,93 @@ template<class Scalar> class WellContributions;
             void setNlddAdapter(BlackoilWellModelNldd<TypeTag>* mod)
             { nldd_ = mod; }
 
+            // === Reservoir Coupling ===
+
+            /// @brief Get the reservoir coupling proxy
+            ReservoirCoupling::Proxy<Scalar>& rescoup() { return rescoup_; }
+            const ReservoirCoupling::Proxy<Scalar>& rescoup() const { return rescoup_; }
+
+            /// \brief Update guide rates for all wells and groups
+            ///
+            /// Computes guide rates based on well potentials and group hierarchy.
+            /// This is typically called at the beginning of each timestep.
+            ///
+            /// \param report_step_idx Current report step index
+            /// \param sim_time Current simulation time
+            void updateGuideRates(const int report_step_idx,
+                                  const double sim_time)
+            {
+                this->guide_rate_handler_.updateGuideRates(
+                    report_step_idx, sim_time, this->wellState(), this->groupState()
+                );
+            }
+
+            /// @brief Check if this process is a reservoir coupling master
+            bool isReservoirCouplingMaster() const { return rescoup_.isMaster(); }
+
+            /// @brief Check if this process is a reservoir coupling slave
+            bool isReservoirCouplingSlave() const { return rescoup_.isSlave(); }
+
+            /// @brief Get reference to reservoir coupling master
+            /// @note Caller must ensure isReservoirCouplingMaster() is true
+            ReservoirCouplingMaster<Scalar>& reservoirCouplingMaster() {
+                return rescoup_.master();
+            }
+
+            /// @brief Get reference to reservoir coupling slave
+            /// @note Caller must ensure isReservoirCouplingSlave() is true
+            ReservoirCouplingSlave<Scalar>& reservoirCouplingSlave() {
+                return rescoup_.slave();
+            }
+
 #ifdef RESERVOIR_COUPLING_ENABLED
-            ReservoirCouplingMaster& reservoirCouplingMaster() {
-                return *(this->simulator_.reservoirCouplingMaster());
-            }
-            ReservoirCouplingSlave& reservoirCouplingSlave() {
-                return *(this->simulator_.reservoirCouplingSlave());
-            }
-            bool isReservoirCouplingMaster() const {
-                return this->simulator_.reservoirCouplingMaster() != nullptr;
-            }
-            bool isReservoirCouplingSlave() const {
-                return this->simulator_.reservoirCouplingSlave() != nullptr;
-            }
-            void setReservoirCouplingMaster(ReservoirCouplingMaster *master)
+            void setReservoirCouplingMaster(ReservoirCouplingMaster<Scalar>* master)
             {
+                rescoup_.setMaster(master);
                 this->guide_rate_handler_.setReservoirCouplingMaster(master);
+                this->groupStateHelper().setReservoirCouplingMaster(master);
             }
-            void setReservoirCouplingSlave(ReservoirCouplingSlave *slave)
+            void setReservoirCouplingSlave(ReservoirCouplingSlave<Scalar>* slave)
             {
+                rescoup_.setSlave(slave);
                 this->guide_rate_handler_.setReservoirCouplingSlave(slave);
+                this->groupStateHelper().setReservoirCouplingSlave(slave);
             }
-        #endif
+
+            /// \brief Send comprehensive slave group data to master
+            void sendSlaveGroupDataToMaster();
+
+            /// \brief Receive comprehensive slave group data from slaves
+            void receiveSlaveGroupData();
+
+            void receiveGroupTargetsFromMaster(const int reportStepIdx);
+            void sendMasterGroupTargetsToSlaves();
+
+            /// \brief Setup RAII guard for reservoir coupling logger
+            ///
+            /// Creates a scoped logger guard that automatically clears the logger
+            /// when it goes out of scope. This eliminates the need for manual cleanup.
+            ///
+            /// @param local_logger The local DeferredLogger to bind to the reservoir coupling logger
+            /// @return An optional containing the ScopedLoggerGuard if reservoir coupling is active,
+            ///         or std::nullopt if not active
+            std::optional<ReservoirCoupling::ScopedLoggerGuard>
+                setupRescoupScopedLogger(DeferredLogger& local_logger);
+#endif
+
+            bool updateWellControlsAndNetwork(const bool mandatory_network_balance,
+                                              const double dt,
+                                              DeferredLogger& local_deferredLogger);
+
+            // TODO: finding a better naming
+            void assembleWellEqWithoutIteration(const double dt);
+
+            const std::vector<Scalar>& B_avg() const
+            { return B_avg_; }
+
+            const ModelParameters& param() const
+            { return param_; }
+
         protected:
             Simulator& simulator_;
 
@@ -428,15 +493,15 @@ template<class Scalar> class WellContributions;
             Scalar gravity_{};
             std::vector<Scalar> depth_{};
             bool alternative_well_rate_init_{};
-            std::map<std::string, Scalar> well_group_thp_calc_;
             std::unique_ptr<RateConverterType> rateConverter_{};
             std::map<std::string, std::unique_ptr<AverageRegionalPressureType>> regionalAveragePressureCalculator_{};
 
             SimulatorReportSingle last_report_{};
-            GuideRateHandler<Scalar> guide_rate_handler_{};
+            GuideRateHandler<Scalar, IndexTraits> guide_rate_handler_{};
+            ReservoirCoupling::Proxy<Scalar> rescoup_{};
 
-            // Pre-step network solve at static reservoir conditions (group and well states might be updated)
-            void doPreStepNetworkRebalance(DeferredLogger& deferred_logger);
+            // A flag to tell the convergence report whether we need to take another newton step
+            bool network_needs_more_balancing_force_another_newton_iteration_{false};
 
             std::vector<Scalar> B_avg_{};
 
@@ -461,12 +526,6 @@ template<class Scalar> class WellContributions;
                                                                         const double dt,
                                                                         DeferredLogger& local_deferredLogger);
 
-            bool updateWellControlsAndNetwork(const bool mandatory_network_balance,
-                                              const double dt,
-                                              DeferredLogger& local_deferredLogger);
-
-            bool computeWellGroupThp(const double dt, DeferredLogger& local_deferredLogger);
-
             /// Update rank's notion of intersecting wells and their
             /// associate solution variables.
             ///
@@ -490,15 +549,14 @@ template<class Scalar> class WellContributions;
             void endReportStep();
 
             // setting the well_solutions_ based on well_state.
-            void updatePrimaryVariables(DeferredLogger& deferred_logger);
+            void updatePrimaryVariables();
 
             void updateAverageFormationFactor();
 
             void computePotentials(const std::size_t widx,
-                                   const WellState<Scalar>& well_state_copy,
+                                   const WellState<Scalar, IndexTraits>& well_state_copy,
                                    std::string& exc_msg,
-                                   ExceptionType::ExcEnum& exc_type,
-                                   DeferredLogger& deferred_logger) override;
+                                   ExceptionType::ExcEnum& exc_type) override;
 
             const std::vector<Scalar>& wellPerfEfficiencyFactors() const;
 
@@ -507,42 +565,38 @@ template<class Scalar> class WellContributions;
             void calculateProductivityIndexValues(const WellInterface<TypeTag>* wellPtr,
                                                   DeferredLogger& deferred_logger);
 
-            // The number of components in the model.
-            int numComponents() const;
+            // The number of conservation quantities.
+            int numConservationQuantities() const;
 
             int reportStepIndex() const;
 
-            void assembleWellEq(const double dt, DeferredLogger& deferred_logger);
+            void assembleWellEq(const double dt);
 
-            void prepareWellsBeforeAssembling(const double dt, DeferredLogger& deferred_logger);
-
-            // TODO: finding a better naming
-            void assembleWellEqWithoutIteration(const double dt, DeferredLogger& deferred_logger);
+            void prepareWellsBeforeAssembling(const double dt);
 
             void extractLegacyCellPvtRegionIndex_();
 
             void extractLegacyDepth_();
 
             /// upate the wellTestState related to economic limits
-            void updateWellTestState(const double& simulationTime, WellTestState& wellTestState) const;
+            void updateWellTestState(const double simulationTime, WellTestState& wellTestState);
 
             void wellTesting(const int timeStepIdx, const double simulationTime, DeferredLogger& deferred_logger);
 
             void calcResvCoeff(const int fipnum,
                                const int pvtreg,
                                const std::vector<Scalar>& production_rates,
-                               std::vector<Scalar>& resv_coeff) override;
+                               std::vector<Scalar>& resv_coeff) const override;
 
             void calcInjResvCoeff(const int fipnum,
                                   const int pvtreg,
-                                  std::vector<Scalar>& resv_coeff) override;
+                                  std::vector<Scalar>& resv_coeff) const override;
 
             void computeWellTemperature();
 
         private:
-            BlackoilWellModel(Simulator& simulator, const PhaseUsage& pu);
-
             BlackoilWellModelGasLift<TypeTag> gaslift_;
+            BlackoilWellModelNetwork<TypeTag> network_;
             BlackoilWellModelNldd<TypeTag>* nldd_ = nullptr; //!< NLDD well model adapter (not owned)
 
             // These members are used to avoid reallocation in specific functions
@@ -550,6 +604,9 @@ template<class Scalar> class WellContributions;
             // Their state is not relevant between function calls, so they can
             // (and must) be mutable, as the functions using them are const.
             mutable BVector x_local_;
+
+            // Store cell rates after assembling to avoid iterating all wells and connections for every element
+            std::map<int, RateVector> cellRates_;
 
             void assignWellTracerRates(data::Wells& wsrpt) const;
         };

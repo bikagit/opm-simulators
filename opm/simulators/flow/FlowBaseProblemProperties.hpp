@@ -40,6 +40,7 @@
 #include <opm/simulators/flow/EclWriter.hpp>
 #include <opm/simulators/flow/FlowProblemParameters.hpp>
 #include <opm/simulators/flow/TracerModel.hpp>
+#include <opm/simulators/flow/TemperatureModel.hpp>
 
 #if HAVE_DAMARIS
 #include <opm/simulators/flow/DamarisWriter.hpp>
@@ -77,6 +78,16 @@ struct EnableApiTracking { using type = UndefinedProperty; };
 template<class TypeTag, class MyTypeTag>
 struct EnableDebuggingChecks { using type = Properties::UndefinedProperty; };
 
+template<class TypeTag, class MyTypeTag>
+struct EnableHysteresis { using type = Properties::UndefinedProperty; };
+
+template<class TypeTag, class MyTypeTag>
+struct EnableEndpointScaling { using type = Properties::UndefinedProperty; };
+
+// Avoid using ElementContext-based code if possible.
+template<class TypeTag, class MyTypeTag>
+struct AvoidElementContext { using type = Properties::UndefinedProperty; };
+
 // if thermal flux boundaries are enabled an effort is made to preserve the initial
 // thermal gradient specified via the TEMPVD keyword
 template<class TypeTag, class MyTypeTag>
@@ -94,6 +105,12 @@ struct TracerModel {  using type = UndefinedProperty; };
 template <class TypeTag>
 struct TracerModel<TypeTag, TTag::FlowBaseProblem>
 { using type =  ::Opm::TracerModel<TypeTag>; };
+
+template<class TypeTag, class MyTypeTag>
+struct TemperatureModel {  using type = UndefinedProperty; };
+template <class TypeTag>
+struct TemperatureModel<TypeTag, TTag::FlowBaseProblem>
+{ using type =  ::Opm::TemperatureModel<TypeTag>; };
 
 // Select the element centered finite volume method as spatial discretization
 template<class TypeTag>
@@ -190,11 +207,6 @@ template<class TypeTag>
 struct EnableApiTracking<TypeTag, TTag::FlowBaseProblem>
 { static constexpr bool value = false; };
 
-// store temperature (but do not conserve energy, as long as EnableEnergy is false)
-template<class TypeTag>
-struct EnableTemperature<TypeTag, TTag::FlowBaseProblem>
-{ static constexpr bool value = true; };
-
 template<class TypeTag>
 struct EnableMech<TypeTag, TTag::FlowBaseProblem>
 { static constexpr bool value = false; };
@@ -210,10 +222,6 @@ struct EnableSolvent<TypeTag, TTag::FlowBaseProblem>
 { static constexpr bool value = false; };
 
 template<class TypeTag>
-struct EnableEnergy<TypeTag, TTag::FlowBaseProblem>
-{ static constexpr bool value = false; };
-
-template<class TypeTag>
 struct EnableFoam<TypeTag, TTag::FlowBaseProblem>
 { static constexpr bool value = false; };
 
@@ -222,7 +230,7 @@ struct EnableExtbo<TypeTag, TTag::FlowBaseProblem>
 { static constexpr bool value = false; };
 
 template<class TypeTag>
-struct EnableMICP<TypeTag, TTag::FlowBaseProblem>
+struct EnableBioeffects<TypeTag, TTag::FlowBaseProblem>
 { static constexpr bool value = false; };
 
 // disable thermal flux boundaries by default
@@ -240,6 +248,20 @@ struct EnableExperiments<TypeTag, TTag::FlowBaseProblem>
 template<class TypeTag>
 struct EnableDebuggingChecks<TypeTag, TTag::FlowBaseProblem>
 { static constexpr bool value = true; };
+
+template<class TypeTag>
+struct EnableHysteresis<TypeTag, TTag::FlowBaseProblem>
+{ static constexpr bool value = true; };
+
+template<class TypeTag>
+struct EnableEndpointScaling<TypeTag, TTag::FlowBaseProblem>
+{ static constexpr bool value = true; };
+
+// Most modules are implemented only in terms of element contexts,
+// so this must default to false.
+template<class TypeTag>
+struct AvoidElementContext<TypeTag, TTag::FlowBaseProblem>
+{ static constexpr bool value = false; };
 
 } // namespace Opm::Properties
 

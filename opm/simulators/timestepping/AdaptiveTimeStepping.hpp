@@ -6,19 +6,17 @@
 #include <opm/models/utils/basicproperties.hh>
 #include <opm/models/utils/propertysystem.hh>
 
+#include <opm/simulators/flow/rescoup/ReservoirCouplingEnabled.hpp>
 #include <opm/simulators/timestepping/AdaptiveSimulatorTimer.hpp>
 #include <opm/simulators/timestepping/SimulatorReport.hpp>
 #include <opm/simulators/timestepping/SimulatorTimer.hpp>
 #include <opm/simulators/timestepping/TimeStepControl.hpp>
 #include <opm/simulators/timestepping/TimeStepControlInterface.hpp>
 
-#if HAVE_MPI
-#define RESERVOIR_COUPLING_ENABLED
-#endif
 #ifdef RESERVOIR_COUPLING_ENABLED
-#include <opm/simulators/flow/ReservoirCoupling.hpp>
-#include <opm/simulators/flow/ReservoirCouplingMaster.hpp>
-#include <opm/simulators/flow/ReservoirCouplingSlave.hpp>
+#include <opm/simulators/flow/rescoup/ReservoirCoupling.hpp>
+#include <opm/simulators/flow/rescoup/ReservoirCouplingMaster.hpp>
+#include <opm/simulators/flow/rescoup/ReservoirCouplingSlave.hpp>
 #endif
 
 #include <functional>
@@ -117,8 +115,8 @@ private:
         double maxTimeStep_() const;
         SimulatorReport runStepOriginal_();
 #ifdef RESERVOIR_COUPLING_ENABLED
-        ReservoirCouplingMaster& reservoirCouplingMaster_();
-        ReservoirCouplingSlave& reservoirCouplingSlave_();
+        ReservoirCouplingMaster<Scalar>& reservoirCouplingMaster_();
+        ReservoirCouplingSlave<Scalar>& reservoirCouplingSlave_();
         SimulatorReport runStepReservoirCouplingMaster_();
         SimulatorReport runStepReservoirCouplingSlave_();
 #endif
@@ -151,6 +149,9 @@ private:
         int getNumIterations_(const SimulatorReportSingle& substep_report) const;
         double growthFactor_() const;
         bool ignoreConvergenceFailure_() const;
+        bool isReservoirCouplingMaster_() const;
+        bool isReservoirCouplingSlave_() const;
+        void markFirstSubStepAsFinished_() const;
         void maybeReportSubStep_(SimulatorReportSingle substep_report) const;
         double maybeRestrictTimeStepGrowth_(const double dt,
                                             double dt_estimate,
@@ -169,6 +170,10 @@ private:
         bool solverVerbose_() const;
         const SimulatorTimer& simulatorTimer_() const;
         boost::posix_time::ptime startDateTime_() const;
+#ifdef RESERVOIR_COUPLING_ENABLED
+        ReservoirCouplingMaster<Scalar>& reservoirCouplingMaster_() const;
+        ReservoirCouplingSlave<Scalar>& reservoirCouplingSlave_() const;
+#endif
         double timeStepControlComputeEstimate_(const double dt,
                                                const int iterations,
                                                const AdaptiveSimulatorTimer& substepTimer) const;
@@ -199,7 +204,7 @@ public:
                          const SimulatorReport& full_report,
                          const bool terminalOutput = true);
 
-    bool operator==(const AdaptiveTimeStepping<TypeTag>& rhs);
+    bool operator==(const AdaptiveTimeStepping<TypeTag>& rhs) const;
 
     static void registerParameters();
     void setSuggestedNextStep(const double x);

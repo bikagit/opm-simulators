@@ -37,6 +37,7 @@
 #include <opm/material/fluidstates/BlackOilFluidState.hpp>
 #include <opm/material/common/Valgrind.hpp>
 
+#include <opm/models/blackoil/blackoilbioeffectsmodules.hh>
 #include <opm/models/blackoil/blackoilbrinemodules.hh>
 #include <opm/models/blackoil/blackoilconvectivemixingmodule.hh>
 #include <opm/models/blackoil/blackoildiffusionmodule.hh>
@@ -44,7 +45,6 @@
 #include <opm/models/blackoil/blackoilenergymodules.hh>
 #include <opm/models/blackoil/blackoilextbomodules.hh>
 #include <opm/models/blackoil/blackoilfoammodules.hh>
-#include <opm/models/blackoil/blackoilmicpmodules.hh>
 #include <opm/models/blackoil/blackoilpolymermodules.hh>
 #include <opm/models/blackoil/blackoilproperties.hh>
 #include <opm/models/blackoil/blackoilsolventmodules.hh>
@@ -79,8 +79,8 @@ class BlackOilIntensiveQuantities
     , public BlackOilPolymerIntensiveQuantities<TypeTag, getPropValue<TypeTag, Properties::EnablePolymer>()>
     , public BlackOilFoamIntensiveQuantities<TypeTag, getPropValue<TypeTag, Properties::EnableFoam>()>
     , public BlackOilBrineIntensiveQuantities<TypeTag, getPropValue<TypeTag, Properties::EnableBrine>()>
-    , public BlackOilEnergyIntensiveQuantities<TypeTag, getPropValue<TypeTag, Properties::EnableEnergy>()>
-    , public BlackOilMICPIntensiveQuantities<TypeTag, getPropValue<TypeTag, Properties::EnableMICP>()>
+    , public BlackOilEnergyIntensiveQuantities<TypeTag, getPropValue<TypeTag, Properties::EnergyModuleType>()>
+    , public BlackOilBioeffectsIntensiveQuantities<TypeTag, getPropValue<TypeTag, Properties::EnableBioeffects>()>
     , public BlackOilConvectiveMixingIntensiveQuantities<TypeTag, getPropValue<TypeTag, Properties::EnableConvectiveMixing>()>
 {
     using ParentType = GetPropType<TypeTag, Properties::DiscIntensiveQuantities>;
@@ -93,10 +93,8 @@ class BlackOilIntensiveQuantities
     using ElementContext = GetPropType<TypeTag, Properties::ElementContext>;
     using PrimaryVariables = GetPropType<TypeTag, Properties::PrimaryVariables>;
     using Indices = GetPropType<TypeTag, Properties::Indices>;
-    using GridView = GetPropType<TypeTag, Properties::GridView>;
     using FluxModule = GetPropType<TypeTag, Properties::FluxModule>;
 
-    enum { numEq = getPropValue<TypeTag, Properties::NumEq>() };
     enum { enableSolvent = getPropValue<TypeTag, Properties::EnableSolvent>() };
     enum { enableExtbo = getPropValue<TypeTag, Properties::EnableExtbo>() };
     enum { enablePolymer = getPropValue<TypeTag, Properties::EnablePolymer>() };
@@ -105,21 +103,19 @@ class BlackOilIntensiveQuantities
     enum { enableVapwat = getPropValue<TypeTag, Properties::EnableVapwat>() };
     enum { enableDisgasInWater = getPropValue<TypeTag, Properties::EnableDisgasInWater>() };
     enum { enableSaltPrecipitation = getPropValue<TypeTag, Properties::EnableSaltPrecipitation>() };
-    enum { enableTemperature = getPropValue<TypeTag, Properties::EnableTemperature>() };
-    enum { enableEnergy = getPropValue<TypeTag, Properties::EnableEnergy>() };
+    static constexpr EnergyModules energyModuleType = getPropValue<TypeTag, Properties::EnergyModuleType>();
     enum { enableDiffusion = getPropValue<TypeTag, Properties::EnableDiffusion>() };
     enum { enableDispersion = getPropValue<TypeTag, Properties::EnableDispersion>() };
     enum { enableConvectiveMixing = getPropValue<TypeTag, Properties::EnableConvectiveMixing>() };
-    enum { enableMICP = getPropValue<TypeTag, Properties::EnableMICP>() };
+    enum { enableBioeffects = getPropValue<TypeTag, Properties::EnableBioeffects>() };
+    enum { enableMICP = Indices::enableMICP };
     enum { numPhases = getPropValue<TypeTag, Properties::NumPhases>() };
-    enum { numComponents = getPropValue<TypeTag, Properties::NumComponents>() };
     enum { waterCompIdx = FluidSystem::waterCompIdx };
     enum { oilCompIdx = FluidSystem::oilCompIdx };
     enum { gasCompIdx = FluidSystem::gasCompIdx };
     enum { waterPhaseIdx = FluidSystem::waterPhaseIdx };
     enum { oilPhaseIdx = FluidSystem::oilPhaseIdx };
     enum { gasPhaseIdx = FluidSystem::gasPhaseIdx };
-    enum { dimWorld = GridView::dimensionworld };
     enum { compositionSwitchIdx = Indices::compositionSwitchIdx };
 
     static constexpr bool compositionSwitchEnabled = Indices::compositionSwitchIdx >= 0;
@@ -128,7 +124,6 @@ class BlackOilIntensiveQuantities
     static constexpr bool oilEnabled = Indices::oilEnabled;
 
     using Toolbox = MathToolbox<Evaluation>;
-    using DimMatrix = Dune::FieldMatrix<Scalar, dimWorld, dimWorld>;
     using FluxIntensiveQuantities = typename FluxModule::FluxIntensiveQuantities;
     using DiffusionIntensiveQuantities = BlackOilDiffusionIntensiveQuantities<TypeTag, enableDiffusion>;
     using DispersionIntensiveQuantities = BlackOilDispersionIntensiveQuantities<TypeTag, enableDispersion>;
@@ -136,13 +131,14 @@ class BlackOilIntensiveQuantities
     using DirectionalMobilityPtr = Utility::CopyablePtr<DirectionalMobility<TypeTag>>;
     using BrineModule = BlackOilBrineModule<TypeTag>;
     using BrineIntQua = BlackOilBrineIntensiveQuantities<TypeTag, enableSaltPrecipitation>;
-    using MICPIntQua = BlackOilMICPIntensiveQuantities<TypeTag, enableMICP>;
+    using BioeffectsModule = BlackOilBioeffectsModule<TypeTag>;
+    using BioeffectsIntQua = BlackOilBioeffectsIntensiveQuantities<TypeTag, enableBioeffects>;
 
 public:
     using FluidState = BlackOilFluidState<Evaluation,
                                           FluidSystem,
-                                          enableTemperature,
-                                          enableEnergy,
+                                          energyModuleType == EnergyModules::ConstantTemperature,
+                                          (energyModuleType == EnergyModules::FullyImplicitThermal || energyModuleType == EnergyModules::SequentialImplicitThermal),
                                           compositionSwitchEnabled,
                                           enableVapwat,
                                           enableBrine,
@@ -151,8 +147,9 @@ public:
                                           Indices::numPhases>;
     using ScalarFluidState = BlackOilFluidState<Scalar,
                                                 FluidSystem,
-                                                enableTemperature,
-                                                enableEnergy,
+                                                energyModuleType == EnergyModules::ConstantTemperature,
+                                                (energyModuleType == EnergyModules::FullyImplicitThermal || 
+                                                    energyModuleType == EnergyModules::SequentialImplicitThermal),
                                                 compositionSwitchEnabled,
                                                 enableVapwat,
                                                 enableBrine,
@@ -178,37 +175,16 @@ public:
 
     BlackOilIntensiveQuantities& operator=(const BlackOilIntensiveQuantities& other) = default;
 
-    void updateTempSalt(const ElementContext& elemCtx, unsigned dofIdx, unsigned timeIdx)
-    {
-        if constexpr (enableTemperature || enableEnergy) {
-            asImp_().updateTemperature_(elemCtx, dofIdx, timeIdx);
-        }
-
-        if constexpr (enableBrine) {
-            asImp_().updateSaltConcentration_(elemCtx, dofIdx, timeIdx);
-        }
-    }
-
     void updateTempSalt(const Problem& problem,
                         const PrimaryVariables& priVars,
                         const unsigned globalSpaceIdx,
                         const unsigned timeIdx,
                         const LinearizationType& lintype)
     {
-        if constexpr (enableTemperature || enableEnergy) {
-            asImp_().updateTemperature_(problem, priVars, globalSpaceIdx, timeIdx, lintype);
-        }
-
+        asImp_().updateTemperature_(problem, priVars, globalSpaceIdx, timeIdx, lintype);
         if constexpr (enableBrine) {
             asImp_().updateSaltConcentration_(priVars, timeIdx, lintype);
         }
-    }
-
-    void updateSaturations(const ElementContext& elemCtx, unsigned dofIdx, unsigned timeIdx)
-    {
-        const auto& priVars = elemCtx.primaryVars(dofIdx, timeIdx);
-        const LinearizationType lintype = elemCtx.problem().model().linearizer().getLinearizationType();
-        this->updateSaturations(priVars, timeIdx, lintype);
     }
 
     void updateSaturations(const PrimaryVariables& priVars,
@@ -282,14 +258,7 @@ public:
         }
     }
 
-    void updateRelpermAndPressures(const ElementContext& elemCtx, unsigned dofIdx, unsigned timeIdx)
-    {
-        const auto& problem = elemCtx.problem();
-        const auto& priVars = elemCtx.primaryVars(dofIdx, timeIdx);
-        const unsigned globalSpaceIdx = elemCtx.globalSpaceIndex(dofIdx, timeIdx);
-        this->updateRelpermAndPressures(problem, priVars, globalSpaceIdx, timeIdx, elemCtx.linearizationType());
-    }
-
+    template <class ...Args>
     void updateRelpermAndPressures(const Problem& problem,
                                    const PrimaryVariables& priVars,
                                    const unsigned globalSpaceIdx,
@@ -306,14 +275,15 @@ public:
         }
 
         // Phase relperms.
-        problem.updateRelperms(mobility_, dirMob_, fluidState_, globalSpaceIdx);
+        problem.template updateRelperms<FluidState, Args...>(mobility_, dirMob_, fluidState_, globalSpaceIdx);
 
         // now we compute all phase pressures
-        std::array<Evaluation, numPhases> pC;
+        using EvalArr = std::array<Evaluation, numPhases>;
+        EvalArr pC;
         const auto& materialParams = problem.materialLawParams(globalSpaceIdx);
-        MaterialLaw::capillaryPressures(pC, materialParams, fluidState_);
+        MaterialLaw::template capillaryPressures<EvalArr, FluidState, Args...>(pC, materialParams, fluidState_);
 
-        // scaling the capillary pressure due to salt precipitation
+        // scaling the capillary pressure due to porosity changes
         if constexpr (enableBrine) {
             if (BrineModule::hasPcfactTables() &&
                 priVars.primaryVarsMeaningBrine() == PrimaryVariables::BrineMeaning::Sp)
@@ -322,6 +292,20 @@ public:
                 const Evaluation Sp = priVars.makeEvaluation(Indices::saltConcentrationIdx, timeIdx);
                 const Evaluation porosityFactor  = min(1.0 - Sp, 1.0); //phi/phi_0
                 const auto& pcfactTable = BrineModule::pcfactTable(satnumRegionIdx);
+                const Evaluation pcFactor = pcfactTable.eval(porosityFactor, /*extrapolation=*/true);
+                for (unsigned phaseIdx = 0; phaseIdx < numPhases; ++phaseIdx) {
+                    if (FluidSystem::phaseIsActive(phaseIdx)) {
+                        pC[phaseIdx] *= pcFactor;
+                    }
+                }
+            }
+        }
+        else if constexpr (enableBioeffects) {
+            if (BioeffectsModule::hasPcfactTables() && referencePorosity_ > 0) {
+                unsigned satnumRegionIdx = problem.satnumRegionIndex(globalSpaceIdx);
+                const Evaluation Sb = priVars.makeEvaluation(Indices::biofilmVolumeFractionIdx, timeIdx);
+                const Evaluation porosityFactor  = min(1.0 - Sb/referencePorosity_, 1.0); //phi/phi_0
+                const auto& pcfactTable = BioeffectsModule::pcfactTable(satnumRegionIdx);
                 const Evaluation pcFactor = pcfactTable.eval(porosityFactor, /*extrapolation=*/true);
                 for (unsigned phaseIdx = 0; phaseIdx < numPhases; ++phaseIdx) {
                     if (FluidSystem::phaseIsActive(phaseIdx)) {
@@ -365,14 +349,6 @@ public:
         if constexpr (enableSolvent) {
             asImp_().solventPostSatFuncUpdate_(problem, priVars, globalSpaceIdx, timeIdx, lintype);
         }
-    }
-
-    void updateRsRvRsw(const ElementContext& elemCtx, unsigned dofIdx, unsigned timeIdx)
-    {
-        const auto& problem = elemCtx.problem();
-        const auto& priVars = elemCtx.primaryVars(dofIdx, timeIdx);
-        const unsigned globalSpaceIdx = elemCtx.globalSpaceIndex(dofIdx, timeIdx);
-        this->updateRsRvRsw(problem, priVars, globalSpaceIdx, timeIdx);
     }
 
     void updateRsRvRsw(const Problem& problem, const PrimaryVariables& priVars, const unsigned globalSpaceIdx, const unsigned timeIdx)
@@ -469,24 +445,25 @@ public:
 
     void updateMobilityAndInvB()
     {
+        OPM_TIMEBLOCK_LOCAL(updateMobilityAndInvB, Subsystem::PvtProps);
         const unsigned pvtRegionIdx = fluidState_.pvtRegionIndex();
 
         // compute the phase densities and transform the phase permeabilities into mobilities
         int nmobilities = 1;
-        std::vector<std::array<Evaluation,numPhases>*> mobilities = {&mobility_};
+        constexpr int max_nmobilities = 4;
+        std::array<std::array<Evaluation, numPhases>*, max_nmobilities> mobilities = { &mobility_};
         if (dirMob_) {
             for (int i = 0; i < 3; ++i) {
+                mobilities[nmobilities] = &(dirMob_->getArray(i));
                 ++nmobilities;
-                mobilities.push_back(&(dirMob_->getArray(i)));
             }
         }
         for (unsigned phaseIdx = 0; phaseIdx < numPhases; ++phaseIdx) {
             if (!FluidSystem::phaseIsActive(phaseIdx)) {
                 continue;
             }
-            const auto& b = FluidSystem::inverseFormationVolumeFactor(fluidState_, phaseIdx, pvtRegionIdx);
+            const auto [b, mu] = FluidSystem::inverseFormationVolumeFactorAndViscosity(fluidState_, phaseIdx, pvtRegionIdx);
             fluidState_.setInvB(phaseIdx, b);
-            const auto& mu = FluidSystem::viscosity(fluidState_, phaseIdx, pvtRegionIdx);
             for (int i = 0; i < nmobilities; ++i) {
                 if (enableExtbo && phaseIdx == oilPhaseIdx) {
                     (*mobilities[i])[phaseIdx] /= asImp_().oilViscosity();
@@ -594,13 +571,14 @@ public:
         // deal with water induced rock compaction
         porosity_ *= problem.template rockCompPoroMultiplier<Evaluation>(*this, globalSpaceIdx);
 
-        // deal with MICP
-        if constexpr (enableMICP) {
-            const Evaluation biofilm_ = priVars.makeEvaluation(Indices::biofilmConcentrationIdx,
+        // deal with bioeffects (minimum porosity of 1e-8 to prevent numerical issues)
+        if constexpr (enableBioeffects) {
+            const Evaluation biofilm_ = priVars.makeEvaluation(Indices::biofilmVolumeFractionIdx,
                                                                timeIdx, linearizationType);
-            const Evaluation calcite_ = priVars.makeEvaluation(Indices::calciteConcentrationIdx,
-                                                               timeIdx, linearizationType);
-            // minimum porosity of 1e-8 to prevent numerical issues 
+            Evaluation calcite_ = 0.0;
+            if constexpr (enableMICP) {
+                calcite_ = priVars.makeEvaluation(Indices::calciteVolumeFractionIdx, timeIdx, linearizationType);
+            }
             porosity_ -= min(biofilm_ + calcite_, referencePorosity_ - 1e-8);
         }
 
@@ -632,13 +610,15 @@ public:
     /*!
      * \copydoc IntensiveQuantities::update
      */
+    template <class ...Args>
     void update(const ElementContext& elemCtx, unsigned dofIdx, unsigned timeIdx)
     {
         ParentType::update(elemCtx, dofIdx, timeIdx);
         const auto& problem = elemCtx.problem();
         const auto& priVars = elemCtx.primaryVars(dofIdx, timeIdx);
         const unsigned globalSpaceIdx = elemCtx.globalSpaceIndex(dofIdx, timeIdx);
-        updateCommonPart(problem, priVars, globalSpaceIdx, timeIdx);
+
+        updateCommonPart<Args...>(problem, priVars, globalSpaceIdx, timeIdx);
 
         updatePorosity(elemCtx, dofIdx, timeIdx);
 
@@ -653,14 +633,15 @@ public:
         if constexpr (enablePolymer) {
             asImp_().polymerPropertiesUpdate_(elemCtx, dofIdx, timeIdx);
         }
-        if constexpr (enableEnergy) {
+        if constexpr (energyModuleType == EnergyModules::FullyImplicitThermal ||
+                      energyModuleType == EnergyModules::SequentialImplicitThermal) {
             asImp_().updateEnergyQuantities_(elemCtx, dofIdx, timeIdx);
         }
         if constexpr (enableFoam) {
             asImp_().foamPropertiesUpdate_(elemCtx, dofIdx, timeIdx);
         }
-        if constexpr (enableMICP) {
-            asImp_().MICPPropertiesUpdate_(elemCtx, dofIdx, timeIdx);
+        if constexpr (enableBioeffects) {
+            asImp_().bioeffectsPropertiesUpdate_(elemCtx, dofIdx, timeIdx);
         }
         if constexpr (enableBrine) {
             asImp_().saltPropertiesUpdate_(elemCtx, dofIdx, timeIdx);
@@ -692,6 +673,7 @@ public:
         }
     }
 
+    template <class ...Args>
     void update(const Problem& problem, const PrimaryVariables& priVars, const unsigned globalSpaceIdx, const unsigned timeIdx)
     {
         // This is the version of update() that does not use any ElementContext.
@@ -699,7 +681,6 @@ public:
         static_assert(!enableSolvent);
         static_assert(!enableExtbo);
         static_assert(!enablePolymer);
-        static_assert(!enableEnergy);
         static_assert(!enableFoam);
         static_assert(!enableMICP);
         static_assert(!enableBrine);
@@ -707,7 +688,7 @@ public:
         static_assert(!enableDispersion);
 
         this->extrusionFactor_ = 1.0;// to avoid fixing parent update
-        updateCommonPart(problem, priVars, globalSpaceIdx, timeIdx);
+        updateCommonPart<Args...>(problem, priVars, globalSpaceIdx, timeIdx);
         // Porosity requires separate calls so this can be instantiated with ReservoirProblem from the examples/ directory.
         updatePorosity(problem, priVars, globalSpaceIdx, timeIdx);
 
@@ -715,9 +696,10 @@ public:
     }
 
     // This function updated the parts that are common to the IntensiveQuantities regardless of extensions used.
+    template <class ...Args>
     void updateCommonPart(const Problem& problem, const PrimaryVariables& priVars, const unsigned globalSpaceIdx, const unsigned timeIdx)
     {
-        OPM_TIMEBLOCK_LOCAL(blackoilIntensiveQuanititiesUpdate);
+        OPM_TIMEBLOCK_LOCAL(blackoilIntensiveQuanititiesUpdate, Subsystem::SatProps | Subsystem::PvtProps);
 
         const auto& linearizationType = problem.model().linearizer().getLinearizationType();
         const unsigned pvtRegionIdx = priVars.pvtRegionIndex();
@@ -726,7 +708,7 @@ public:
 
         updateTempSalt(problem, priVars, globalSpaceIdx, timeIdx, linearizationType);
         updateSaturations(priVars, timeIdx, linearizationType);
-        updateRelpermAndPressures(problem, priVars, globalSpaceIdx, timeIdx, linearizationType);
+        updateRelpermAndPressures<Args...>(problem, priVars, globalSpaceIdx, timeIdx, linearizationType);
 
         // update extBO parameters
         if constexpr (enableExtbo) {
@@ -821,14 +803,14 @@ public:
 
     const Evaluation& permFactor() const
     {
-        if constexpr (enableMICP) {
-            return MICPIntQua::permFactor();
+        if constexpr (enableBioeffects) {
+            return BioeffectsIntQua::permFactor();
         }
         else if constexpr (enableSaltPrecipitation) {
             return BrineIntQua::permFactor();
         }
         else {
-            throw std::logic_error("permFactor() called but salt precipitation or MICP are disabled");
+            throw std::logic_error("permFactor() called but salt precipitation or bioeffects are disabled");
         }
     }
 
@@ -836,10 +818,10 @@ private:
     friend BlackOilSolventIntensiveQuantities<TypeTag, enableSolvent>;
     friend BlackOilExtboIntensiveQuantities<TypeTag, enableExtbo>;
     friend BlackOilPolymerIntensiveQuantities<TypeTag, enablePolymer>;
-    friend BlackOilEnergyIntensiveQuantities<TypeTag, enableEnergy>;
+    friend BlackOilEnergyIntensiveQuantities<TypeTag, energyModuleType>;
     friend BlackOilFoamIntensiveQuantities<TypeTag, enableFoam>;
     friend BlackOilBrineIntensiveQuantities<TypeTag, enableBrine>;
-    friend BlackOilMICPIntensiveQuantities<TypeTag, enableMICP>;
+    friend BlackOilBioeffectsIntensiveQuantities<TypeTag, enableBioeffects>;
 
     Implementation& asImp_()
     { return *static_cast<Implementation*>(this); }

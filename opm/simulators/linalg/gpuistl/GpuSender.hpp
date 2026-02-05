@@ -53,7 +53,7 @@ public:
     virtual ~GPUSender() = default;
 
     /**
-     * @brief copyOwnerToAll will copy the data in source to all processes. 
+     * @brief copyOwnerToAll will copy the data in source to all processes.
      *
      * @note Depending on the implementation, this may or may not use GPU aware MPI.
      *       If it does not use GPU aware MPI, the data will be copied to the
@@ -80,6 +80,8 @@ public:
     /**
      * @brief dot will carry out the dot product between x and y on the owned indices, then sum up the result across MPI
      * processes.
+     * @param[in] x First vector in dot product
+     * @param[in] y Second vector in dot product
      * @param[out] output result will be stored here
      *
      * @note This uses the same interface as its DUNE equivalent.

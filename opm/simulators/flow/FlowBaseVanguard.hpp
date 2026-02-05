@@ -101,6 +101,9 @@ protected:
     using CartesianIndexMapper = Dune::CartesianIndexMapper<Grid>;
 
 public:
+    //! \brief Empty virtual dtor.
+    virtual ~FlowBaseVanguard() = default;
+
     /*!
      * \brief Register the common run-time parameters for all ECL simulator vanguards.
      */
@@ -206,7 +209,7 @@ public:
         }
     }
 
-    virtual int compressedIndexForInteriorLGR([[maybe_unused]] const std::string& lgr_tag, 
+    virtual int compressedIndexForInteriorLGR([[maybe_unused]] const std::string& lgr_tag,
                                               [[maybe_unused]]  const Connection&    conn) const
     {
         throw std::runtime_error("compressedIndexForInteriorLGR not implemented");
@@ -295,6 +298,7 @@ protected:
      * index.
      * \param cartMapper The cartesian index mapper for lookup of
      *        cartesian indices
+     * \param isCpGrid True if grid is a CpGrid
      */
     template<class CartMapper>
     std::function<std::array<double,dimensionworld>(int)>

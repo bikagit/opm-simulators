@@ -38,84 +38,62 @@ class Group;
 template<class Scalar> class GroupState;
 enum class InjectorType;
 using RegionId = int;
-struct PhaseUsage;
 class Schedule;
 class SummaryState;
-template<class Scalar> class WellInterfaceGeneric;
-template<class Scalar> class WellState;
+template<typename Scalar, typename IndexTraits> class GroupStateHelper;
+template<typename Scalar, typename IndexTraits> class WellInterfaceGeneric;
+template<typename Scalar, typename IndexTraits> class WellState;
 
 //! \brief Class for computing well group controls.
-template<class Scalar>
+template<typename Scalar, typename IndexTraits>
 class WellGroupControls {
 public:
     //! \brief Constructor sets reference to well.
-    explicit WellGroupControls(const WellInterfaceGeneric<Scalar>& well) : well_(well) {}
+    explicit WellGroupControls(const WellInterfaceGeneric<Scalar, IndexTraits>& well) : well_(well) {}
 
     using RateConvFunc = std::function<void(const RegionId, const int,
                                             const std::optional<std::string>&, std::vector<Scalar>&)>;
+    using GroupStateHelperType = GroupStateHelper<Scalar, IndexTraits>;
 
     template<class EvalWell>
     void getGroupInjectionControl(const Group& group,
-                                  const WellState<Scalar>& well_state,
-                                  const GroupState<Scalar>& group_state,
-                                  const Schedule& schedule,
-                                  const SummaryState& summaryState,
+                                  const GroupStateHelperType& groupStateHelper,
                                   const InjectorType& injectorType,
                                   const EvalWell& bhp,
                                   const EvalWell& injection_rate,
                                   const RateConvFunc& rateConverter,
                                   Scalar efficiencyFactor,
-                                  EvalWell& control_eq,
-                                  DeferredLogger& deferred_logger) const;
+                                  EvalWell& control_eq) const;
 
     std::optional<Scalar>
     getGroupInjectionTargetRate(const Group& group,
-                                const WellState<Scalar>& well_state,
-                                const GroupState<Scalar>& group_state,
-                                const Schedule& schedule,
-                                const SummaryState& summaryState,
+                                const GroupStateHelperType& groupStateHelper,
                                 const InjectorType& injectorType,
                                 const RateConvFunc& rateConverter,
-                                Scalar efficiencyFactor,
-                                DeferredLogger& deferred_logger) const;
+                                Scalar efficiencyFactor) const;
 
     template<class EvalWell>
     void getGroupProductionControl(const Group& group,
-                                   const WellState<Scalar>& well_state,
-                                   const GroupState<Scalar>& group_state,
-                                   const Schedule& schedule,
-                                   const SummaryState& summaryState,
+                                   const GroupStateHelperType& groupStateHelper,
                                    const EvalWell& bhp,
                                    const std::vector<EvalWell>& rates,
                                    const RateConvFunc& rateConverter,
                                    Scalar efficiencyFactor,
-                                   EvalWell& control_eq,
-                                   DeferredLogger& deferred_logger) const;
+                                   EvalWell& control_eq) const;
 
     Scalar getGroupProductionTargetRate(const Group& group,
-                                        const WellState<Scalar>& well_state,
-                                        const GroupState<Scalar>& group_state,
-                                        const Schedule& schedule,
-                                        const SummaryState& summaryState,
+                                        const GroupStateHelperType& groupStateHelper,
                                         const RateConvFunc& rateConverter,
-                                        Scalar efficiencyFactor,
-                                        DeferredLogger& deferred_logger) const;
+                                        Scalar efficiencyFactor) const;
 
-    static std::pair<Scalar, Group::ProductionCMode> getAutoChokeGroupProductionTargetRate(const std::string& name,
-                                                        const Group& parent,
-                                                        const WellState<Scalar>& well_state,
-                                                        const GroupState<Scalar>& group_state,
-                                                        const Schedule& schedule,
-                                                        const SummaryState& summaryState,
+    static std::pair<Scalar, Group::ProductionCMode> getAutoChokeGroupProductionTargetRate(const Group& bottom_group,
+                                                        const Group& group,
+                                                        const GroupStateHelperType& groupStateHelper,
                                                         const std::vector<Scalar>& resv_coeff,
-                                                        Scalar efficiencyFactor,
-                                                        const int reportStepIdx,
-                                                        const PhaseUsage& pu,
-                                                        const GuideRate* guideRate,
-                                                        DeferredLogger& deferred_logger);
+                                                        Scalar efficiencyFactor);
 
 private:
-    const WellInterfaceGeneric<Scalar>& well_; //!< Reference to well interface
+    const WellInterfaceGeneric<Scalar, IndexTraits>& well_; //!< Reference to well interface
 };
 
 }

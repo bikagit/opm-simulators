@@ -6,37 +6,6 @@ set(abs_tol 2e-2)
 set(rel_tol 1e-5)
 set(coarse_rel_tol 1e-2)
 
-# Adds several tests cases with similar parameters
-# cases Variable name of list with test cases
-# prefix Prefix to use
-# argn Parameters for cases
-macro(add_multiple_tests cases prefix)
-  foreach(case ${${cases}})
-    string(TOLOWER ${case} test)
-    add_test_compareECLFiles(
-        CASENAME ${prefix}${test}
-        FILENAME ${case}
-        ${ARGN}
-    )
-  endforeach()
-endmacro()
-
-# Adds several tests cases in a numerical range with similar parameters
-# start Start of range
-# end End fof range
-# ftemplate File name template to use
-# prefix Prefix to use
-# argn Parameters for cases
-macro(add_multiple_test_range start end ftemplate prefix)
-    foreach(case RANGE ${start} ${end})
-      add_test_compareECLFiles(
-          CASENAME ${prefix}_${case}
-          FILENAME ${ftemplate}${case}
-          ${ARGN}
-      )
-    endforeach()
-endmacro()
-
 add_test_compareECLFiles(CASENAME spe1flowexp
                          FILENAME SPE1CASE2
                          SIMULATOR flowexp_blackoil
@@ -71,6 +40,7 @@ set(_spe1_tests
   SPE1CASE2_THERMAL_ONEPHASE
   SPE1CASE2_THERMAL_WATVISC
   SPE1CASE2_2P
+  SPE1CASE2_TEMP
 )
 
 add_multiple_tests(
@@ -432,6 +402,20 @@ add_test_compareECLFiles(CASENAME gpmaint11
                          REL_TOL ${rel_tol}
                          DIR gpmaint)
 
+add_test_compareECLFiles(CASENAME 3dwecon9
+                         FILENAME 3D_WECON_9
+                         SIMULATOR flow
+                         ABS_TOL ${abs_tol}
+                         REL_TOL ${rel_tol}
+                         DIR wecon_wtest)
+
+add_test_compareECLFiles(CASENAME gconinje_resv_gas_01
+                         FILENAME GCONINJE_RESV_GAS-01
+                         SIMULATOR flow
+                         ABS_TOL ${abs_tol}
+                         REL_TOL ${rel_tol}
+                         DIR resv_ctrl)
+
 set(_gconprod_cases
   T1L
   T1W
@@ -714,20 +698,20 @@ add_multiple_tests(
 )
 
 add_test_compareECLFiles(CASENAME multflt_model2
-			  FILENAME 3_MULTFLT_MODEL2
-			  SIMULATOR flow
-			  ABS_TOL ${abs_tol}
-			  REL_TOL ${rel_tol}
-			  DIR model2
-			  TEST_ARGS --solver-max-time-step-in-days=10)
+                        FILENAME 3_MULTFLT_MODEL2
+                        SIMULATOR flow
+                        ABS_TOL ${abs_tol}
+                        REL_TOL ${rel_tol}
+                        DIR model2
+                        TEST_ARGS --solver-max-time-step-in-days=10)
 
 add_test_compareECLFiles(CASENAME multpvv_model2
-			  FILENAME 4_MINPVV_MODEL2
-			  SIMULATOR flow
-			  ABS_TOL ${abs_tol}
-			  REL_TOL ${rel_tol}
-			  DIR model2
-			  TEST_ARGS --solver-max-time-step-in-days=10)
+                         FILENAME 4_MINPVV_MODEL2
+                         SIMULATOR flow
+                         ABS_TOL ${abs_tol}
+                         REL_TOL ${rel_tol}
+                         DIR model2
+                         TEST_ARGS --solver-max-time-step-in-days=10)
 
 add_test_compareECLFiles(CASENAME 9_3d_grpctl_stw_model2
                          FILENAME 9_3D_GINJ_GAS_MAX_EXPORT_STW
@@ -759,22 +743,22 @@ add_test_compareECLFiles(CASENAME model6_msw
                          DIR model6)
 
 add_test_compareECLFiles(CASENAME wsegsicd
-			  FILENAME TEST_WSEGSICD
-			  SIMULATOR flow
-			  ABS_TOL ${abs_tol}
-			  REL_TOL ${rel_tol})
+                         FILENAME TEST_WSEGSICD
+                         SIMULATOR flow
+                         ABS_TOL ${abs_tol}
+                         REL_TOL ${rel_tol})
 
 add_test_compareECLFiles(CASENAME wsegaicd
-			  FILENAME BASE_MSW_WSEGAICD
-			  SIMULATOR flow
-			  ABS_TOL ${abs_tol}
-			  REL_TOL ${rel_tol})
+                         FILENAME BASE_MSW_WSEGAICD
+                         SIMULATOR flow
+                         ABS_TOL ${abs_tol}
+                         REL_TOL ${rel_tol})
 
 add_test_compareECLFiles(CASENAME wsegvalv
-			  FILENAME BASE_MSW_WSEGVALV
-			  SIMULATOR flow
-			  ABS_TOL ${abs_tol}
-			  REL_TOL ${rel_tol})
+                         FILENAME BASE_MSW_WSEGVALV
+                         SIMULATOR flow
+                         ABS_TOL ${abs_tol}
+                         REL_TOL ${rel_tol})
 
 add_test_compareECLFiles(CASENAME wsegvalv_2d_vert
                          FILENAME  MSW-2D-VERT-02
@@ -849,12 +833,21 @@ add_test_compareECLFiles(CASENAME 3d_tran_operator
                          DIR parallel_fieldprops
                          TEST_ARGS --enable-tuning=true --relaxed-max-pv-fraction=0)
 
+add_test_compareECLFiles(CASENAME h2store_biofilm
+                         FILENAME H2STORE_BIOFILM
+                         SIMULATOR flow
+                         ABS_TOL ${abs_tol}
+                         REL_TOL ${rel_tol}
+                         DIR h2store
+                         TEST_ARGS --enable-opm-rst-file=true --initial-time-step-in-days=0.01)
+
 add_test_compareECLFiles(CASENAME micp
                          FILENAME MICP
                          SIMULATOR flow
                          ABS_TOL ${abs_tol}
                          REL_TOL ${rel_tol}
-                         DIR micp)
+                         DIR micp
+                         TEST_ARGS --enable-opm-rst-file=true)
 
 add_test_compareECLFiles(CASENAME 0_base_model6
                          FILENAME 0_BASE_MODEL6
@@ -884,6 +877,13 @@ add_test_compareECLFiles(CASENAME base_wt_tracer
                          REL_TOL ${rel_tol}
                          DIR tracer
                          RESTART_STEP 1,3,7)
+
+add_test_compareECLFiles(CASENAME tracer_multiphase
+                         FILENAME TRACER_2WT_2GT
+                         SIMULATOR flow
+                         ABS_TOL ${abs_tol}
+                         REL_TOL ${rel_tol}
+                         DIR tracer)
 
 add_multiple_test_range(
   1
@@ -1109,6 +1109,14 @@ add_test_compareECLFiles(CASENAME gsatprod
                          ABS_TOL ${abs_tol}
                          REL_TOL ${rel_tol}
                          DIR satellite)
+
+add_test_compareECLFiles(CASENAME gsatprod6
+                         FILENAME GSATPROD6
+                         SIMULATOR flow
+                         ABS_TOL ${abs_tol}
+                         REL_TOL ${rel_tol}
+                         DIR satellite)
+
 if(BUILD_FLOW_POLY_GRID)
   add_test_compareECLFiles(CASENAME spe12_polyhedralgrid
                            FILENAME SPE1CASE2

@@ -1,181 +1,136 @@
-#!/bin/bash
+#!/bin/bash -norc
+
+# Generate OPM-Tests repository PR to update one or more reference
+# solution files as a result of a known improvement to the simulator
+# or a new regression test being added into the test suite.
+#
+# Processes 'LastTestsFailed.log' in OPM-Simulators' build directory
+# to infer applicable failing tests.
+#
+# Positional arguments:
+#   - $1 Location of OPM-Tests root directory.
+#   - $2 Location of OPM-Simulators' build directory.
+#   - $3 Full path to 'convertECL' utility, including the 'convertECL'
+#        utility name. Needed only if caller wants 'diff -u' style
+#        content differences between existing reference solutions and
+#        new candidate solutions. Pass empty string if not.
+#
+# Environment:
+#   - $WORKSPACE Location of Jenkins' build work space.
+#   - $configuration Name of Jenkins build configuration.
+#   - $REASON Underlying reason for this data update. Typically one or
+#     more PR names. An empty REASON will stop commit process and
+#     prompt user for an appropriate commit message.
+#   - $BRANCH_BASE Branch relative to which to start this data
+#     update. Typically 'master'.
+#   - $BRANCH_NAME Name of data update PR branch in OPM-Tests repo.
 
 OPM_TESTS_ROOT=$1
 BUILD_DIR=$2
 CONVERT_ECL=$3
 
-TMPDIR=`mktemp -d`
-mkdir $TMPDIR/orig
-mkdir $TMPDIR/new
+TMPDIR=$(mktemp -d)
 
-# Copy results from a test run to refence dir
-# $1 = source directory to copy data from
-# $2 = destination directory to copy data to
-# $3 = base file name for files to copy
-# $4...$@ = file types to copy
-copyToReferenceDir () {
-  SRC_DIR=$1
-  DST_DIR=$2
-  STEM=$3
-  FILETYPES=${@:4}
-  mkdir -p $DST_DIR
+# ===========================================================================
+# Main data update loop.
+#
+# Processes one line of 'LastTestsFailed.log' at a time and updates
+# applicable reference solutions.
 
-  DIFF=1
-  for filetype in $FILETYPES
-  do
-    # Don't flag as changed if both reference and result dir lack a file type
-    # In particular to handle the optional RFT's
-    if [ ! -f $SRC_DIR/$STEM.$filetype ] && [ ! -f $DST_DIR/$STEM.$filetype ]
-    then
-      continue
-    fi
-    diff -q "$SRC_DIR/$STEM.$filetype" "$DST_DIR/$STEM.$filetype"
-    res=$?
-    if test $res -ne 0 && test -n "$CONVERT_ECL"
-    then
-      cp $SRC_DIR/$STEM.$filetype $TMPDIR/new
-      $CONVERT_ECL $TMPDIR/new/$STEM.$filetype
-      cp $DST_DIR/$STEM.$filetype $TMPDIR/orig
-      $CONVERT_ECL $TMPDIR/orig/$STEM.$filetype
-      diff -u $TMPDIR/orig/$STEM.F$filetype $TMPDIR/new/$STEM.F$filetype >> $WORKSPACE/data_diff
-    fi
-    if test $res -ne 0
-    then
-      cp "$SRC_DIR/$STEM.$filetype" $DST_DIR
-      DIFF=0
-    fi
-  done
-
-  return $DIFF
-}
-
-# Copy damaris results from a test run to refence dir
-# $1 = source directory to copy data from
-# $2 = destination directory to copy data to
-# $3 = base file name for files to copy
-copyDamarisToReferenceDir () {
-  SRC_DIR=$1
-  DST_DIR=$2
-  STEM=$3
-  mkdir -p $DST_DIR
-
-  FIRST_FILE=`ls -v1 $SRC_DIR/$STEM*.h5 | head -n1`
-  LAST_FILE=`ls -v1 $SRC_DIR/$STEM*.h5 | tail -n1`
-
-  for file in $FIRST_FILE $LAST_FILE
-  do
-    h5diff -v "$file" "$DST_DIR/`basename $file`" >> $WORKSPACE/data_diff
-    cp "$file" $DST_DIR
-  done
-}
-
-changed_tests=""
-
-# Read failed tests
-FAILED_TESTS=`cat $BUILD_DIR/Testing/Temporary/LastTestsFailed*.log`
-
-test -z "$FAILED_TESTS" && exit 5
-
-for failed_test in $FAILED_TESTS
+for logfile in $(echo "${BUILD_DIR}/Testing/Temporary/LastTestsFailed*.log")
 do
-  grep -q -E "compareECLFiles|compareDamarisFiles" <<< $failed_test
-  test $? -ne 0 && continue
-  failed_test=`echo $failed_test | sed -e 's/.*://g' -e 's/\+/./g'`
-  # Extract test properties
-  dir=`dirname "$0"`
-  binary=$(awk -v search="set_tests_properties\\\($failed_test\$" -v prop="SIMULATOR" -f $dir/getprop.awk $BUILD_DIR/CTestTestfile.cmake)
-  dir_name=$(awk -v search="set_tests_properties\\\($failed_test\$" -v prop="DIRNAME" -f $dir/getprop.awk $BUILD_DIR/CTestTestfile.cmake)
-  file_name=$(awk -v search="set_tests_properties\\\($failed_test\$" -v prop="FILENAME" -f $dir/getprop.awk $BUILD_DIR/CTestTestfile.cmake)
-  test_name=$(awk -v search="set_tests_properties\\\($failed_test\$" -v prop="TESTNAME" -f $dir/getprop.awk $BUILD_DIR/CTestTestfile.cmake)
-  echo "$failed_test ${binary} ${dirname} ${file_name} ${test_name}"
-  if grep -q compareECLFiles <<< $failed_test
-  then
-    copyToReferenceDir \
-            $BUILD_DIR/tests/results/$binary+$test_name \
-            $OPM_TESTS_ROOT/$dir_name/opm-simulation-reference/$binary \
-            $file_name \
-            EGRID INIT RFT SMSPEC UNRST UNSMRY
-    test $? -eq 0 && changed_tests="$changed_tests $test_name"
-
-    if [ -d $configuration/build-opm-simulators/tests/results/$binary+$test_name/restart ]
+    if [ ! -s "${logfile}" ]
     then
-
-      RSTEPS=`ls -1 $BUILD_DIR/tests/results/$binary+$test_name/restart/*.UNRST | sed -e 's/.*RESTART_*//' | sed 's/[.].*//' `
-      result=0
-      for RSTEP in $RSTEPS
-      do
-        copyToReferenceDir \
-            $BUILD_DIR/tests/results/$binary+$test_name/restart/ \
-            $OPM_TESTS_ROOT/$dir_name/opm-simulation-reference/$binary/restart \
-            ${file_name}_RESTART_${RSTEP} \
-            EGRID INIT RFT SMSPEC UNRST UNSMRY
-        res=$?
-        test $result -eq 0 || result=$res
-      done
-      test $result -eq 0 && changed_tests="$changed_tests $test_name(restart)"
+        continue
     fi
-  else
-    copyDamarisToReferenceDir \
-            $BUILD_DIR/tests/results/$binary+$test_name \
-            $OPM_TESTS_ROOT/$dir_name/opm-simulation-reference/$binary \
-            $file_name
-    changed_tests="$changed_tests $test_name"
-  fi
+
+    tests=""
+    while read failed_test
+    do
+        if ! grep -q 'compare.*Files_.*' <<< ${failed_test}
+        then
+            # The ${failed_test} is not among the compare*Files_* tests to
+            # which this update script applies.  Nothing to do.
+            continue
+        fi
+
+        tests+="${failed_test}\\n"
+    done < "${logfile}"
+
+    JOBS=${TESTTHREADS:-16}
+    echo -e $tests | \
+      OPM_TESTS_ROOT=$OPM_TESTS_ROOT \
+      BUILD_DIR=$BUILD_DIR \
+      CONVERT_ECL=$CONVERT_ECL \
+      TMPDIR=$TMPDIR \
+        xargs -P${JOBS} -L1 $(dirname $0)/update_test_reference.sh
+    changed_tests=$(cat $TMPDIR/changed_tests)
 done
 
-# special tests
-copyToReferenceDir \
-      $BUILD_DIR/tests/results/init/flow+norne \
-      $OPM_TESTS_ROOT/norne/opm-simulation-reference/flow \
-      NORNE_ATW2013 \
-      EGRID INIT
-test $? -eq 0 && changed_tests="$changed_tests norne_init"
+if [ -z "${changed_tests}" ]
+then
+    exit 5
+fi
 
+# ===========================================================================
+# Create data update PR.
+
+# 1) Create commit message (or commit message template, depending on
+# the contents of ${REASON}).  Empty ${REASON} ultimately starts an
+# interactive commit.
 changed_tests=`echo $changed_tests | xargs`
-echo -e "Automatic Reference Data Update for ${REASON:-(Unknown)}\n" > /tmp/cmsg
+MSGFILE=$WORKSPACE/deps/cmsg
+echo -e "Automatic Reference Data Update for ${REASON:-(Unknown)}\n" > $MSGFILE
 if [ -z "$REASON" ]
 then
-  echo -e "Reason: fill in this\n" >> /tmp/cmsg
+  echo -e "Reason: fill in this\n" >> $MSGFILE
 else
-  echo -e "Reason: $REASON\n" >> /tmp/cmsg
+  echo -e "Reason: $REASON\n" >> $MSGFILE
 fi
 if [ -n "$CONVERT_ECL" ]
 then
-  for dep in opm-common opm-grid
+  for dep in opm-common opm-grid opm-simulators
   do
     pushd $WORKSPACE/deps/$dep > /dev/null
     name=`printf "%-14s" $dep`
     rev=`git rev-parse HEAD`
-    echo -e "$name = $rev" >> /tmp/cmsg
+    echo -e "$name = $rev" >> $MSGFILE
     popd > /dev/null
   done
-  echo -e "opm-simulators = `git rev-parse HEAD`" >> /tmp/cmsg
 fi
 
-echo -e "\n### Changed Tests ###\n" >> /tmp/cmsg
-for t in ${changed_tests}
-do
-  echo "  * ${t}" >> /tmp/cmsg
-done
+echo -e "\n### Changed Tests ###\n" >> $MSGFILE
+printf "  * %s\n" ${changed_tests} >> $MSGFILE
 
+# ---------------------------------------------------------------------------
+
+# 2) Create branch for new commit.
 cd $OPM_TESTS_ROOT
 if [ -n "$BRANCH_NAME" ]
 then
   git checkout -b $BRANCH_NAME $BRANCH_BASE
 fi
 
-# Add potential new files
+# ---------------------------------------------------------------------------
+
+# 3) Add new files as needed.
 untracked=`git status --porcelain | awk '$1~/\?/{print $2}'`
 if [ -n "$untracked" ]
 then
   git add $untracked
 fi
 
+# ---------------------------------------------------------------------------
+
+# 4) Commit reference solution update.
 if [ -z "$REASON" ]
 then
-  git commit -a -t /tmp/cmsg
+  git commit -a -t $MSGFILE
 else
-  git commit -a -F /tmp/cmsg
+  git commit -a -F $MSGFILE
 fi
+
+# ===========================================================================
+# Clean up intermediate files.
 
 rm -rf $TMPDIR

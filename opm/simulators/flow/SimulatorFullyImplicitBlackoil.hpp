@@ -23,16 +23,14 @@
 #define OPM_SIMULATOR_FULLY_IMPLICIT_BLACKOIL_HEADER_INCLUDED
 
 #include <opm/common/ErrorMacros.hpp>
+#include <opm/simulators/flow/rescoup/ReservoirCouplingEnabled.hpp>
 
-#if HAVE_MPI
-#define RESERVOIR_COUPLING_ENABLED
-#endif
 #ifdef RESERVOIR_COUPLING_ENABLED
 #include <opm/input/eclipse/Schedule/ResCoup/ReservoirCouplingInfo.hpp>
 #include <opm/input/eclipse/Schedule/ResCoup/MasterGroup.hpp>
 #include <opm/input/eclipse/Schedule/ResCoup/Slaves.hpp>
-#include <opm/simulators/flow/ReservoirCouplingMaster.hpp>
-#include <opm/simulators/flow/ReservoirCouplingSlave.hpp>
+#include <opm/simulators/flow/rescoup/ReservoirCouplingMaster.hpp>
+#include <opm/simulators/flow/rescoup/ReservoirCouplingSlave.hpp>
 #include <opm/common/Exceptions.hpp>
 #endif
 
@@ -105,11 +103,11 @@ public:
     using MaterialLawParams = GetPropType<TypeTag, Properties::MaterialLawParams>;
     using AquiferModel = GetPropType<TypeTag, Properties::AquiferModel>;
     using Model = GetPropType<TypeTag, Properties::NonlinearSystem>;
+    using Scalar = GetPropType<TypeTag, Properties::Scalar>;
 
     using TimeStepper = AdaptiveTimeStepping<TypeTag>;
     using PolymerModule = BlackOilPolymerModule<TypeTag>;
-    using MICPModule = BlackOilMICPModule<TypeTag>;
-
+    using BioeffectsModule = BlackOilBioeffectsModule<TypeTag>;
 
     using Solver = NonlinearSolver<TypeTag, Model>;
     using ModelParameters = typename Model::ModelParameters;
@@ -117,26 +115,7 @@ public:
     using WellModel = BlackoilWellModel<TypeTag>;
 
     /// Initialise from parameters and objects to observe.
-    /// \param[in] param       parameters, this class accepts the following:
-    ///     parameter (default)            effect
-    ///     -----------------------------------------------------------
-    ///     output (true)                  write output to files?
-    ///     output_dir ("output")          output directoty
-    ///     output_interval (1)            output every nth step
-    ///     nl_pressure_residual_tolerance (0.0) pressure solver residual tolerance (in Pascal)
-    ///     nl_pressure_change_tolerance (1.0)   pressure solver change tolerance (in Pascal)
-    ///     nl_pressure_maxiter (10)       max nonlinear iterations in pressure
-    ///     nl_maxiter (30)                max nonlinear iterations in transport
-    ///     nl_tolerance (1e-9)            transport solver absolute residual tolerance
-    ///     num_transport_substeps (1)     number of transport steps per pressure step
-    ///     use_segregation_split (false)  solve for gravity segregation (if false,
-    ///                                    segregation is ignored).
-    ///
-    /// \param[in] props         fluid and rock properties
-    /// \param[in] linsolver     linear solver
-    /// \param[in] eclipse_state the object which represents an internalized ECL deck
-    /// \param[in] output_writer
-    /// \param[in] threshold_pressures_by_face   if nonempty, threshold pressures that inhibit flow
+    /// \param simulator Reference to main simulator
     explicit SimulatorFullyImplicitBlackoil(Simulator& simulator)
         : simulator_(simulator)
         , serializer_(*this,
@@ -147,7 +126,6 @@ public:
                       Parameters::Get<Parameters::SaveFile>(),
                       Parameters::Get<Parameters::LoadFile>())
     {
-        phaseUsage_ = phaseUsageFromDeck(eclState());
 
         // Only rank 0 does print to std::cout, and only if specifically requested.
         this->terminalOutput_ = false;
@@ -209,6 +187,21 @@ public:
             if (!continue_looping) break;
         }
         simulator_.problem().writeReports(timer);
+
+#ifdef RESERVOIR_COUPLING_ENABLED
+        // Clean up MPI intercommunicators before MPI_Finalize()
+        // Master sends terminate=1 signal; slave receives it and both call MPI_Comm_disconnect()
+        if (this->reservoirCouplingMaster_) {
+            this->reservoirCouplingMaster_->sendTerminateAndDisconnect();
+        }
+        else if (this->reservoirCouplingSlave_ && !this->reservoirCouplingSlave_->terminated()) {
+            // TODO: Implement GECON item 8: stop master process when a slave finishes
+            // Only call if not already terminated via maybeReceiveTerminateSignalFromMaster()
+            // (which happens when master finishes before slave reaches end of its loop)
+            this->reservoirCouplingSlave_->receiveTerminateAndDisconnect();
+        }
+#endif
+
         return finalize();
     }
 
@@ -223,18 +216,14 @@ public:
             auto rescoup = this->schedule()[report_step].rescoup();
             auto slave_count = rescoup.slaveCount();
             auto master_group_count = rescoup.masterGroupCount();
-            // - GRUPMAST and SLAVES keywords need to be specified at the same report step
-            // - They can only occur once in the schedule
-            if (slave_count > 0 && master_group_count > 0) {
+            // Master mode is enabled when SLAVES keyword is present.
+            // - Prediction mode: SLAVES + GRUPMAST (master allocates rates)
+            // - History mode: SLAVES only (master synchronizes time-stepping)
+            if (slave_count > 0) {
                 return true;
             }
-            else if (slave_count > 0 && master_group_count == 0) {
-                throw ReservoirCouplingError(
-                    "Inconsistent reservoir coupling master schedule: "
-                    "Slave count is greater than 0 but master group count is 0"
-                );
-            }
-            else if (slave_count == 0 && master_group_count > 0) {
+            else if (master_group_count > 0) {
+                // GRUPMAST without SLAVES is invalid
                 throw ReservoirCouplingError(
                     "Inconsistent reservoir coupling master schedule: "
                     "Master group count is greater than 0 but slave count is 0"
@@ -252,7 +241,7 @@ public:
         auto slave_mode = Parameters::Get<Parameters::Slave>();
         if (slave_mode) {
             this->reservoirCouplingSlave_ =
-                std::make_unique<ReservoirCouplingSlave>(
+                std::make_unique<ReservoirCouplingSlave<Scalar>>(
                     FlowGenericVanguard::comm(),
                     this->schedule(), timer
                 );
@@ -264,7 +253,7 @@ public:
             auto master_mode = checkRunningAsReservoirCouplingMaster();
             if (master_mode) {
                 this->reservoirCouplingMaster_ =
-                    std::make_unique<ReservoirCouplingMaster>(
+                    std::make_unique<ReservoirCouplingMaster<Scalar>>(
                         FlowGenericVanguard::comm(),
                         this->schedule(),
                         argc, argv
@@ -313,11 +302,87 @@ public:
         modelParam_.tolerance_cnv_relaxed_ = tuning.XXXCNV;
         modelParam_.tolerance_mb_ = tuning.TRGMBE;
         modelParam_.tolerance_mb_relaxed_ = tuning.XXXMBE;
+        modelParam_.newton_max_iter_ = tuning.NEWTMX;
+        modelParam_.newton_min_iter_ = tuning.NEWTMN;
         if (terminalOutput_) {
-            const auto msg = fmt::format("Tuning SimulatorFullyImplicitBlackoil tolerances: "
-                                         "MB: {:.2e}, CNV: {:.2e}",
-                                         tuning.TRGMBE, tuning.TRGCNV);
+            const auto msg = fmt::format("Tuning values: "
+                                         "MB: {:.2e}, CNV: {:.2e}, NEWTMN: {}, NEWTMX: {}",
+                                         tuning.TRGMBE, tuning.TRGCNV, tuning.NEWTMN, tuning.NEWTMX);
             OpmLog::debug(msg);
+            if (tuning.TRGTTE_has_value) {
+                OpmLog::warning("Tuning item 2-1 (TRGTTE) is not supported.");
+            }
+            if (tuning.TRGLCV_has_value) {
+                OpmLog::warning("Tuning item 2-4 (TRGLCV) is not supported.");
+            }
+            if (tuning.XXXTTE_has_value) {
+                OpmLog::warning("Tuning item 2-5 (XXXTTE) is not supported.");
+            }
+            if (tuning.XXXLCV_has_value) {
+                OpmLog::warning("Tuning item 2-8 (XXXLCV) is not supported.");
+            }
+            if (tuning.XXXWFL_has_value) {
+                OpmLog::warning("Tuning item 2-9 (XXXWFL) is not supported.");
+            }
+            if (tuning.TRGFIP_has_value) {
+                OpmLog::warning("Tuning item 2-10 (TRGFIP) is not supported.");
+            }
+            if (tuning.TRGSFT_has_value) {
+                OpmLog::warning("Tuning item 2-11 (TRGSFT) is not supported.");
+            }
+            if (tuning.THIONX_has_value) {
+                OpmLog::warning("Tuning item 2-12 (THIONX) is not supported.");
+            }
+            if (tuning.TRWGHT_has_value) {
+                OpmLog::warning("Tuning item 2-13 (TRWGHT) is not supported.");
+            }
+            if (tuning.LITMAX_has_value) {
+                OpmLog::warning("Tuning item 3-3 (LITMAX) is not supported.");
+            }
+            if (tuning.LITMIN_has_value) {
+                OpmLog::warning("Tuning item 3-4 (LITMIN) is not supported.");
+            }
+            if (tuning.MXWSIT_has_value) {
+                OpmLog::warning("Tuning item 3-5 (MXWSIT) is not supported.");
+            }
+            if (tuning.MXWPIT_has_value) {
+                OpmLog::warning("Tuning item 3-6 (MXWPIT) is not supported.");
+            }
+            if (tuning.DDPLIM_has_value) {
+                OpmLog::warning("Tuning item 3-7 (DDPLIM) is not supported.");
+            }
+            if (tuning.DDSLIM_has_value) {
+                OpmLog::warning("Tuning item 3-8 (DDSLIM) is not supported.");
+            }
+            if (tuning.TRGDPR_has_value) {
+                OpmLog::warning("Tuning item 3-9 (TRGDPR) is not supported.");
+            }
+            if (tuning.XXXDPR_has_value) {
+                OpmLog::warning("Tuning item 3-10 (XXXDPR) is not supported.");
+            }
+            if (tuning.MNWRFP_has_value) {
+                OpmLog::warning("Tuning item 3-11 (MNWRFP) is not supported.");
+            }
+        }
+    }
+
+    void updateTUNINGDP(const TuningDp& tuning_dp)
+    {
+        // NOTE: If TUNINGDP item is _not_ set it should be 0.0
+        modelParam_.tolerance_max_dp_ = tuning_dp.TRGDDP;
+        modelParam_.tolerance_max_ds_ = tuning_dp.TRGDDS;
+        modelParam_.tolerance_max_drs_ = tuning_dp.TRGDDRS;
+        modelParam_.tolerance_max_drv_ = tuning_dp.TRGDDRV;
+
+        // Terminal warnings
+        if (terminalOutput_) {
+            // Warnings unsupported items
+            if (tuning_dp.TRGLCV_has_value) {
+                OpmLog::warning("TUNINGDP item 1 (TRGLCV) is not supported.");
+            }
+            if (tuning_dp.XXXLCV_has_value) {
+                OpmLog::warning("TUNINGDP item 2 (XXXLCV) is not supported.");
+            }
         }
     }
 
@@ -415,6 +480,19 @@ public:
                     result = max_next_tstep > 0;
                 }
 
+                if (events.hasEvent(ScheduleEvents::TUNINGDP_CHANGE)) {
+                    // Unset the event to not trigger it again on the next sub step
+                    schedule.clear_event(ScheduleEvents::TUNINGDP_CHANGE, reportStep);
+
+                    // Update TUNINGDP parameters
+                    // NOTE: Need to update both solver (model) and simulator since solver is re-created each report
+                    // step.
+                    const auto& sched_state = schedule[reportStep];
+                    const auto& tuning_dp = sched_state.tuning_dp();
+                    solver_->model().updateTUNINGDP(tuning_dp);
+                    this->updateTUNINGDP(tuning_dp);
+                }
+
                 const auto& wcycle = schedule[reportStep].wcycle.get();
                 if (wcycle.empty()) {
                     return result;
@@ -452,6 +530,7 @@ public:
 #ifdef RESERVOIR_COUPLING_ENABLED
             if (this->reservoirCouplingMaster_) {
                 this->reservoirCouplingMaster_->maybeSpawnSlaveProcesses(timer.currentStepNum());
+                this->reservoirCouplingMaster_->maybeActivate(timer.currentStepNum());
             }
             else if (this->reservoirCouplingSlave_) {
                 this->reservoirCouplingSlave_->maybeActivate(timer.currentStepNum());
@@ -466,12 +545,14 @@ public:
                 events.hasEvent(ScheduleEvents::WELL_STATUS_CHANGE);
             auto stepReport = adaptiveTimeStepping_->step(timer, *solver_, event, tuningUpdater);
             report_ += stepReport;
-            //Pass simulation report to eclwriter for summary output
-            simulator_.problem().setSimulationReport(report_);
         } else {
             // solve for complete report step
             auto stepReport = solver_->step(timer, nullptr);
             report_ += stepReport;
+            // Pass simulation report to eclwriter for summary output
+            simulator_.problem().setSubStepReport(stepReport);
+            simulator_.problem().setSimulationReport(report_);
+            simulator_.problem().endTimeStep();
             if (terminalOutput_) {
                 std::ostringstream ss;
                 stepReport.reportStep(ss);
@@ -504,7 +585,7 @@ public:
 
         // Increment timer, remember well state.
         ++timer;
-        
+
         if (terminalOutput_) {
             std::string msg =
                 "Time step took " + std::to_string(solverTimer_->secsSinceStart()) + " seconds; "
@@ -643,7 +724,6 @@ protected:
     std::unique_ptr<Solver> solver_;
 
     // Observed objects.
-    PhaseUsage phaseUsage_;
     // Misc. data
     bool terminalOutput_;
 
@@ -656,8 +736,8 @@ protected:
 
 #ifdef RESERVOIR_COUPLING_ENABLED
     bool slaveMode_{false};
-    std::unique_ptr<ReservoirCouplingMaster> reservoirCouplingMaster_{nullptr};
-    std::unique_ptr<ReservoirCouplingSlave> reservoirCouplingSlave_{nullptr};
+    std::unique_ptr<ReservoirCouplingMaster<Scalar>> reservoirCouplingMaster_{nullptr};
+    std::unique_ptr<ReservoirCouplingSlave<Scalar>> reservoirCouplingSlave_{nullptr};
 #endif
 
     SimulatorSerializer serializer_;

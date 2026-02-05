@@ -29,12 +29,12 @@ namespace Opm
 
 class DeferredLogger;
 class SummaryState;
-template<class Scalar> class WellInterfaceGeneric;
+template<typename Scalar, typename IndexTraits> class WellInterfaceGeneric;
 enum class WellSegmentCompPressureDrop;
 class WellSegments;
-template<class Scalar> class WellState;
+template<typename Scalar, typename IndexTraits> class WellState;
 
-template <typename Scalar>
+template<typename Scalar, typename IndexTraits>
 class MultisegmentWellGeneric
 {
 public:
@@ -49,19 +49,19 @@ public:
     int numberOfSegments() const;
 
 protected:
-    explicit MultisegmentWellGeneric(WellInterfaceGeneric<Scalar>& baseif);
+    explicit MultisegmentWellGeneric(WellInterfaceGeneric<Scalar, IndexTraits>& baseif);
 
     // scale the segment rates and pressure based on well rates and bhp
     void scaleSegmentRatesWithWellRates(const std::vector<std::vector<int>>& segment_inlets,
                                         const std::vector<std::vector<int>>& segment_perforations,
-                                        WellState<Scalar>& well_state) const;
-    void scaleSegmentPressuresWithBhp(WellState<Scalar>& well_state) const;
+                                        WellState<Scalar, IndexTraits>& well_state) const;
+    void scaleSegmentPressuresWithBhp(WellState<Scalar, IndexTraits>& well_state) const;
 
     // components of the pressure drop to be included
     WellSegmentCompPressureDrop compPressureDrop() const;
 
     /// Detect oscillation or stagnation based on the residual measure history
-    bool update_relaxation_factor(const std::vector<Scalar>& measure_history, Scalar& relaxation_factor, bool& regularize, DeferredLogger& deferred_logger) const;    
+    bool update_relaxation_factor(const std::vector<Scalar>& measure_history, Scalar& relaxation_factor, bool& regularize, DeferredLogger& deferred_logger) const;
     bool repeatedStagnation(const std::vector<Scalar>& measure_history, bool& regularize, DeferredLogger& deferred_logger) const;
 
     bool accelerationalPressureLossConsidered() const;
@@ -71,7 +71,7 @@ protected:
                         const Scalar density,
                         const std::vector<Scalar>& seg_dp) const;
 
-    const WellInterfaceGeneric<Scalar>& baseif_;
+    const WellInterfaceGeneric<Scalar, IndexTraits>& baseif_;
 };
 
 }

@@ -34,9 +34,9 @@
 #include <opm/material/common/Valgrind.hpp>
 #include <opm/material/constraintsolvers/NcpFlash.hpp>
 
+#include <opm/models/blackoil/blackoilbioeffectsmodules.hh>
 #include <opm/models/blackoil/blackoilbrinemodules.hh>
 #include <opm/models/blackoil/blackoilfoammodules.hh>
-#include <opm/models/blackoil/blackoilmicpmodules.hh>
 #include <opm/models/blackoil/blackoilpolymermodules.hh>
 #include <opm/models/blackoil/blackoilsolventmodules.hh>
 #include <opm/models/common/multiphasebaseproperties.hh>
@@ -69,19 +69,16 @@ class BlackOilRateVector
     using PolymerModule = BlackOilPolymerModule<TypeTag>;
     using FoamModule = BlackOilFoamModule<TypeTag>;
     using BrineModule = BlackOilBrineModule<TypeTag>;
-    using MICPModule = BlackOilMICPModule<TypeTag>;
 
     enum { numEq = getPropValue<TypeTag, Properties::NumEq>() };
     enum { numComponents = getPropValue<TypeTag, Properties::NumComponents>() };
     enum { conti0EqIdx = Indices::conti0EqIdx };
-    enum { contiEnergyEqIdx = Indices::contiEnergyEqIdx };
-    enum { enableEnergy = getPropValue<TypeTag, Properties::EnableEnergy>() };
     enum { enableSolvent = getPropValue<TypeTag, Properties::EnableSolvent>() };
     enum { enablePolymer = getPropValue<TypeTag, Properties::EnablePolymer>() };
     enum { enablePolymerMolarWeight = getPropValue<TypeTag, Properties::EnablePolymerMW>() };
     enum { enableFoam = getPropValue<TypeTag, Properties::EnableFoam>() };
     enum { enableBrine = getPropValue<TypeTag, Properties::EnableBrine>() };
-    enum { enableMICP = getPropValue<TypeTag, Properties::EnableMICP>() };
+    enum { enableBioeffects = getPropValue<TypeTag, Properties::EnableBioeffects>() };
     using Toolbox = MathToolbox<Evaluation>;
     using ParentType = Dune::FieldVector<Evaluation, numEq>;
 
@@ -97,6 +94,9 @@ public:
 
     /*!
      * \copydoc ImmiscibleRateVector::setMassRate
+     *
+     * \param value Value to use
+     * \param pvtRegionIdx PVT region index to use
      */
     void setMassRate(const ParentType& value, unsigned pvtRegionIdx = 0)
     {
@@ -105,15 +105,15 @@ public:
         // convert to "surface volume" if requested
         if constexpr (getPropValue<TypeTag, Properties::BlackoilConserveSurfaceVolume>()) {
             if (FluidSystem::phaseIsActive(FluidSystem::gasPhaseIdx)) {
-                (*this)[Indices::canonicalToActiveComponentIndex(FluidSystem::gasCompIdx)] /=
+                (*this)[FluidSystem::canonicalToActiveCompIdx(FluidSystem::gasCompIdx)] /=
                         FluidSystem::referenceDensity(FluidSystem::gasPhaseIdx, pvtRegionIdx);
             }
             if (FluidSystem::phaseIsActive(FluidSystem::oilPhaseIdx)) {
-                (*this)[Indices::canonicalToActiveComponentIndex(FluidSystem::oilCompIdx)] /=
+                (*this)[FluidSystem::canonicalToActiveCompIdx(FluidSystem::oilCompIdx)] /=
                         FluidSystem::referenceDensity(FluidSystem::oilPhaseIdx, pvtRegionIdx);
             }
             if (FluidSystem::phaseIsActive(FluidSystem::waterPhaseIdx)) {
-                (*this)[Indices::canonicalToActiveComponentIndex(FluidSystem::waterCompIdx)] /=
+                (*this)[FluidSystem::canonicalToActiveCompIdx(FluidSystem::waterCompIdx)] /=
                         FluidSystem::referenceDensity(FluidSystem::waterPhaseIdx, pvtRegionIdx);
             }
             if constexpr (enableSolvent) {
@@ -126,6 +126,9 @@ public:
 
     /*!
      * \copydoc ImmiscibleRateVector::setMolarRate
+     *
+     * \param value Value to set to
+     * \param pvtRegionIdx PVT region index to use
      */
     void setMolarRate(const ParentType& value, unsigned pvtRegionIdx = 0)
     {
@@ -156,22 +159,22 @@ public:
             throw std::logic_error("setMolarRate() not implemented for salt water");
         }
 
-        if constexpr (enableMICP) {
-            throw std::logic_error("setMolarRate() not implemented for MICP");
+        if constexpr (enableBioeffects) {
+            throw std::logic_error("setMolarRate() not implemented for bioeffects (biofilm/MICP)");
         }
 
         // convert to "surface volume" if requested
         if constexpr (getPropValue<TypeTag, Properties::BlackoilConserveSurfaceVolume>()) {
             if (FluidSystem::phaseIsActive(FluidSystem::gasPhaseIdx)) {
-                (*this)[Indices::canonicalToActiveComponentIndex(FluidSystem::gasCompIdx)] /=
+                (*this)[FluidSystem::canonicalToActiveCompIdx(FluidSystem::gasCompIdx)] /=
                         FluidSystem::referenceDensity(FluidSystem::gasPhaseIdx, pvtRegionIdx);
             }
             if (FluidSystem::phaseIsActive(FluidSystem::oilPhaseIdx)) {
-                (*this)[Indices::canonicalToActiveComponentIndex(FluidSystem::oilCompIdx)] /=
+                (*this)[FluidSystem::canonicalToActiveCompIdx(FluidSystem::oilCompIdx)] /=
                         FluidSystem::referenceDensity(FluidSystem::oilPhaseIdx, pvtRegionIdx);
             }
             if (FluidSystem::phaseIsActive(FluidSystem::waterPhaseIdx)) {
-                (*this)[Indices::canonicalToActiveComponentIndex(FluidSystem::waterCompIdx)] /=
+                (*this)[FluidSystem::canonicalToActiveCompIdx(FluidSystem::waterCompIdx)] /=
                         FluidSystem::referenceDensity(FluidSystem::waterPhaseIdx, pvtRegionIdx);
             }
             if constexpr (enableSolvent) {

@@ -30,6 +30,8 @@
 #include <opm/common/Exceptions.hpp>
 #include <opm/common/TimingMacros.hpp>
 
+#include <opm/grid/utility/ElementChunks.hpp>
+
 #include <opm/models/discretization/common/fvbaseproperties.hh>
 #include <opm/models/common/multiphasebaseproperties.hh>
 #include <opm/models/utils/parametersystem.hpp>
@@ -202,6 +204,8 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
         using AbstractPreconditionerType = Dune::PreconditionerWithUpdate<Vector, Vector>;
         using WellModelOperator = WellModelAsLinearOperator<WellModel, Vector, Vector>;
         using ElementMapper = GetPropType<TypeTag, Properties::ElementMapper>;
+        using ElementChunksType = ElementChunks<GridView, Dune::Partitions::All>;
+
         constexpr static std::size_t pressureIndex = GetPropType<TypeTag, Properties::Indices>::pressureSwitchIdx;
         
         static constexpr int numEq = Indices::numEq;
@@ -360,6 +364,8 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
 
             // Print parameters to PRT/DBG logs.
             detail::printLinearSolverParameters(parameters_, activeSolverNum_, prm_,  simulator_.gridView().comm());
+
+            element_chunks_ = std::make_unique<ElementChunksType>(simulator_.vanguard().gridView(), Dune::Partitions::all, ThreadManager::maxThreads());
         }
 
         // nothing to clean here
@@ -796,38 +802,46 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
             if (preconditionerType == "cpr" || preconditionerType == "cprt"
                 || preconditionerType == "cprw" || preconditionerType == "cprwt") {
                 const bool transpose = preconditionerType == "cprt" || preconditionerType == "cprwt";
+                const bool enableThreadParallel = this->parameters_[0].cpr_weights_thread_parallel_;
                 const auto weightsType = prm.get("preconditioner.weight_type"s, "quasiimpes"s);
                 if (weightsType == "quasiimpes") {
                     // weights will be created as default in the solver
                     // assignment p = pressureIndex prevent compiler warning about
                     // capturing variable with non-automatic storage duration
-                    weightsCalculator = [matrix, transpose, pressIndex]() {
+                    weightsCalculator = [matrix, transpose, pressIndex, enableThreadParallel]() {
                         return Amg::getQuasiImpesWeights<Matrix, Vector>(matrix,
                                                                          pressIndex,
-                                                                         transpose);
+                                                                         transpose,
+                                                                         enableThreadParallel);
                     };
                 } else if ( weightsType == "trueimpes" ) {
                     weightsCalculator =
-                        [this, pressIndex]
+                        [this, pressIndex, enableThreadParallel]
                         {
                             Vector weights(rhs_->size());
                             ElementContext elemCtx(simulator_);
-                            Amg::getTrueImpesWeights(pressIndex, weights,
-                                                             simulator_.vanguard().gridView(),
-                                                             elemCtx, simulator_.model(),
-                                                             ThreadManager::threadId());
+                            Amg::getTrueImpesWeights(pressIndex,
+                                                     weights,
+                                                     elemCtx,
+                                                     simulator_.model(),
+                                                     *element_chunks_,
+                                                     enableThreadParallel
+                            );
                             return weights;
                         };
                 } else if  (weightsType == "trueimpesanalytic" ) {
                     weightsCalculator =
-                        [this, pressIndex]
+                        [this, pressIndex, enableThreadParallel]
                         {
                             Vector weights(rhs_->size());
                             ElementContext elemCtx(simulator_);
-                            Amg::getTrueImpesWeightsAnalytic(pressIndex, weights,
-                                                             simulator_.vanguard().gridView(),
-                                                             elemCtx, simulator_.model(),
-                                                             ThreadManager::threadId());
+                            Amg::getTrueImpesWeightsAnalytic(pressIndex,
+                                                             weights,
+                                                             elemCtx,
+                                                             simulator_.model(),
+                                                             *element_chunks_,
+                                                             enableThreadParallel
+                            );
                             return weights;
                         };
                 } else {
@@ -886,6 +900,7 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
         std::vector<std::vector<Scalar>> bestpaths_;
 
         std::shared_ptr< CommunicationType > comm_;
+        std::unique_ptr<ElementChunksType> element_chunks_;
     }; // end ISTLSolver
 
 } // namespace Opm

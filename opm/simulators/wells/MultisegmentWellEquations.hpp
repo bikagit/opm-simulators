@@ -31,6 +31,7 @@
 #include <dune/istl/bvector.hh>
 
 #include <memory>
+#include <type_traits>
 
 namespace Dune {
 template<class M> class UMFPack;
@@ -39,15 +40,15 @@ template<class M> class UMFPack;
 namespace Opm
 {
 
-template<class Scalar, int numWellEq, int numEq> class MultisegmentWellEquationAccess;
-template<class Scalar> class MultisegmentWellGeneric;
+template<class Scalar, typename IndexTraits, int numWellEq, int numEq> class MultisegmentWellEquationAccess;
+template<class Scalar, typename IndexTraits> class MultisegmentWellGeneric;
 #if COMPILE_GPU_BRIDGE
 template<class Scalar> class WellContributions;
 #endif
-template<class Scalar> class WellInterfaceGeneric;
-template<class Scalar> class WellState;
+template<typename Scalar, typename IndexTraits> class WellInterfaceGeneric;
+template<typename Scalar, typename IndexTraits> class WellState;
 
-template<class Scalar, int numWellEq, int numEq>
+template<class Scalar, typename IndexTraits, int numWellEq, int numEq>
 class MultisegmentWellEquations
 {
 public:
@@ -70,17 +71,19 @@ public:
     using OffDiagMatrixBlockWellType = Dune::FieldMatrix<Scalar,numWellEq,numEq>;
     using OffDiagMatWell = Dune::BCRSMatrix<OffDiagMatrixBlockWellType>;
 
-    MultisegmentWellEquations(const MultisegmentWellGeneric<Scalar>& well, const ParallelWellInfo<Scalar>& pw_info);
+    MultisegmentWellEquations(const MultisegmentWellGeneric<Scalar, IndexTraits>& well, const ParallelWellInfo<Scalar>& parallel_well_info);
 
     //! \brief Setup sparsity pattern for the matrices.
     //! \param numPerfs Number of perforations
     //! \param cells Cell indices for perforations
     //! \param segment_inlets Cell indices for segment inlets
     //! \param segment_perforations Cell indices for segment perforations
+    //! \param parallel_well_info The parallel well info for parallel wells
     void init(const int numPerfs,
               const std::vector<int>& cells,
               const std::vector<std::vector<int>>& segment_inlets,
-              const std::vector<std::vector<int>>& segment_perforations);
+              const std::vector<std::vector<int>>& segment_perforations,
+              const ParallelWellInfo<Scalar>& parallel_well_info);
 
     //! \brief Set all coefficients to 0.
     void clear();
@@ -119,9 +122,9 @@ public:
                                   const BVector& weights,
                                   const int pressureVarIndex,
                                   const bool /*use_well_weights*/,
-                                  const WellInterfaceGeneric<Scalar>& well,
+                                  const WellInterfaceGeneric<Scalar, IndexTraits>& well,
                                   const int seg_pressure_var_ind,
-                                  const WellState<Scalar>& well_state) const;
+                                  const WellState<Scalar, IndexTraits>& well_state) const;
 
     //! \brief Sum with off-process contribution.
     void sumDistributed(Parallel::Communication comm);
@@ -133,7 +136,7 @@ public:
     }
 
   private:
-    friend class MultisegmentWellEquationAccess<Scalar,numWellEq,numEq>;
+    friend class MultisegmentWellEquationAccess<Scalar,IndexTraits,numWellEq,numEq>;
     // two off-diagonal matrices
     OffDiagMatWell duneB_;
     OffDiagMatWell duneC_;
@@ -143,17 +146,19 @@ public:
     /// \brief solver for diagonal matrix
     ///
     /// This is a shared_ptr as MultisegmentWell is copied in computeWellPotentials...
-    mutable std::shared_ptr<Dune::UMFPack<DiagMatWell>> duneDSolver_;
+    struct EmptyType {};
+    using UMFPackSolver = std::conditional_t<std::is_same_v<Scalar,double>,
+                                             std::shared_ptr<Dune::UMFPack<DiagMatWell>>,
+                                             EmptyType>; // TODO: c++20: add no_unique_address
+    mutable UMFPackSolver duneDSolver_;
 
     // residuals of the well equations
     BVectorWell resWell_;
 
-    const MultisegmentWellGeneric<Scalar>& well_; //!< Reference to well
+    const MultisegmentWellGeneric<Scalar, IndexTraits>& well_; //!< Reference to well
 
     // Store the global index of well perforated cells
     std::vector<int> cells_;
-
-    const ParallelWellInfo<Scalar>& pw_info_;
 
     // Wrapper for the parallel application of B for distributed wells
     mswellhelpers::ParallellMSWellB<OffDiagMatWell> parallelB_;

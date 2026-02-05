@@ -33,11 +33,6 @@
 
 namespace Opm {
 namespace Properties {
-namespace TTag {
-struct FlowGasWaterProblem {
-    using InheritsFrom = std::tuple<FlowProblem>;
-};
-}
 
 template<class TypeTag>
 struct Linearizer<TypeTag, TTag::FlowGasWaterProblem> { using type = TpfaLinearizer<TypeTag>; };
@@ -47,6 +42,10 @@ struct LocalResidual<TypeTag, TTag::FlowGasWaterProblem> { using type = BlackOil
 
 template<class TypeTag>
 struct EnableDiffusion<TypeTag, TTag::FlowGasWaterProblem> { static constexpr bool value = false; };
+
+template<class TypeTag>
+struct EnergyModuleType<TypeTag, TTag::FlowGasWaterProblem>
+{ static constexpr EnergyModules value = EnergyModules::ConstantTemperature; };
 
 //! The indices required by the model
 template<class TypeTag>
@@ -58,17 +57,20 @@ private:
     // messages unfortunately are *really* confusing and not really helpful.
     using BaseTypeTag = TTag::FlowProblem;
     using FluidSystem = GetPropType<BaseTypeTag, Properties::FluidSystem>;
-
+    static constexpr EnergyModules energyModuleType = getPropValue<TypeTag, Properties::EnergyModuleType>();
+    static constexpr int numEnergyVars = energyModuleType == EnergyModules::FullyImplicitThermal;
+    static constexpr bool enableSeqImpEnergy = energyModuleType == EnergyModules::SequentialImplicitThermal;
 public:
     using type = BlackOilTwoPhaseIndices<getPropValue<TypeTag, Properties::EnableSolvent>(),
                                          getPropValue<TypeTag, Properties::EnableExtbo>(),
                                          getPropValue<TypeTag, Properties::EnablePolymer>(),
-                                         getPropValue<TypeTag, Properties::EnableEnergy>(),
+                                         numEnergyVars,
+                                         enableSeqImpEnergy,
                                          getPropValue<TypeTag, Properties::EnableFoam>(),
                                          getPropValue<TypeTag, Properties::EnableBrine>(),
                                          /*PVOffset=*/0,
                                          /*disabledCompIdx=*/FluidSystem::oilCompIdx,
-                                         getPropValue<TypeTag, Properties::EnableMICP>()>;
+                                         getPropValue<TypeTag, Properties::EnableBioeffects>()>;
 };
 }}
 
@@ -95,6 +97,17 @@ int flowGasWaterMainStandalone(int argc, char** argv)
     // Destruct mainObject as the destructor calls MPI_Finalize!
     mainObject.reset();
     return ret;
+}
+
+std::unique_ptr<FlowMain<Properties::TTag::FlowGasWaterProblem>>
+flowGasWaterMainInit(int argc, char** argv, bool outputCout, bool outputFiles)
+{
+    // we always want to use the default locale, and thus spare us the trouble
+    // with incorrect locale settings.
+    resetLocale();
+
+    return std::make_unique<FlowMain<Properties::TTag::FlowGasWaterProblem>>(
+        argc, argv, outputCout, outputFiles);
 }
 
 }

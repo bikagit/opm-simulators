@@ -17,6 +17,10 @@
 #ifndef FLOW_GASWATER_HPP
 #define FLOW_GASWATER_HPP
 
+#include <opm/simulators/flow/TTagFlowProblemGasWater.hpp>
+
+#include <memory>
+
 namespace Opm {
 
 //! \brief Main function used in flow binary.
@@ -25,6 +29,10 @@ int flowGasWaterMain(int argc, char** argv, bool outputCout, bool outputFiles);
 //! \brief Main function used in flow_gaswater binary.
 int flowGasWaterMainStandalone(int argc, char** argv);
 
+template<class TypeTag> class FlowMain;
+
+std::unique_ptr<FlowMain<Properties::TTag::FlowGasWaterProblem>>
+flowGasWaterMainInit(int argc, char** argv, bool outputCout, bool outputFiles);
 }
 
 #endif // FLOW_GASWATER_HPP

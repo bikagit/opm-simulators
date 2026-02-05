@@ -4,7 +4,7 @@
   Copyright 2015 IRIS AS
   Copyright 2014 STATOIL ASA.
   Copyright 2023 Inria
-  
+
   This file is part of the Open Porous Media project (OPM).
 
   OPM is free software: you can redistribute it and/or modify
@@ -24,6 +24,8 @@
 #define OPM_MAIN_HEADER_INCLUDED
 
 #include <opm/input/eclipse/EclipseState/EclipseState.hpp>
+#include <opm/input/eclipse/Schedule/Action/State.hpp>
+#include <opm/input/eclipse/Schedule/UDQ/UDQState.hpp>
 
 #include <opm/models/utils/propertysystem.hh>
 #include <opm/models/utils/parametersystem.hpp>
@@ -228,7 +230,7 @@ protected:
 
 #if HAVE_DAMARIS
         enableDamarisOutput_ = Parameters::Get<Parameters::EnableDamarisOutput>();
-        
+
         // Reset to false as we cannot use Damaris if there is only one rank.
         if ((enableDamarisOutput_ == true) && (FlowGenericVanguard::comm().size() == 1)) {
             std::string msg ;
@@ -253,13 +255,13 @@ protected:
         }
 #endif // HAVE_DAMARIS
 
-        // Guard for when the Damaris core(s) return from damaris_start() 
+        // Guard for when the Damaris core(s) return from damaris_start()
         // which happens when damaris_stop() is called in main simulation
         if (!isSimulationRank_) {
             exitCode = EXIT_SUCCESS;
             return true;
         }
-        
+
         int mpiRank = FlowGenericVanguard::comm().rank();
         outputCout_ = false;
         if (mpiRank == 0)
@@ -401,6 +403,16 @@ private:
     /// \return Simulation's status/exit code.
     int runTwoPhase(const Phases& phases);
 
+    /// Run a simulation with Biofilm effects.
+    ///
+    /// Called from dispatchDynamic_()
+    ///
+    /// \param[in] phases Run's active phases.  Needed to determine whether
+    /// or not the run's phase setup is supported.
+    ///
+    /// \return Simulation's status/exit code.
+    int runBiofilm(const Phases& phases);
+
     /// Run a simulation with polymers.
     ///
     /// Called from dispatchDynamic_()
@@ -475,12 +487,22 @@ private:
     /// \return Simulation's status/exit code.
     int runThermal(const Phases& phases);
 
+    /// Run a regular three-phase simulation with the TEMP option
+    /// With the TEMP option the energy and blackoil eq are solved
+    /// seperatly
+    /// Called from dispatchDynamic_()
+    ///
+    /// \return Simulation's status/exit code.
+    int runBlackOilTemp();
+
     /// Run a regular three-phase simulation without thermal effects.
     ///
     /// Called from dispatchDynamic_()
     ///
     /// \return Simulation's status/exit code.
     int runBlackOil();
+
+
 
     void readDeck(const std::string& deckFilename,
                   const std::string& outputDir,
@@ -498,14 +520,7 @@ private:
                   std::string_view moduleVersion,
                   std::string_view compileTimestamp);
 
-    static int getNumThreads()
-    {
-#ifdef _OPENMP
-        return omp_get_max_threads();
-#else
-        return 1;
-#endif
-    }
+    static int getNumThreads();
 
 #if HAVE_DAMARIS
     void setupDamaris(const std::string& outputDir);

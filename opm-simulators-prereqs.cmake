@@ -1,11 +1,9 @@
 # defines that must be present in config.h for our headers
 set (opm-simulators_CONFIG_VAR
   HAVE_OPM_GRID
-  HAVE_PTHREAD
-  HAVE_EWOMS
   HAVE_MPI
-  HAVE_PETSC
   COMPILE_GPU_BRIDGE
+  HAVE_AVX2_EXTENSION
   HAVE_CUDA
   HAVE_OPENCL
   HAVE_OPENCL_HPP
@@ -30,15 +28,21 @@ set (opm-simulators_CONFIG_VAR
   FLOW_INSTANTIATE_FLOAT
   HAVE_FLOATING_POINT_FROM_CHARS
   OPM_COMPILE_COMPONENTS_TEMPLATE_LIST
-  )
+)
+
+# CMake 3.30.0 requires to find Boost in CONFIG mode
+if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.30.0)
+	set(_Boost_CONFIG_MODE CONFIG)
+endif()
+
+include(CheckAVX2)
+check_for_avx2()
 
 # dependencies
 set (opm-simulators_DEPS
-  # Compile with C99 support if available
-  "C99"
   # Various runtime library enhancements
   "Boost 1.44.0
-    COMPONENTS date_time system unit_test_framework REQUIRED"
+    COMPONENTS date_time REQUIRED ${_Boost_CONFIG_MODE}"
   # DUNE prerequisites
   "dune-common REQUIRED"
   "dune-istl REQUIRED"

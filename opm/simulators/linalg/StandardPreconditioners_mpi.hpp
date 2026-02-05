@@ -22,7 +22,11 @@
 #define OPM_STANDARDPRECONDITIONERS_MPI_HEADER
 
 #if HAVE_CUDA
+#if USE_HIP
+#include <opm/simulators/linalg/gpuistl_hip/PreconditionerCPUMatrixToGPUMatrix.hpp>
+#else
 #include <opm/simulators/linalg/gpuistl/PreconditionerCPUMatrixToGPUMatrix.hpp>
+#endif
 #endif
 
 
@@ -124,7 +128,7 @@ AMGHelper<Operator, Comm, Matrix, Vector>::makeAmgPreconditioner(const Operator&
 }
 
 template <class Operator, class Comm, typename = void> // Note: Last argument is to allow partial specialization for GPU
-struct StandardPreconditioners 
+struct StandardPreconditioners
 {
     static void add()
     {
@@ -247,7 +251,17 @@ struct StandardPreconditioners
                     OPM_THROW(std::invalid_argument, "Properties: No smoother with name " + smoother + ".");
                 }
             });
+#if HAVE_HYPRE
+            if constexpr (M::block_type::rows == 1 && M::block_type::cols == 1
+                          && std::is_same_v<HYPRE_Real, typename V::field_type>) {
+                F::addCreator(
+                    "hypre", [](const O& op, const P& prm, const std::function<V()>&, std::size_t, const C& comm) {
+                        return std::make_shared<Hypre::HyprePreconditioner<M, V, V, C>>(op.getmat(), prm, comm);
+                    });
+            }
+#endif
         }
+
 
         F::addCreator("cpr",
                       [](const O& op,
@@ -328,11 +342,11 @@ struct StandardPreconditioners
             const double w = prm.get<double>("relaxation", 1.0);
             using field_type = typename V::field_type;
             using GpuJac =
-                typename gpuistl::GpuJac<gpuistl::GpuSparseMatrix<field_type>, gpuistl::GpuVector<field_type>, gpuistl::GpuVector<field_type>>;
-            
-            using MatrixOwner = Opm::gpuistl::PreconditionerCPUMatrixToGPUMatrix<gpuistl::GpuVector<field_type>, 
+                typename gpuistl::GpuJac<gpuistl::GpuSparseMatrixWrapper<field_type>, gpuistl::GpuVector<field_type>, gpuistl::GpuVector<field_type>>;
+
+            using MatrixOwner = Opm::gpuistl::PreconditionerCPUMatrixToGPUMatrix<gpuistl::GpuVector<field_type>,
                 gpuistl::GpuVector<field_type>, GpuJac, M>;
-           
+
             auto gpuJac = std::make_shared<MatrixOwner>(op.getmat(), w);
 
             auto adapted = std::make_shared<gpuistl::PreconditionerAdapter<V, V, MatrixOwner>>(gpuJac);
@@ -347,9 +361,9 @@ struct StandardPreconditioners
             const bool reorder = prm.get<bool>("reorder", true);
             using field_type = typename V::field_type;
             using GpuDILU = typename gpuistl::GpuDILU<M, gpuistl::GpuVector<field_type>, gpuistl::GpuVector<field_type>>;
-            using MatrixOwner = Opm::gpuistl::PreconditionerCPUMatrixToGPUMatrix<gpuistl::GpuVector<field_type>, 
+            using MatrixOwner = Opm::gpuistl::PreconditionerCPUMatrixToGPUMatrix<gpuistl::GpuVector<field_type>,
                 gpuistl::GpuVector<field_type>, GpuDILU, M>;
-        
+
             // Note: op.getmat() is passed twice, because the GpuDILU needs both the CPU and GPU matrix.
             // The first argument will be converted to a GPU matrix, and the second one is used as a CPU matrix.
             auto gpuDILU = std::make_shared<MatrixOwner>(op.getmat(), op.getmat(), split_matrix, tune_gpu_kernels, mixed_precision_scheme, reorder);
@@ -366,9 +380,9 @@ struct StandardPreconditioners
             using field_type = typename V::field_type;
             using OpmGpuILU0 = typename gpuistl::OpmGpuILU0<M, gpuistl::GpuVector<field_type>, gpuistl::GpuVector<field_type>>;
 
-            using MatrixOwner = Opm::gpuistl::PreconditionerCPUMatrixToGPUMatrix<gpuistl::GpuVector<field_type>, 
+            using MatrixOwner = Opm::gpuistl::PreconditionerCPUMatrixToGPUMatrix<gpuistl::GpuVector<field_type>,
                 gpuistl::GpuVector<field_type>, OpmGpuILU0, M>;
-    
+
             // Note: op.getmat() is passed twice, because the OPMGPUILU0 needs both the CPU and GPU matrix.
             // The first argument will be converted to a GPU matrix, and the second one is used as a CPU matrix.
             auto gpuilu0 = std::make_shared<MatrixOwner>(op.getmat(), op.getmat(), split_matrix, tune_gpu_kernels, mixed_precision_scheme);

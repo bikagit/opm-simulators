@@ -26,11 +26,12 @@
 #include <opm/input/eclipse/Schedule/Well/WellEnums.hpp>
 #include <opm/input/eclipse/Schedule/Events.hpp>
 
+#include <opm/material/fluidsystems/PhaseUsageInfo.hpp>
+
 #include <opm/simulators/wells/SegmentState.hpp>
 #include <opm/simulators/wells/PerfData.hpp>
 #include <opm/simulators/wells/ParallelWellInfo.hpp>
 #include <opm/simulators/wells/ALQState.hpp>
-#include <opm/simulators/utils/BlackoilPhases.hpp>
 
 namespace Opm {
 
@@ -38,15 +39,19 @@ template<class Scalar> struct PerforationData;
 class SummaryState;
 class Well;
 
-template<class Scalar>
+template<typename Scalar, typename IndexTraits>
 class SingleWellState {
 public:
+    static const int waterPhaseIdx = PhaseUsageInfo<IndexTraits>::waterPhaseIdx;
+    static const int oilPhaseIdx = PhaseUsageInfo<IndexTraits>::oilPhaseIdx;
+    static const int gasPhaseIdx = PhaseUsageInfo<IndexTraits>::gasPhaseIdx;
+
     SingleWellState(const std::string& name,
                     const ParallelWellInfo<Scalar>& pinfo,
+                    const PhaseUsageInfo<IndexTraits>& pu,
                     bool is_producer,
-                    Scalar presssure_first_connection,
+                    Scalar pressure_first_connection,
                     const std::vector<PerforationData<Scalar>>& perf_input,
-                    const PhaseUsage& pu,
                     Scalar temp);
 
     static SingleWellState serializationTestObject(const ParallelWellInfo<Scalar>& pinfo);
@@ -59,7 +64,9 @@ public:
         serializer(producer);
         serializer(bhp);
         serializer(thp);
+        serializer(pressure_first_connection);
         serializer(temperature);
+        serializer(energy_rate);
         serializer(efficiency_scaling_factor);
         serializer(phase_mixing_rates);
         serializer(well_potentials);
@@ -79,6 +86,7 @@ public:
         serializer(primaryvar);
         serializer(alq_state);
         serializer(group_target);
+        serializer(was_shut_before_action_applied);
     }
 
     bool operator==(const SingleWellState&) const;
@@ -88,10 +96,15 @@ public:
 
     WellStatus status{WellStatus::OPEN};
     bool producer;
-    PhaseUsage pu;
+    PhaseUsageInfo<IndexTraits> pu;
     Scalar bhp{0};
     Scalar thp{0};
+    Scalar pressure_first_connection{0};
+
+    // thermal related
     Scalar temperature{0};
+    Scalar energy_rate{0.};
+
     Scalar efficiency_scaling_factor{1.0};
 
     // filtration injection concentration
@@ -105,6 +118,21 @@ public:
       vaporized_water = 3
     };
 
+    struct GroupTarget {
+        std::string group_name;
+        Scalar target_value;
+
+        bool operator==(const GroupTarget& other) const {
+            return group_name == other.group_name && target_value == other.target_value;
+        }
+
+        template<class Serializer>
+        void serializeOp(Serializer& serializer) {
+            serializer(group_name);
+            serializer(target_value);
+        }
+    };
+
     std::vector<Scalar> well_potentials;
     std::vector<Scalar> productivity_index;
     std::vector<Scalar> implicit_ipr_a;
@@ -114,13 +142,17 @@ public:
     std::vector<Scalar> prev_surface_rates;
     PerfData<Scalar> perf_data;
     bool trivial_group_target;
-    std::optional<Scalar> group_target;
+    std::optional<GroupTarget> group_target;
     SegmentState<Scalar> segments;
     Events events;
     WellInjectorCMode injection_cmode{WellInjectorCMode::CMODE_UNDEFINED};
     WellProducerCMode production_cmode{WellProducerCMode::CMODE_UNDEFINED};
     std::vector<Scalar> primaryvar;
     ALQState<Scalar> alq_state;
+    // This is used to indicate whether the well was shut before applying an action
+    // if it was SHUT, even the action set the well to OPEN, the data in the well state
+    // is not well-defined. We do not use it to overwrite the current well state.
+    bool was_shut_before_action_applied {false};
 
     /// Special purpose method to support dynamically rescaling a well's
     /// CTFs through WELPI.
@@ -137,7 +169,7 @@ public:
     /// in ecl_well and st.
     /// \return whether well was switched to a producer
     void update_type_and_targets(const Well& ecl_well, const SummaryState& st);
-    void updateStatus(WellStatus status);
+    bool updateStatus(WellStatus status);
     void init_timestep(const SingleWellState& other);
     void shut();
     void stop();

@@ -21,14 +21,19 @@
 #include <opm/grid/CpGrid.hpp>
 
 #include <opm/material/common/ResetLocale.hpp>
-#include <opm/models/blackoil/blackoilonephaseindices.hh>
 #include <opm/models/blackoil/blackoillocalresidualtpfa.hh>
+#include <opm/models/blackoil/blackoilonephaseindices.hh>
 #include <opm/models/discretization/common/tpfalinearizer.hh>
 
 #include <opm/simulators/flow/Main.hpp>
 #include <opm/simulators/flow/SimulatorFullyImplicitBlackoil.hpp>
 
 namespace Opm {
+/*!
+ * \brief Single-phase (water) flow problem including microbially induced calcite precipitation (MICP)
+ * effects (three transported quantities: suspended microbes, oxygen, and urea, and two solid phases:
+ * biofilm and calcite).
+ */
 namespace Properties {
 namespace TTag {
 struct FlowMICPProblem {
@@ -36,7 +41,7 @@ struct FlowMICPProblem {
 };
 }
 template<class TypeTag>
-struct EnableMICP<TypeTag, TTag::FlowMICPProblem> {
+struct EnableBioeffects<TypeTag, TTag::FlowMICPProblem> {
     static constexpr bool value = true;
 };
 template<class TypeTag>
@@ -53,12 +58,15 @@ private:
     // messages unfortunately are *really* confusing and not really helpful.
     using BaseTypeTag = TTag::FlowProblem;
     using FluidSystem = GetPropType<BaseTypeTag, Properties::FluidSystem>;
-
+    static constexpr EnergyModules energyModuleType = getPropValue<TypeTag, Properties::EnergyModuleType>();
+    static constexpr int numEnergyVars = energyModuleType == EnergyModules::FullyImplicitThermal;
+    static constexpr bool enableSeqImpEnergy = energyModuleType == EnergyModules::SequentialImplicitThermal;
 public:
     using type = BlackOilOnePhaseIndices<getPropValue<TypeTag, Properties::EnableSolvent>(),
                                          getPropValue<TypeTag, Properties::EnableExtbo>(),
                                          getPropValue<TypeTag, Properties::EnablePolymer>(),
-                                         getPropValue<TypeTag, Properties::EnableEnergy>(),
+                                         numEnergyVars,
+                                         enableSeqImpEnergy,
                                          getPropValue<TypeTag, Properties::EnableFoam>(),
                                          getPropValue<TypeTag, Properties::EnableBrine>(),
                                          /*PVOffset=*/0,

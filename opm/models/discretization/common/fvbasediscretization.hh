@@ -403,7 +403,7 @@ public:
         , enableIntensiveQuantityCache_(Parameters::Get<Parameters::EnableIntensiveQuantityCache>())
         , enableStorageCache_(Parameters::Get<Parameters::EnableStorageCache>())
         , enableThermodynamicHints_(Parameters::Get<Parameters::EnableThermodynamicHints>())
-        , cachedIntensiveQuantityHistorySize_(-1)
+        , cachedIntensiveQuantityHistorySize_(static_cast<unsigned>(-1))
     {
         const bool isEcfv = std::is_same_v<Discretization, EcfvDiscretization<TypeTag>>;
         if (enableGridAdaptation_ && !isEcfv) {
@@ -687,6 +687,7 @@ public:
      * \param globalIdx The global space index for the entity where a
      *                  hint is to be set.
      * \param timeIdx The index used by the time discretization.
+     * \param newValue New validity value
      */
     void setIntensiveQuantitiesCacheEntryValidity(unsigned globalIdx,
                                                   unsigned timeIdx,
@@ -768,7 +769,7 @@ public:
                     setIntensiveQuantitiesCacheEntryValidity(globalIndex, timeIdx, false);
                 }
                 // Update for this element.
-                elemCtx.updatePrimaryIntensiveQuantities(/*timeIdx=*/0);
+                elemCtx.updatePrimaryIntensiveQuantities(timeIdx);
             }
         }
     }
@@ -836,7 +837,7 @@ public:
      * \attention If the storage cache is disabled, or if the entry is not up to date,
      *            this method will throw a std::logic_error.
      *
-     * \param globalDofIdx The index of the relevant degree of freedom in a grid-global vector
+     * \param globalIdx The index of the relevant degree of freedom in a grid-global vector
      * \param timeIdx The relevant index for the time discretization
      */
     const EqVector& cachedStorage(unsigned globalIdx, unsigned timeIdx) const
@@ -859,7 +860,7 @@ public:
      * volume unit at a given time. The user is responsible for making sure that the
      * storage cache is enabled before this method is called.
      *
-     * \param globalDofIdx The index of the relevant degree of freedom in a grid-global vector
+     * \param globalIdx The index of the relevant degree of freedom in a grid-global vector
      * \param timeIdx The relevant index for the time discretization
      * \param value The new value of the cache for the storage term
      */
@@ -2016,7 +2017,7 @@ protected:
     // while these are logically bools, concurrent writes to vector<bool> are not thread safe.
     mutable std::vector<std::vector<unsigned char>> intensiveQuantityCacheUpToDate_;
 
-    mutable std::array<std::unique_ptr<DiscreteFunction>, historySize> solution_;
+    std::array<std::unique_ptr<DiscreteFunction>, historySize> solution_;
 
     std::list<std::unique_ptr<BaseOutputModule<TypeTag>>> outputModules_;
 

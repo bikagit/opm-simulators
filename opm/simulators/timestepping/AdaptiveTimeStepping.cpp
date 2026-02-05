@@ -8,6 +8,7 @@
 
 #include <opm/input/eclipse/Units/Units.hpp>
 
+#include <opm/simulators/flow/FlowGenericVanguard.hpp>
 #include <opm/simulators/timestepping/AdaptiveSimulatorTimer.hpp>
 #include <opm/simulators/timestepping/ConvergenceReport.hpp>
 
@@ -40,11 +41,15 @@ consistentlyFailingWells(const std::vector<StepReport>& sr, bool requireRepeated
 {
     // If there are wells that cause repeated failures, we
     // close them, and restart the un-chopped timestep.
+    std::set<std::string> failing_wells;
+
+    if (sr.empty()) {
+        return failing_wells;
+    }
+
     std::ostringstream msg;
     msg << "    Excessive chopping detected in report step "
         << sr.back().report_step << ", substep " << sr.back().current_step << "\n";
-
-    std::set<std::string> failing_wells;
 
     // return empty set if no report exists
     // well failures in assembly is not yet registred
@@ -110,8 +115,9 @@ void registerAdaptiveParameters()
          "'pid+iteration', "
          "'pid+newtoniteration', "
          "'iterationcount', "
-        "'newtoniterationcount' "
-        "and 'hardcoded'");
+         "'newtoniterationcount', "
+         "'general3rdorder', "
+         "and 'hardcoded'");
     Parameters::Register<Parameters::TimeStepControlTolerance>
         ("The tolerance used by the time step size control algorithm");
     Parameters::Register<Parameters::TimeStepControlTargetIterations>
@@ -143,28 +149,29 @@ void registerAdaptiveParameters()
         ("Value to be multiplied with the time step control tolerance to ensure that the target "
          "relative change is lower than the tolerance");
     Parameters::Register<Parameters::TimeStepControlRejectCompletedStep>
-        ("(Only applicable for the general 3rd order controller.) Include rejection of completed "
+        ("Only applicable for the general 3rd order controller. Include rejection of completed "
          "time steps if the relative change is larger than the time step control tolerance");
     Parameters::Register<Parameters::TimeStepControlToleranceTestVersion>
-        ("(Only applicable for the general 3rd order controller.) Ways to decide if the time step "
+        ("Only applicable for the general 3rd order controller. Ways to decide if the time step "
          "should be rejected. Options: 'standard' and 'control-error-filtering'. The standard "
          "version compares relative change to tolerance directly to decide if the time step should "
          "be rejected, while the control-error-filtering version compares the relative change "
-         "in time step size to the max-reduction-time-step parameter.");
+         "in time step size to the max-reduction-time-step parameter");
     Parameters::Register<Parameters::TimeStepControlMaxReductionTimeStep>
-        ("(Only applicable for the general 3rd order controller, using 'control-error-filtering' "
-         "as time-step-control-tolerance-test-version) If the (proposed) relative change in time "
-         "step size is larger than this parameter, the time step will be rejected.");
+        ("Only applicable for the general 3rd order controller, using 'control-error-filtering' "
+         "as time-step-control-tolerance-test-version. If the (proposed) relative change in time "
+         "step size is larger than this parameter, the time step will be rejected");
     Parameters::Register<Parameters::TimeStepControlParameters>
-        ("(Only applicable for the general 3rd order controller.) Parameters for the general "
-         "3rd order controller. Should be given as 'beta_1;beta_2;beta_3;alpha_2;alpha_3'.");
+        ("Only applicable for the general 3rd order controller. Parameters for the general "
+         "3rd order controller. Should be given as 'beta_1;beta_2;beta_3;alpha_2;alpha_3'");
 }
 
 std::tuple<TimeStepControlType, std::unique_ptr<TimeStepControlInterface>, bool>
 createController(const UnitSystem& unitSystem)
 {
     const double tol =  Parameters::Get<Parameters::TimeStepControlTolerance>();
-    const bool verbose = Parameters::Get<Parameters::TimeStepVerbosity>();
+    const auto& comm = FlowGenericVanguard::comm();
+    const bool verbose = Parameters::Get<Parameters::TimeStepVerbosity>() && (comm.rank() == 0);
     using RetVal = std::tuple<TimeStepControlType, std::unique_ptr<TimeStepControlInterface>, bool>;
     using Func = std::function<RetVal()>;
     const auto creators = std::unordered_map<std::string, Func> {

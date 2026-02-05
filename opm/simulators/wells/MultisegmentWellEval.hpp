@@ -40,19 +40,21 @@ class Schedule;
 class SummaryState;
 
 template<class FluidSystem, class Indices> class WellInterfaceIndices;
-template<class Scalar> class WellState;
+template<typename Scalar, typename IndexTraits> class WellState;
 
 template<typename FluidSystem, typename Indices>
-class MultisegmentWellEval : public MultisegmentWellGeneric<typename FluidSystem::Scalar>
+class MultisegmentWellEval : public MultisegmentWellGeneric<typename FluidSystem::Scalar,
+                                                            typename FluidSystem::IndexTraitsType>
 {
 protected:
     using Scalar = typename FluidSystem::Scalar;
+    using IndexTraits = typename FluidSystem::IndexTraitsType;
     using PrimaryVariables = MultisegmentWellPrimaryVariables<FluidSystem,Indices>;
     static constexpr int numWellEq = PrimaryVariables::numWellEq;
     static constexpr int SPres = PrimaryVariables::SPres;
     static constexpr int WQTotal = PrimaryVariables::WQTotal;
 
-    using Equations = MultisegmentWellEquations<Scalar,numWellEq,Indices::numEq>;
+    using Equations = MultisegmentWellEquations<Scalar, IndexTraits, numWellEq, Indices::numEq>;
     using MSWSegments = MultisegmentWellSegments<FluidSystem,Indices>;
 
     using BVector = typename Equations::BVector;
@@ -62,45 +64,44 @@ protected:
     //                                                         EvalR (Eval), EvalW, EvalRW
     // TODO: for now, we only use one type to save some implementation efforts, while improve later.
     using EvalWell = typename PrimaryVariables::EvalWell;
-    using Eval = DenseAd::Evaluation<Scalar, /*size=*/Indices::numEq>;
+    using Eval = DenseAd::Evaluation<Scalar, /*size=*/Indices::numDerivatives>;
 
 public:
     //! \brief Returns a const reference to equation system.
     const Equations& linSys() const
     { return linSys_; }
-    const ParallelWellInfo<Scalar>& pw_info_;
 
 protected:
-    MultisegmentWellEval(WellInterfaceIndices<FluidSystem,Indices>& baseif, const ParallelWellInfo<Scalar>& pw_info);
+    MultisegmentWellEval(WellInterfaceIndices<FluidSystem, Indices>& baseif, const ParallelWellInfo<Scalar>& parallel_well_info);
 
-    void initMatrixAndVectors();
+    void initMatrixAndVectors(const ParallelWellInfo<Scalar>& parallel_well_info);
 
     void assembleDefaultPressureEq(const int seg,
-                                   WellState<Scalar>& well_state,
+                                   WellState<Scalar, IndexTraits>& well_state,
                                    const bool use_average_density);
 
     // assemble pressure equation for ICD segments
     void assembleICDPressureEq(const int seg,
                                const UnitSystem& unit_system,
-                               WellState<Scalar>& well_state,
+                               WellState<Scalar, IndexTraits>& well_state,
                                const SummaryState& summary_state,
                                const bool use_average_density,
                                DeferredLogger& deferred_logger);
 
     void assembleAccelerationAndHydroPressureLosses(const int seg,
-                                                    WellState<Scalar>& well_state,
+                                                    WellState<Scalar, IndexTraits>& well_state,
                                                     const bool use_average_density);
 
 
     void assemblePressureEq(const int seg,
                             const UnitSystem& unit_system,
-                            WellState<Scalar>& well_state,
+                            WellState<Scalar, IndexTraits>& well_state,
                             const SummaryState& summary_state,
                             const bool use_average_density,
                             DeferredLogger& deferred_logger);
 
     /// check whether the well equations get converged for this well
-    ConvergenceReport getWellConvergence(const WellState<Scalar>& well_state,
+    ConvergenceReport getWellConvergence(const WellState<Scalar, IndexTraits>& well_state,
                                          const std::vector<Scalar>& B_avg,
                                          DeferredLogger& deferred_logger,
                                          const Scalar max_residual_allowed,
@@ -108,29 +109,26 @@ protected:
                                          const Scalar relaxed_inner_tolerance_flow_ms_well,
                                          const Scalar tolerance_pressure_ms_wells,
                                          const Scalar relaxed_inner_tolerance_pressure_ms_well,
-                                         const bool relax_tolerance, 
+                                         const bool relax_tolerance,
                                          const bool well_is_stopped) const;
 
     std::pair<bool, std::vector<Scalar> >
     getFiniteWellResiduals(const std::vector<Scalar>& B_avg,
                            DeferredLogger& deferred_logger) const;
 
-    Scalar getControlTolerance(const WellState<Scalar>& well_state,
+    Scalar getControlTolerance(const WellState<Scalar, IndexTraits>& well_state,
                                const Scalar tolerance_wells,
                                const Scalar tolerance_pressure_ms_wells,
                                DeferredLogger& deferred_logger) const;
 
-    Scalar getResidualMeasureValue(const WellState<Scalar>& well_state,
+    Scalar getResidualMeasureValue(const WellState<Scalar, IndexTraits>& well_state,
                                    const std::vector<Scalar>& residuals,
                                    const Scalar tolerance_wells,
                                    const Scalar tolerance_pressure_ms_wells,
                                    DeferredLogger& deferred_logger) const;
 
     void assembleAccelerationPressureLoss(const int seg,
-                                          WellState<Scalar>& well_state);
-
-    EvalWell pressureDropAutoICD(const int seg,
-                                 const UnitSystem& unit_system) const;
+                                          WellState<Scalar, IndexTraits>& well_state);
 
     // convert a Eval from reservoir to contain the derivative related to wells
     EvalWell extendEval(const Eval& in) const;

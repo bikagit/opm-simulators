@@ -36,6 +36,10 @@ namespace Opm::Parameters {
 // the source term of the next time step
 struct EnableDriftCompensation { static constexpr bool value = false; };
 
+// Enable compensation of systematic mass losses in
+// the sequential energy equation
+struct EnableDriftCompensationTemp { static constexpr bool value = true; };
+
 // implicit or explicit pressure in rock compaction
 struct ExplicitRockCompaction { static constexpr bool value = false; };
 
@@ -55,6 +59,15 @@ struct OutputMode { static constexpr auto value = "all"; };
 // The frequency of writing restart (*.ers) files. This is the number of time steps
 // between writing restart files
 struct RestartWritingInterval { static constexpr int value = 0xffffff; }; // disable
+
+// Path to the config file containing all Hybrid Newton parameters
+struct HybridNewtonConfigFile { static constexpr auto value = "hybridNewtonConfig.json"; };
+
+// Wheter or not to use Hybrid Newton nonlinear preconditioning
+struct UseHybridNewton { static constexpr bool value = false; };
+
+// Conserve inner energy instead of enthalpy even if THERMAL is used
+struct ConserveInnerEnergyThermal { static constexpr bool value = false; };
 
 } // namespace Opm::Parameters
 

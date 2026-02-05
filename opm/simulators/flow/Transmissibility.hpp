@@ -173,7 +173,11 @@ protected:
 
     /// \brief Apply the Multipliers for the case PINCH(4)==TOPBOT
     ///
-    /// \param pinchTop Whether PINCH(5) is TOP, otherwise ALL is assumed.
+    /// \param trans Resulting transmissibility
+    /// \param inside Info describing inside face
+    /// \param outside Info describing outside face
+    /// \param transMult Transmissibility multiplier info
+    /// \param cartDims Cartesian dimensions of grid
     void applyAllZMultipliers_(Scalar& trans,
                                const FaceInfo& inside,
                                const FaceInfo& outside,
@@ -226,7 +230,9 @@ protected:
     ///
     /// \param cartesianToCompressed Vector containing the compressed index (or -1 for inactive
     ///                              cells) as the element at the cartesian index.
-    void applyPinchNncToGridTrans_(const std::unordered_map<std::size_t,int>& cartesianToCompressed);
+    /// \param applyNncMultregT      True to apply NNC to region transmissibility multipliers
+    void applyPinchNncToGridTrans_(const std::unordered_map<std::size_t,int>& cartesianToCompressed,
+                                   bool applyNncMultregT);
 
     /// \brief Multiplies the grid transmissibilities according to EDITNNC.
     void applyEditNncToGridTrans_(const std::unordered_map<std::size_t,int>& globalToLocal);

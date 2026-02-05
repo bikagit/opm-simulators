@@ -43,11 +43,12 @@ template<unsigned numSolventsV,
          unsigned numExtbosV,
          unsigned numPolymersV,
          unsigned numEnergyV,
+         bool enableSequentialImplicitThermal,
          bool enableFoam,
          bool enableBrine,
-         unsigned PVOffset,
+         int PVOffset,
          unsigned disabledCanonicalCompIdx,
-         unsigned numMICPsV>
+         unsigned numBioCompV>
 struct BlackOilTwoPhaseIndices
 {
     //! Is phase enabled or not
@@ -65,10 +66,13 @@ struct BlackOilTwoPhaseIndices
     static constexpr bool enablePolymer = numPolymersV > 0;
 
     //! Shall energy be conserved?
-    static constexpr bool enableEnergy = numEnergyV > 0;
+    static constexpr bool enableFullyImplicitThermal = numEnergyV > 0;
 
-    //! Is MICP involved?
-    static constexpr bool enableMICP = numMICPsV > 0;
+    //! MICP only available for one phase indices
+    static constexpr bool enableMICP = false;
+
+    //! Are biofilms involved?
+    static constexpr bool enableBiofilm = numBioCompV > 0;
 
     //! Number of solvent components to be considered
     static constexpr int numSolvents = enableSolvent ? numSolventsV : 0;
@@ -80,7 +84,7 @@ struct BlackOilTwoPhaseIndices
     static constexpr int numPolymers = enablePolymer ? numPolymersV : 0;
 
     //! Number of energy equations to be considered
-    static constexpr int numEnergy = enableEnergy ? numEnergyV : 0;
+    static constexpr int numEnergy = enableFullyImplicitThermal ? numEnergyV : 0;
 
     //! Number of foam equations to be considered
     static constexpr int numFoam = enableFoam? 1 : 0;
@@ -88,15 +92,21 @@ struct BlackOilTwoPhaseIndices
     //! Number of salt equations to be considered
     static constexpr int numBrine = enableBrine? 1 : 0;
 
+    //! Number of biofilm equations to be considered
+    static constexpr int numBioComp = enableBiofilm ? numBioCompV : 0;
+
+    //! Number of biocomponents in the water phase
+    static constexpr int numBioInWat = enableBiofilm ? 1 : 0;
+
     //! The number of fluid phases
     static constexpr int numPhases = 2;
 
-    //! Number of MICP components to be considered
-    static constexpr int numMICPs = enableMICP ? numMICPsV : 0;
-
     //! The number of equations
     static constexpr int numEq = numPhases + numSolvents + numExtbos + numPolymers +
-                                 numEnergy + numFoam + numBrine + numMICPs;
+                                 numEnergy + numFoam + numBrine + numBioComp;
+
+    //! For seqential implicit approches we evaluate the intensive quantities with a larger number of derivatives than equations
+    static constexpr int numDerivatives = numEq + enableSequentialImplicitThermal;
 
     //////////////////////////////
     // Primary variable indices
@@ -144,80 +154,34 @@ struct BlackOilTwoPhaseIndices
     static constexpr int polymerMoleWeightIdx =
         numPolymers > 1 ? polymerConcentrationIdx + 1 : -1000;
 
-    //! Index of the primary variable for the first MICP component
+    //! Index of the primary variable for the first microbial component
     static constexpr int microbialConcentrationIdx =
-        enableMICP ? PVOffset + numPhases + numSolvents : -1000;
+        enableBiofilm ? PVOffset + numPhases + numSolvents : -1000;
 
-    //! Index of the primary variable for the second MICP component
-    static constexpr int oxygenConcentrationIdx =
-        numMICPs > 1 ? microbialConcentrationIdx + 1 : -1000;
+    //! Index of the primary variable for the biofilm component
+    static constexpr int biofilmVolumeFractionIdx =
+        enableBiofilm ? PVOffset + numPhases + numSolvents + 1 : -1000;
 
-    //! Index of the primary variable for the third MICP component
-    static constexpr int ureaConcentrationIdx =
-        numMICPs > 2 ? oxygenConcentrationIdx + 1 : -1000;
-
-    //! Index of the primary variable for the fourth MICP component
-    static constexpr int biofilmConcentrationIdx =
-        numMICPs > 3 ? ureaConcentrationIdx + 1 : -1000;
-
-    //! Index of the primary variable for the fifth MICP component
-    static constexpr int calciteConcentrationIdx =
-        numMICPs > 4 ? biofilmConcentrationIdx + 1 : -1000;
+    //! MICP only available for one phase indices
+    static constexpr int oxygenConcentrationIdx = -1000;
+    static constexpr int ureaConcentrationIdx = -1000;
+    static constexpr int calciteVolumeFractionIdx = -1000;
 
     //! Index of the primary variable for the foam
     static constexpr int foamConcentrationIdx =
-        enableFoam ? PVOffset + numPhases + numSolvents + numPolymers + numMICPs : -1000;
+        enableFoam ? PVOffset + numPhases + numSolvents + numPolymers + numBioComp : -1000;
 
     //! Index of the primary variable for the salt
     static constexpr int saltConcentrationIdx =
-        enableBrine ? PVOffset + numPhases + numSolvents + numPolymers + numMICPs + numFoam : -1000;
+        enableBrine ? PVOffset + numPhases + numSolvents + numPolymers + numBioComp + numFoam : -1000;
 
     //! Index of the primary variable for temperature
     static constexpr int temperatureIdx  =
-        enableEnergy ? PVOffset + numPhases + numSolvents + numExtbos + numPolymers + numMICPs + numFoam + numBrine : - 1000;
+        (enableSequentialImplicitThermal || enableFullyImplicitThermal) ? PVOffset + numPhases + numSolvents + numExtbos + numPolymers + numBioComp + numFoam + numBrine : - 1000;
 
     //////////////////////
     // Equation indices
     //////////////////////
-
-    //! \brief returns the index of "active" component
-    static constexpr int canonicalToActiveComponentIndex(const int compIdx)
-    {
-        // assumes canonical oil = 0, water = 1, gas = 2;
-        if (!gasEnabled) {
-            constexpr_assert(compIdx != 2);
-            // oil = 0, water = 1
-            return compIdx;
-        } else if (!waterEnabled) {
-            constexpr_assert(compIdx != 1);
-            // oil = 0, gas = 1
-            return compIdx / 2;
-        } else {
-            constexpr_assert(!oilEnabled);
-            constexpr_assert(compIdx != 0);
-        }
-
-        // water = 0, gas = 1;
-        return compIdx - 1;
-    }
-
-    static constexpr int activeToCanonicalComponentIndex(const int compIdx)
-    {
-        // assumes canonical oil = 0, water = 1, gas = 2;
-        constexpr_assert(compIdx < 2);
-        if (!gasEnabled) {
-            // oil = 0, water = 1
-            return compIdx;
-        } else if (!waterEnabled) {
-            // oil = 0, gas = 1
-            return compIdx * 2;
-        } else {
-            constexpr_assert(!oilEnabled);
-        }
-
-        // water = 0, gas = 1;
-        return compIdx + 1;
-    }
 
     //! Index of the continuity equation of the first phase
     static constexpr int conti0EqIdx = PVOffset + 0;
@@ -239,37 +203,30 @@ struct BlackOilTwoPhaseIndices
     static constexpr int contiPolymerMWEqIdx =
         numPolymers > 1 ? contiPolymerEqIdx + 1 : -1000;
 
-    //! Index of the continuity equation for the first MICP component
+    //! Index of the continuity equation for the first microbial component
     static constexpr int contiMicrobialEqIdx =
-        enableMICP ? PVOffset + numPhases + numSolvents : -1000;
+        enableBiofilm ? PVOffset + numPhases + numSolvents : -1000;
 
-    //! Index of the continuity equation for the second MICP component
-    static constexpr int contiOxygenEqIdx =
-        numMICPs > 1 ? contiMicrobialEqIdx + 1 : -1000;
-
-    //! Index of the continuity equation for the third MICP component
-    static constexpr int contiUreaEqIdx =
-        numMICPs > 2 ? contiOxygenEqIdx + 1 : -1000;
-
-    //! Index of the continuity equation for the fourth MICP component
+    //! Index of the continuity equation for the biofilm component
     static constexpr int contiBiofilmEqIdx =
-        numMICPs > 3 ? contiUreaEqIdx + 1 : -1000;
+        enableBiofilm ? PVOffset + numPhases + numSolvents + 1 : -1000;
 
-    //! Index of the continuity equation for the fifth MICP component
-    static constexpr int contiCalciteEqIdx =
-        numMICPs > 4 ? contiBiofilmEqIdx + 1 : -1000;
+    //! MICP only available for one phase indices
+    static constexpr int contiOxygenEqIdx = -1000;
+    static constexpr int contiUreaEqIdx = -1000;
+    static constexpr int contiCalciteEqIdx = -1000;
 
     //! Index of the continuity equation for the foam component
     static constexpr int contiFoamEqIdx =
-        enableFoam ? PVOffset + numPhases + numSolvents + numPolymers + numMICPs : -1000;
+        enableFoam ? PVOffset + numPhases + numSolvents + numPolymers + numBioComp : -1000;
 
     //! Index of the continuity equation for the salt component
     static constexpr int contiBrineEqIdx =
-        enableBrine ? PVOffset + numPhases + numSolvents + numPolymers + numMICPs + numFoam : -1000;
+        enableBrine ? PVOffset + numPhases + numSolvents + numPolymers + numBioComp + numFoam : -1000;
 
     //! Index of the continuity equation for energy
     static constexpr int contiEnergyEqIdx =
-        enableEnergy ? PVOffset + numPhases + numSolvents + numExtbos + numPolymers + numMICPs + numFoam + numBrine: -1000;
+        enableFullyImplicitThermal ? PVOffset + numPhases + numSolvents + numExtbos + numPolymers + numBioComp + numFoam + numBrine: -1000;
 };
 
 } // namespace Opm

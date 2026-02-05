@@ -206,7 +206,7 @@ update(bool global, const TransUpdateQuantities update_quantities,
     transBoundary_.clear();
 
     // if energy is enabled, let's do the same for the "thermal half transmissibilities"
-    if (enableEnergy_ && !onlyTrans) {
+    if ( enableEnergy_ && !onlyTrans) {
         thermalHalfTrans_.clear();
         if (num_threads == 1) {
             thermalHalfTrans_.reserve(numElements*6*1.05);
@@ -563,7 +563,7 @@ update(bool global, const TransUpdateQuantities update_quantities,
         // be seen in a parallel. Unfortunately, when we do not use transmissibilities
         // we will only see warnings for the partition of process 0 and also false positives.
         this->applyEditNncToGridTrans_(globalToLocal);
-        this->applyPinchNncToGridTrans_(globalToLocal);
+        this->applyPinchNncToGridTrans_(globalToLocal, applyNncMultregT);
         this->applyNncToGridTrans_(globalToLocal);
         this->applyEditNncrToGridTrans_(globalToLocal);
         if (applyNncMultregT) {
@@ -1054,12 +1054,13 @@ computeFaceProperties(const Intersection& intersection,
 template<class Grid, class GridView, class ElementMapper, class CartesianIndexMapper, class Scalar>
 void
 Transmissibility<Grid,GridView,ElementMapper,CartesianIndexMapper,Scalar>::
-applyPinchNncToGridTrans_(const std::unordered_map<std::size_t,int>& cartesianToCompressed)
+applyPinchNncToGridTrans_(const std::unordered_map<std::size_t,int>& cartesianToCompressed,
+                          const bool applyNncMultregT)
 {
-    // First scale NNCs with EDITNNC.
-    const auto& nnc_input = eclState_.getPinchNNC();
+    const auto& pinchNnc = eclState_.getPinchNNC();
+    const auto& transMult = this->eclState_.getTransMult();
 
-    for (const auto& nncEntry : nnc_input) {
+    for (const auto& nncEntry : pinchNnc) {
         auto c1 = nncEntry.cell1;
         auto c2 = nncEntry.cell2;
         auto lowIt = cartesianToCompressed.find(c1);
@@ -1088,7 +1089,12 @@ applyPinchNncToGridTrans_(const std::unordered_map<std::size_t,int>& cartesianTo
             if (candidate != trans_.end()) {
                 // the correctly calculated transmissibility is stored in
                 // the NNC. Overwrite previous value with it.
-               candidate->second = nncEntry.trans;
+                // taking the region multiplier into account.
+                candidate->second = nncEntry.trans;
+                if (applyNncMultregT) {
+                    const auto mult = transMult.getRegionMultiplierNNC(c1, c2);
+                    candidate->second *= mult;
+                }
             }
         }
     }

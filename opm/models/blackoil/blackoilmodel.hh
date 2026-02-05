@@ -32,18 +32,19 @@
 
 #include <opm/material/fluidsystems/BlackOilFluidSystem.hpp>
 
+#include <opm/models/blackoil/blackoilbioeffectsmodules.hh>
 #include <opm/models/blackoil/blackoilboundaryratevector.hh>
 #include <opm/models/blackoil/blackoilbrinemodules.hh>
 #include <opm/models/blackoil/blackoildarcyfluxmodule.hh>
 #include <opm/models/blackoil/blackoildiffusionmodule.hh>
 #include <opm/models/blackoil/blackoildispersionmodule.hh>
+#include <opm/models/blackoil/blackoilenergymodules.hh>
 #include <opm/models/blackoil/blackoilextbomodules.hh>
 #include <opm/models/blackoil/blackoilextensivequantities.hh>
 #include <opm/models/blackoil/blackoilfoammodules.hh>
 #include <opm/models/blackoil/blackoilvariableandequationindices.hh>
 #include <opm/models/blackoil/blackoilintensivequantities.hh>
 #include <opm/models/blackoil/blackoillocalresidual.hh>
-#include <opm/models/blackoil/blackoilmicpmodules.hh>
 #include <opm/models/blackoil/blackoilnewtonmethod.hpp>
 #include <opm/models/blackoil/blackoilpolymermodules.hh>
 #include <opm/models/blackoil/blackoilprimaryvariables.hh>
@@ -143,11 +144,12 @@ struct Indices<TypeTag, TTag::BlackOilModel>
     using type = BlackOilVariableAndEquationIndices<getPropValue<TypeTag, Properties::EnableSolvent>(),
                                                     getPropValue<TypeTag, Properties::EnableExtbo>(),
                                                     getPropValue<TypeTag, Properties::EnablePolymer>(),
-                                                    getPropValue<TypeTag, Properties::EnableEnergy>(),
+                                                    getPropValue<TypeTag, Properties::EnergyModuleType>() == EnergyModules::FullyImplicitThermal,
+                                                    getPropValue<TypeTag, Properties::EnergyModuleType>() == EnergyModules::SequentialImplicitThermal,
                                                     getPropValue<TypeTag, Properties::EnableFoam>(),
                                                     getPropValue<TypeTag, Properties::EnableBrine>(),
                                                     /*PVOffset=*/0,
-                                                    getPropValue<TypeTag, Properties::EnableMICP>()>;
+                                                    getPropValue<TypeTag, Properties::EnableBioeffects>()>;
 };
 
 //! Set the fluid system to the black-oil fluid system by default
@@ -198,24 +200,19 @@ struct EnableSaltPrecipitation<TypeTag, TTag::BlackOilModel>
 { static constexpr bool value = false; };
 
 template<class TypeTag>
-struct EnableMICP<TypeTag, TTag::BlackOilModel>
-{ static constexpr bool value = false; };
-
-//! By default, the blackoil model is isothermal and does not conserve energy
-template<class TypeTag>
-struct EnableTemperature<TypeTag, TTag::BlackOilModel>
+struct EnableBioeffects<TypeTag, TTag::BlackOilModel>
 { static constexpr bool value = false; };
 
 template<class TypeTag>
-struct EnableEnergy<TypeTag, TTag::BlackOilModel>
-{ static constexpr bool value = false; };
+struct EnergyModuleType<TypeTag, TTag::BlackOilModel>
+{ static constexpr EnergyModules value = EnergyModules::NoTemperature; };
 
 //! disable diffusion by default
 template<class TypeTag>
 struct EnableDiffusion<TypeTag, TTag::BlackOilModel>
 { static constexpr bool value = false; };
 
-//! disable disperison by default
+//! disable dispersion by default
 template<class TypeTag>
 struct EnableDispersion<TypeTag, TTag::BlackOilModel>
 { static constexpr bool value = false; };
@@ -348,7 +345,6 @@ private:
     using Discretization = GetPropType<TypeTag, Properties::Discretization>;
     using ElementContext = GetPropType<TypeTag, Properties::ElementContext>;
 
-    enum { numPhases = getPropValue<TypeTag, Properties::NumPhases>() };
     enum { numComponents = FluidSystem::numComponents };
     enum { numEq = getPropValue<TypeTag, Properties::NumEq>() };
     enum { enableDiffusion = getPropValue<TypeTag, Properties::EnableDiffusion>() };
@@ -363,7 +359,7 @@ private:
     using EnergyModule = BlackOilEnergyModule<TypeTag>;
     using DiffusionModule = BlackOilDiffusionModule<TypeTag, enableDiffusion>;
     using DispersionModule = BlackOilDispersionModule<TypeTag, enableDispersion>;
-    using MICPModule = BlackOilMICPModule<TypeTag>;
+    using BioeffectsModule = BlackOilBioeffectsModule<TypeTag>;
 
 public:
     using LocalResidual = GetPropType<TypeTag, Properties::LocalResidual>;
@@ -386,7 +382,7 @@ public:
         PolymerModule::registerParameters();
         EnergyModule::registerParameters();
         DiffusionModule::registerParameters();
-        MICPModule::registerParameters();
+        BioeffectsModule::registerParameters();
 
         // register runtime parameters of the VTK output modules
         VtkBlackOilModule<TypeTag>::registerParameters();
@@ -513,6 +509,9 @@ public:
 
     /*!
      * \copydoc FvBaseDiscretization::eqWeight
+     *
+     * \param globalDofIdx Global DOF
+     * \param eqIdx Equation index
      */
     Scalar eqWeight(unsigned globalDofIdx, unsigned eqIdx) const
     {
@@ -672,7 +671,7 @@ protected:
         SolventModule::registerOutputModules(asImp_(), this->simulator_);
         PolymerModule::registerOutputModules(asImp_(), this->simulator_);
         EnergyModule::registerOutputModules(asImp_(), this->simulator_);
-        MICPModule::registerOutputModules(asImp_(), this->simulator_);
+        BioeffectsModule::registerOutputModules(asImp_(), this->simulator_);
 
         this->addOutputModule(std::make_unique<VtkBlackOilModule<TypeTag>>(this->simulator_));
         this->addOutputModule(std::make_unique<VtkCompositionModule<TypeTag>>(this->simulator_));

@@ -16,25 +16,30 @@
   You should have received a copy of the GNU General Public License
   along with OPM.  If not, see <http://www.gnu.org/licenses/>.
 */
-#include "opm/simulators/linalg/gpuistl/GpuSparseMatrix.hpp"
-#include "opm/simulators/linalg/is_gpu_operator.hpp"
-#include <cuda.h>
-#include <cuda_runtime.h>
-#include <cusparse.h>
+#include <config.h>
+#include <opm/simulators/linalg/gpuistl/GpuSeqILU0.hpp>
+
 #include <dune/common/fmatrix.hh>
 #include <dune/common/fvector.hh>
+
 #include <dune/istl/bcrsmatrix.hh>
 #include <dune/istl/bvector.hh>
-#include <fmt/core.h>
+
 #include <opm/common/ErrorMacros.hpp>
-#include <opm/simulators/linalg/gpuistl/GpuSeqILU0.hpp>
-#include <opm/simulators/linalg/gpuistl/detail/cusparse_constants.hpp>
+#include <opm/simulators/linalg/gpuistl/GpuSparseMatrixWrapper.hpp>
+#include <opm/simulators/linalg/is_gpu_operator.hpp>
+#include <opm/simulators/linalg/gpuistl/detail/gpu_constants.hpp>
 #include <opm/simulators/linalg/gpuistl/detail/cusparse_safe_call.hpp>
 #include <opm/simulators/linalg/gpuistl/detail/cusparse_wrapper.hpp>
 #include <opm/simulators/linalg/gpuistl/detail/fix_zero_diagonal.hpp>
 #include <opm/simulators/linalg/gpuistl/detail/safe_conversion.hpp>
 #include <opm/simulators/linalg/matrixblock.hh>
-#include <type_traits>
+
+#include <cuda.h>
+#include <cuda_runtime.h>
+#include <cusparse.h>
+
+#include <fmt/core.h>
 
 // This file is based on the guide at https://docs.nvidia.com/cuda/cusparse/index.html#csrilu02_solve ,
 // it highly recommended to read that before proceeding.
@@ -43,7 +48,7 @@
 namespace Opm::gpuistl
 {
 
-    
+
 template <class M, class X, class Y, int l>
 void
 GpuSeqILU0<M, X, Y, l>::pre([[maybe_unused]] X& x, [[maybe_unused]] Y& b)
@@ -125,9 +130,9 @@ void
 GpuSeqILU0<M, X, Y, l>::update()
 {
     if constexpr (is_gpu_matrix_v<M>) {
-        m_LU.updateNonzeroValues(detail::makeMatrixWithNonzeroDiagonal(m_underlyingMatrix));
-    } else {
         m_LU.updateNonzeroValues(m_underlyingMatrix);
+    } else {
+        m_LU.updateNonzeroValues(detail::makeMatrixWithNonzeroDiagonal(m_underlyingMatrix), true);
     }
     createILU();
 }
@@ -325,7 +330,7 @@ GpuSeqILU0<M, X, Y, l>::updateILUConfiguration()
     template class ::Opm::gpuistl::GpuSeqILU0<Dune::BCRSMatrix<Opm::MatrixBlock<realtype, blockdim, blockdim>>,          \
                                             ::Opm::gpuistl::GpuVector<realtype>,                                         \
                                             ::Opm::gpuistl::GpuVector<realtype>>
-   
+
 
 
 INSTANTIATE_GPUSEQILU0_DUNE(double, 1);
@@ -334,7 +339,8 @@ INSTANTIATE_GPUSEQILU0_DUNE(double, 3);
 INSTANTIATE_GPUSEQILU0_DUNE(double, 4);
 INSTANTIATE_GPUSEQILU0_DUNE(double, 5);
 INSTANTIATE_GPUSEQILU0_DUNE(double, 6);
-template class ::Opm::gpuistl::GpuSeqILU0<Opm::gpuistl::GpuSparseMatrix<double>,
+INSTANTIATE_GPUSEQILU0_DUNE(double, 7);
+template class ::Opm::gpuistl::GpuSeqILU0<Opm::gpuistl::GpuSparseMatrixWrapper<double>,
     ::Opm::gpuistl::GpuVector<double>,
     ::Opm::gpuistl::GpuVector<double>>;
 
@@ -344,6 +350,7 @@ INSTANTIATE_GPUSEQILU0_DUNE(float, 3);
 INSTANTIATE_GPUSEQILU0_DUNE(float, 4);
 INSTANTIATE_GPUSEQILU0_DUNE(float, 5);
 INSTANTIATE_GPUSEQILU0_DUNE(float, 6);
-template class ::Opm::gpuistl::GpuSeqILU0<Opm::gpuistl::GpuSparseMatrix<float>,
+INSTANTIATE_GPUSEQILU0_DUNE(float, 7);
+template class ::Opm::gpuistl::GpuSeqILU0<Opm::gpuistl::GpuSparseMatrixWrapper<float>,
     ::Opm::gpuistl::GpuVector<float>,
     ::Opm::gpuistl::GpuVector<float>>;

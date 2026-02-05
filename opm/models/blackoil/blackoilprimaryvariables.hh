@@ -25,30 +25,30 @@
 #define EWOMS_BLACK_OIL_PRIMARY_VARIABLES_HH
 
 #include <dune/common/fvector.hh>
+#include <opm/common/OpmLog/OpmLog.hpp>
+#include <opm/common/utility/gpuDecorators.hpp>
 
 #include <opm/material/common/MathToolbox.hpp>
 #include <opm/material/common/Valgrind.hpp>
-#include <opm/material/constraintsolvers/NcpFlash.hpp>
 #include <opm/material/fluidsystems/BlackOilFluidSystem.hpp>
-#include <opm/material/fluidstates/CompositionalFluidState.hpp>
 #include <opm/material/fluidstates/SimpleModularFluidState.hpp>
 
+#include <opm/models/blackoil/blackoilbioeffectsmodules.hh>
 #include <opm/models/blackoil/blackoilbrinemodules.hh>
 #include <opm/models/blackoil/blackoilenergymodules.hh>
 #include <opm/models/blackoil/blackoilextbomodules.hh>
-#include <opm/models/blackoil/blackoilfoammodules.hh>
-#include <opm/models/blackoil/blackoilmicpmodules.hh>
-#include <opm/models/blackoil/blackoilpolymermodules.hh>
+#include <opm/models/blackoil/blackoilmeanings.hh>
 #include <opm/models/blackoil/blackoilproperties.hh>
 #include <opm/models/blackoil/blackoilsolventmodules.hh>
 
 #include <opm/models/discretization/common/fvbaseprimaryvariables.hh>
 
+#include <fmt/format.h>
+
 #include <algorithm>
 #include <array>
 #include <cassert>
 #include <cstddef>
-#include <cstdint>
 #include <stdexcept>
 #include <type_traits>
 
@@ -67,10 +67,10 @@ namespace Opm {
  *
  * \brief Represents the primary variables used by the black-oil model.
  */
-template <class TypeTag>
-class BlackOilPrimaryVariables : public FvBasePrimaryVariables<TypeTag>
+template <class TypeTag, template<class, int> class VectorType = Dune::FieldVector>
+class BlackOilPrimaryVariables : public FvBasePrimaryVariables<TypeTag, VectorType>
 {
-    using ParentType = FvBasePrimaryVariables<TypeTag>;
+    using ParentType = FvBasePrimaryVariables<TypeTag, VectorType>;
     using Implementation = GetPropType<TypeTag, Properties::PrimaryVariables>;
 
     using Scalar = GetPropType<TypeTag, Properties::Scalar>;
@@ -111,9 +111,9 @@ class BlackOilPrimaryVariables : public FvBasePrimaryVariables<TypeTag>
     enum { enableBrine = getPropValue<TypeTag, Properties::EnableBrine>() };
     enum { enableSaltPrecipitation = getPropValue<TypeTag, Properties::EnableSaltPrecipitation>() };
     enum { enableVapwat = getPropValue<TypeTag, Properties::EnableVapwat>() };
-    enum { enableEnergy = getPropValue<TypeTag, Properties::EnableEnergy>() };
-    enum { enableTemperature = getPropValue<TypeTag, Properties::EnableTemperature>() };
-    enum { enableMICP = getPropValue<TypeTag, Properties::EnableMICP>() };
+    static constexpr EnergyModules energyModuleType = getPropValue<TypeTag, Properties::EnergyModuleType>();
+    enum { enableBioeffects = getPropValue<TypeTag, Properties::EnableBioeffects>() };
+    enum { enableMICP = Indices::enableMICP };
     enum { gasCompIdx = FluidSystem::gasCompIdx };
     enum { waterCompIdx = FluidSystem::waterCompIdx };
     enum { oilCompIdx = FluidSystem::oilCompIdx };
@@ -122,49 +122,45 @@ class BlackOilPrimaryVariables : public FvBasePrimaryVariables<TypeTag>
     using ComponentVector = Dune::FieldVector<Scalar, numComponents>;
     using SolventModule = BlackOilSolventModule<TypeTag, enableSolvent>;
     using ExtboModule = BlackOilExtboModule<TypeTag, enableExtbo>;
-    using PolymerModule = BlackOilPolymerModule<TypeTag, enablePolymer>;
-    using EnergyModule = BlackOilEnergyModule<TypeTag, enableEnergy>;
-    using FoamModule = BlackOilFoamModule<TypeTag, enableFoam>;
+    using EnergyModule = BlackOilEnergyModule<TypeTag, energyModuleType>;
     using BrineModule = BlackOilBrineModule<TypeTag, enableBrine>;
-    using MICPModule = BlackOilMICPModule<TypeTag, enableMICP>;
+    using BioeffectsModule = BlackOilBioeffectsModule<TypeTag>;
 
     static_assert(numPhases == 3, "The black-oil model assumes three phases!");
     static_assert(numComponents == 3, "The black-oil model assumes three components!");
 
 public:
-    enum class WaterMeaning : std::uint8_t {
-        Sw,  // water saturation
-        Rvw, // vaporized water
-        Rsw, // dissolved gas in water
-        Disabled, // The primary variable is not used
-    };
+    // We are instantiating this class with different TypeTags and VectorTypes,
+    // but we still want to be able to copy between them. Therefore, we
+    // need to define the same type aliases in all specializations.
+    using WaterMeaning = ::Opm::BlackOil::WaterMeaning;
+    using PressureMeaning = ::Opm::BlackOil::PressureMeaning;
+    using GasMeaning = ::Opm::BlackOil::GasMeaning;
+    using BrineMeaning = ::Opm::BlackOil::BrineMeaning;
+    using SolventMeaning = ::Opm::BlackOil::SolventMeaning;
 
-    enum class PressureMeaning : std::uint8_t {
-        Po, // oil pressure
-        Pg, // gas pressure
-        Pw, // water pressure
-    };
+    // Allow conversion between different vector types
+    template<class OtherTypeTag, template<class, int> class OtherVectorType>
+    friend class BlackOilPrimaryVariables;
 
-    enum class GasMeaning : std::uint8_t {
-        Sg, // gas saturation
-        Rs, // dissolved gas in oil
-        Rv, // vapporized oil
-        Disabled, // The primary variable is not used
-    };
+    /*!
+     * \copydoc FvBasePrimaryVariables::FvBasePrimaryVariables(const FvBasePrimaryVariables& )
+     */
+    template <class OtherTypeTag, template <class, int> class OtherVectorType>
+    explicit OPM_HOST_DEVICE
+    BlackOilPrimaryVariables(const BlackOilPrimaryVariables<OtherTypeTag, OtherVectorType>& other)
+        : ParentType(other)
+        , primaryVarsMeaningWater_(other.primaryVarsMeaningWater_)
+        , primaryVarsMeaningPressure_(other.primaryVarsMeaningPressure_)
+        , primaryVarsMeaningGas_(other.primaryVarsMeaningGas_)
+        , primaryVarsMeaningBrine_(other.primaryVarsMeaningBrine_)
+        , primaryVarsMeaningSolvent_(other.primaryVarsMeaningSolvent_)
+        , pvtRegionIdx_(other.pvtRegionIdx_)
+        , pcFactor_(other.pcFactor_)
+    {
+    }
 
-    enum class BrineMeaning : std::uint8_t {
-        Cs, // salt concentration
-        Sp, // (precipitated) salt saturation
-        Disabled, // The primary variable is not used
-    };
-
-    enum class SolventMeaning : std::uint8_t {
-        Ss, // solvent saturation
-        Rsolw, // dissolved solvent in water
-        Disabled, // The primary variable is not used
-    };
-
-    BlackOilPrimaryVariables()
+    OPM_HOST_DEVICE BlackOilPrimaryVariables()
     {
         Valgrind::SetUndefined(*this);
         pvtRegionIdx_ = 0;
@@ -195,6 +191,23 @@ public:
     {
         // TODO: these parameters have undocumented non-trivial dependencies
         pressureScale_ = Parameters::Get<Parameters::PressureScale<Scalar>>();
+
+// currently for GPU we do not have a support for the pressureScale_ variable,
+// so we issue a warning if the user has set it to something else than 1.0
+// if we are building with GPU support. Note that we can not only test if we are compiling
+// with a GPU compiler, because we might initialize the parameters from a .cpp compilation unit
+// compiled by a normal C++ compiler.
+#if HAVE_CUDA
+        if (pressureScale_ != Scalar {1.0}) {
+            OpmLog::warning(fmt::format(
+                "Using a pressure scaling different from 1.0 is not supported "
+                "when running with GPU support. We have detected that you are compiling with GPU support, but we can "
+                "not detect whether you are running with GPU support for the assembly or property evaluation. If you "
+                "are doing property evaluation or assembly on the GPU, pressure scaling will be ignored."
+                "Read value of pressure scale: {}",
+                pressureScale_));
+        }
+#endif
     }
 
     static void registerParameters()
@@ -203,14 +216,11 @@ public:
             ("Scaling of pressure primary variable");
     }
 
-    void setPressureScale(Scalar val)
-    { pressureScale_ = val; }
-
-    Evaluation
+    OPM_HOST_DEVICE Evaluation
     makeEvaluation(unsigned varIdx, unsigned timeIdx,
                    LinearizationType linearizationType = LinearizationType()) const
     {
-        const Scalar scale = varIdx == pressureSwitchIdx ? this->pressureScale_ : Scalar{1.0};
+        const Scalar scale = varIdx == pressureSwitchIdx ? this->getPressureScale() : Scalar{1.0};
         if (std::is_same_v<Evaluation, Scalar>) {
             return (*this)[varIdx] * scale; // finite differences
         }
@@ -232,206 +242,123 @@ public:
      * by the pseudo-components used by the black oil model (i.e., oil, gas
      * and water). This introduce spatially varying pvt behaviour.
      */
-    void setPvtRegionIndex(unsigned value)
+     OPM_HOST_DEVICE void setPvtRegionIndex(unsigned value)
     { pvtRegionIdx_ = static_cast<unsigned short>(value); }
 
     /*!
      * \brief Return the index of the region which should be used for PVT properties.
      */
-    unsigned pvtRegionIndex() const
+    OPM_HOST_DEVICE unsigned pvtRegionIndex() const
     { return pvtRegionIdx_; }
 
     /*!
      * \brief Return the interpretation which should be applied to the switching primary
      *        variables.
      */
-    WaterMeaning primaryVarsMeaningWater() const
+    OPM_HOST_DEVICE WaterMeaning primaryVarsMeaningWater() const
     { return primaryVarsMeaningWater_; }
 
     /*!
      * \brief Set the interpretation which should be applied to the switching primary
      *        variables.
      */
-    void setPrimaryVarsMeaningWater(WaterMeaning newMeaning)
+    OPM_HOST_DEVICE void setPrimaryVarsMeaningWater(WaterMeaning newMeaning)
     { primaryVarsMeaningWater_ = newMeaning; }
 
      /*!
      * \brief Return the interpretation which should be applied to the switching primary
      *        variables.
      */
-    PressureMeaning primaryVarsMeaningPressure() const
+    OPM_HOST_DEVICE PressureMeaning primaryVarsMeaningPressure() const
     { return primaryVarsMeaningPressure_; }
 
     /*!
      * \brief Set the interpretation which should be applied to the switching primary
      *        variables.
      */
-    void setPrimaryVarsMeaningPressure(PressureMeaning newMeaning)
+     OPM_HOST_DEVICE void setPrimaryVarsMeaningPressure(PressureMeaning newMeaning)
     { primaryVarsMeaningPressure_ = newMeaning; }
 
      /*!
      * \brief Return the interpretation which should be applied to the switching primary
      *        variables.
      */
-    GasMeaning primaryVarsMeaningGas() const
+     OPM_HOST_DEVICE GasMeaning primaryVarsMeaningGas() const
     { return primaryVarsMeaningGas_; }
 
     /*!
      * \brief Set the interpretation which should be applied to the switching primary
      *        variables.
      */
-    void setPrimaryVarsMeaningGas(GasMeaning newMeaning)
+    OPM_HOST_DEVICE void setPrimaryVarsMeaningGas(GasMeaning newMeaning)
     { primaryVarsMeaningGas_ = newMeaning; }
 
-    BrineMeaning primaryVarsMeaningBrine() const
+    OPM_HOST_DEVICE BrineMeaning primaryVarsMeaningBrine() const
     { return primaryVarsMeaningBrine_; }
 
     /*!
      * \brief Set the interpretation which should be applied to the switching primary
      *        variables.
      */
-    void setPrimaryVarsMeaningBrine(BrineMeaning newMeaning)
+    OPM_HOST_DEVICE void setPrimaryVarsMeaningBrine(BrineMeaning newMeaning)
     { primaryVarsMeaningBrine_ = newMeaning; }
 
-    SolventMeaning primaryVarsMeaningSolvent() const
+    OPM_HOST_DEVICE SolventMeaning primaryVarsMeaningSolvent() const
     { return primaryVarsMeaningSolvent_; }
 
     /*!
      * \brief Set the interpretation which should be applied to the switching primary
      *        variables.
      */
-    void setPrimaryVarsMeaningSolvent(SolventMeaning newMeaning)
+     OPM_HOST_DEVICE void setPrimaryVarsMeaningSolvent(SolventMeaning newMeaning)
     { primaryVarsMeaningSolvent_ = newMeaning; }
-
-    /*!
-     * \copydoc ImmisciblePrimaryVariables::assignMassConservative
-     */
-    template <class FluidState>
-    void assignMassConservative(const FluidState& fluidState,
-                                const MaterialLawParams& matParams,
-                                bool isInEquilibrium = false)
-    {
-        using ConstEvaluation = std::remove_reference_t<typename FluidState::Scalar>;
-        using FsEvaluation = std::remove_const_t<ConstEvaluation>;
-        using FsToolbox = MathToolbox<FsEvaluation>;
-
-#ifndef NDEBUG
-        // make sure the temperature is the same in all fluid phases
-        for (unsigned phaseIdx = 1; phaseIdx < numPhases; ++phaseIdx) {
-            Valgrind::CheckDefined(fluidState.temperature(0));
-            Valgrind::CheckDefined(fluidState.temperature(phaseIdx));
-
-            assert(fluidState.temperature(0) == fluidState.temperature(phaseIdx));
-        }
-#endif // NDEBUG
-
-        // for the equilibrium case, we don't need complicated
-        // computations.
-        if (isInEquilibrium) {
-            assignNaive(fluidState);
-            return;
-        }
-
-        // If your compiler bails out here, you're probably not using a suitable black
-        // oil fluid system.
-        typename FluidSystem::template ParameterCache<Scalar> paramCache;
-        paramCache.setRegionIndex(pvtRegionIdx_);
-        paramCache.setMaxOilSat(FsToolbox::value(fluidState.saturation(oilPhaseIdx)));
-
-        // create a mutable fluid state with well defined densities based on the input
-        using NcpFlash = NcpFlash<Scalar, FluidSystem>;
-        using FlashFluidState = CompositionalFluidState<Scalar, FluidSystem>;
-        FlashFluidState fsFlash;
-        fsFlash.setTemperature(FsToolbox::value(fluidState.temperature(/*phaseIdx=*/0)));
-        for (unsigned phaseIdx = 0; phaseIdx < numPhases; ++phaseIdx) {
-            fsFlash.setPressure(phaseIdx, FsToolbox::value(fluidState.pressure(phaseIdx)));
-            fsFlash.setSaturation(phaseIdx, FsToolbox::value(fluidState.saturation(phaseIdx)));
-            for (unsigned compIdx = 0; compIdx < numComponents; ++compIdx) {
-                fsFlash.setMoleFraction(phaseIdx, compIdx,
-                                        FsToolbox::value(fluidState.moleFraction(phaseIdx, compIdx)));
-            }
-        }
-
-        paramCache.updateAll(fsFlash);
-        for (unsigned phaseIdx = 0; phaseIdx < numPhases; ++phaseIdx) {
-            if (!FluidSystem::phaseIsActive(phaseIdx)) {
-                continue;
-            }
-
-            const Scalar rho =
-                FluidSystem::template density<FlashFluidState, Scalar>(fsFlash, paramCache, phaseIdx);
-            fsFlash.setDensity(phaseIdx, rho);
-        }
-
-        // calculate the "global molarities"
-        ComponentVector globalMolarities(0.0);
-        for (unsigned compIdx = 0; compIdx < numComponents; ++compIdx) {
-            for (unsigned phaseIdx = 0; phaseIdx < numPhases; ++phaseIdx) {
-                if (!FluidSystem::phaseIsActive(phaseIdx)) {
-                    continue;
-                }
-
-                globalMolarities[compIdx] +=
-                    fsFlash.saturation(phaseIdx) * fsFlash.molarity(phaseIdx, compIdx);
-            }
-        }
-
-        // use a flash calculation to calculate a fluid state in
-        // thermodynamic equilibrium
-
-        // run the flash calculation
-        NcpFlash::template solve<MaterialLaw>(fsFlash, matParams, paramCache, globalMolarities);
-
-        // use the result to assign the primary variables
-        assignNaive(fsFlash);
-    }
 
     /*!
      * \copydoc ImmisciblePrimaryVariables::assignNaive
      */
     template <class FluidState>
-    void assignNaive(const FluidState& fluidState)
+    OPM_HOST_DEVICE void assignNaive(const FluidState& fluidState)
     {
         using ConstEvaluation = std::remove_reference_t<typename FluidState::Scalar>;
         using FsEvaluation = std::remove_const_t<ConstEvaluation>;
         using FsToolbox = MathToolbox<FsEvaluation>;
 
         const bool gasPresent =
-            FluidSystem::phaseIsActive(gasPhaseIdx)
+            fluidState.fluidSystem().phaseIsActive(gasPhaseIdx)
                 ? fluidState.saturation(gasPhaseIdx) > 0.0
                 : false;
         const bool oilPresent =
-            FluidSystem::phaseIsActive(oilPhaseIdx)
+            fluidState.fluidSystem().phaseIsActive(oilPhaseIdx)
                 ? fluidState.saturation(oilPhaseIdx) > 0.0
                 : false;
         const bool waterPresent =
-            FluidSystem::phaseIsActive(waterPhaseIdx)
+            fluidState.fluidSystem().phaseIsActive(waterPhaseIdx)
                 ? fluidState.saturation(waterPhaseIdx) > 0.0
                 : false;
         const auto& saltSaturation =
             BlackOil::getSaltSaturation_<FluidSystem, FluidState, Scalar>(fluidState, pvtRegionIdx_);
         const bool precipitatedSaltPresent = enableSaltPrecipitation ? saltSaturation > 0.0 : false;
-        const bool oneActivePhases = FluidSystem::numActivePhases() == 1;
+        const bool oneActivePhases = fluidState.fluidSystem().numActivePhases() == 1;
         // deal with the primary variables for the energy extension
         EnergyModule::assignPrimaryVars(*this, fluidState);
 
         // Determine the meaning of the pressure primary variables
         // Depending on the phases present, this variable is either interpreted as the
         // pressure of the oil phase, gas phase (if no oil) or water phase (if only water)
-        if (gasPresent && FluidSystem::enableVaporizedOil() && !oilPresent) {
+        if (gasPresent && fluidState.fluidSystem().enableVaporizedOil() && !oilPresent) {
             primaryVarsMeaningPressure_ = PressureMeaning::Pg;
         }
-        else if (FluidSystem::phaseIsActive(oilPhaseIdx)) {
+        else if (fluidState.fluidSystem().phaseIsActive(oilPhaseIdx)) {
             primaryVarsMeaningPressure_ = PressureMeaning::Po;
         }
-        else if (waterPresent && FluidSystem::enableDissolvedGasInWater() && !gasPresent) {
+        else if (waterPresent && fluidState.fluidSystem().enableDissolvedGasInWater() && !gasPresent) {
             primaryVarsMeaningPressure_ = PressureMeaning::Pw;
         }
-        else if (FluidSystem::phaseIsActive(gasPhaseIdx)) {
+        else if (fluidState.fluidSystem().phaseIsActive(gasPhaseIdx)) {
             primaryVarsMeaningPressure_ = PressureMeaning::Pg;
         }
         else {
-            assert(FluidSystem::phaseIsActive(waterPhaseIdx));
+            assert(fluidState.fluidSystem().phaseIsActive(waterPhaseIdx));
             primaryVarsMeaningPressure_ = PressureMeaning::Pw;
         }
 
@@ -442,13 +369,13 @@ public:
         if (waterPresent && gasPresent) {
             primaryVarsMeaningWater_ = WaterMeaning::Sw;
         }
-        else if (gasPresent && FluidSystem::enableVaporizedWater()) {
+        else if (gasPresent && fluidState.fluidSystem().enableVaporizedWater()) {
             primaryVarsMeaningWater_ = WaterMeaning::Rvw;
         }
-        else if (waterPresent && FluidSystem::enableDissolvedGasInWater()) {
+        else if (waterPresent && fluidState.fluidSystem().enableDissolvedGasInWater()) {
             primaryVarsMeaningWater_ = WaterMeaning::Rsw;
         }
-        else if (FluidSystem::phaseIsActive(waterPhaseIdx) && !oneActivePhases) {
+        else if (fluidState.fluidSystem().phaseIsActive(waterPhaseIdx) && !oneActivePhases) {
             primaryVarsMeaningWater_ = WaterMeaning::Sw;
         }
         else {
@@ -463,13 +390,13 @@ public:
         if (gasPresent && oilPresent) {
             primaryVarsMeaningGas_ = GasMeaning::Sg;
         }
-        else if (oilPresent && FluidSystem::enableDissolvedGas()) {
+        else if (oilPresent && fluidState.fluidSystem().enableDissolvedGas()) {
             primaryVarsMeaningGas_ = GasMeaning::Rs;
         }
-        else if (gasPresent && FluidSystem::enableVaporizedOil()) {
+        else if (gasPresent && fluidState.fluidSystem().enableVaporizedOil()) {
             primaryVarsMeaningGas_ = GasMeaning::Rv;
         }
-        else if (FluidSystem::phaseIsActive(gasPhaseIdx) && FluidSystem::phaseIsActive(oilPhaseIdx)) {
+        else if (fluidState.fluidSystem().phaseIsActive(gasPhaseIdx) && fluidState.fluidSystem().phaseIsActive(oilPhaseIdx)) {
             primaryVarsMeaningGas_ = GasMeaning::Sg;
         }
         else {
@@ -501,7 +428,7 @@ public:
             this->setScaledPressure_(FsToolbox::value(fluidState.pressure(waterPhaseIdx)));
             break;
         default:
-            throw std::logic_error("No valid primary variable selected for pressure");
+            OPM_THROW(std::logic_error, "No valid primary variable selected for pressure");
         }
 
         switch (primaryVarsMeaningWater()) {
@@ -525,7 +452,7 @@ public:
         case WaterMeaning::Disabled:
             break;
         default:
-            throw std::logic_error("No valid primary variable selected for water");
+            OPM_THROW(std::logic_error, "No valid primary variable selected for water");
         }
         switch (primaryVarsMeaningGas()) {
         case GasMeaning::Sg:
@@ -546,7 +473,7 @@ public:
         case GasMeaning::Disabled:
             break;
         default:
-            throw std::logic_error("No valid primary variable selected for composision");
+            OPM_THROW(std::logic_error, "No valid primary variable selected for composision");
         }
     }
 
@@ -676,15 +603,25 @@ public:
             return changed;
         }
 
-        if (BrineModule::hasPcfactTables() && primaryVarsMeaningBrine() == BrineMeaning::Sp) {
-            const unsigned satnumRegionIdx = problem.satnumRegionIndex(globalDofIdx);
-            const Scalar Sp = saltConcentration_();
-            const Scalar porosityFactor  = min(1.0 - Sp, 1.0); //phi/phi_0
-            const auto& pcfactTable = BrineModule::pcfactTable(satnumRegionIdx);
-            pcFactor_ = pcfactTable.eval(porosityFactor, /*extrapolation=*/true);
+        pcFactor_ = 1.0;
+        if constexpr (enableBrine) {
+            if (BrineModule::hasPcfactTables() && primaryVarsMeaningBrine() == BrineMeaning::Sp) {
+                unsigned satnumRegionIdx = problem.satnumRegionIndex(globalDofIdx);
+                Scalar Sp = saltConcentration_();
+                Scalar porosityFactor  = std::min(1.0 - Sp, 1.0); //phi/phi_0
+                const auto& pcfactTable = BrineModule::pcfactTable(satnumRegionIdx);
+                pcFactor_ = pcfactTable.eval(porosityFactor, /*extrapolation=*/true);
+            }
         }
-        else {
-            pcFactor_ = 1.0;
+        else if constexpr (enableBioeffects) {
+            if (BioeffectsModule::hasPcfactTables() && problem.referencePorosity(globalDofIdx, 0) > 0) {
+                unsigned satnumRegionIdx = problem.satnumRegionIndex(globalDofIdx);
+                Scalar Sb = biofilmVolumeFraction_() /
+                            problem.referencePorosity(globalDofIdx, 0);
+                Scalar porosityFactor  = std::min(1.0 - Sb, 1.0); //phi/phi_0
+                const auto& pcfactTable = BioeffectsModule::pcfactTable(satnumRegionIdx);
+                pcFactor_ = pcfactTable.eval(porosityFactor, /*extrapolation=*/true);
+            }
         }
 
         switch (primaryVarsMeaningWater()) {
@@ -727,7 +664,7 @@ public:
                                                                               saltConcentration);
                     setPrimaryVarsMeaningWater(WaterMeaning::Rsw);
                     const Scalar rswMax = problem.maxGasDissolutionFactor(/*timeIdx=*/0, globalDofIdx);
-                    (*this)[Indices::waterSwitchIdx] = min(rswSat, rswMax); //primary variable becomes Rsw
+                    (*this)[Indices::waterSwitchIdx] = std::min(rswSat, rswMax); //primary variable becomes Rsw
                     setPrimaryVarsMeaningPressure(PressureMeaning::Pw);
                     this->setScaledPressure_(pw);
                     changed = true;
@@ -774,7 +711,7 @@ public:
 
                 const Scalar rsw = (*this)[Indices::waterSwitchIdx];
                 const Scalar rswMax = problem.maxGasDissolutionFactor(/*timeIdx=*/0, globalDofIdx);
-                if (rsw > min(rswSat, rswMax)) {
+                if (rsw > std::min(rswSat, rswMax)) {
                     // the gas phase appears, i.e., switch the primary variables to WaterMeaning::Sw
                     setPrimaryVarsMeaningWater(WaterMeaning::Sw);
                     (*this)[Indices::waterSwitchIdx] = 1.0; // hydrocarbon water saturation
@@ -929,7 +866,7 @@ public:
         return changed;
     }
 
-    bool chopAndNormalizeSaturations()
+    OPM_HOST_DEVICE bool chopAndNormalizeSaturations()
     {
         if (primaryVarsMeaningWater() == WaterMeaning::Disabled &&
             primaryVarsMeaningGas() == GasMeaning::Disabled)
@@ -984,7 +921,7 @@ public:
      * "alignedness holes" in the memory layout which are caused by the pseudo primary
      * variables.
      */
-    void checkDefined() const
+     OPM_HOST_DEVICE void checkDefined() const
     {
 #ifndef NDEBUG
         // check the "real" primary variables
@@ -1016,7 +953,7 @@ public:
         serializer(pvtRegionIdx_);
     }
 
-    bool operator==(const BlackOilPrimaryVariables& rhs) const
+    OPM_HOST_DEVICE bool operator==(const BlackOilPrimaryVariables& rhs) const
     {
         return
                static_cast<const FvBasePrimaryVariables<TypeTag>&>(*this) == rhs
@@ -1029,13 +966,13 @@ public:
     }
 
 private:
-    Implementation& asImp_()
+    OPM_HOST_DEVICE Implementation& asImp_()
     { return *static_cast<Implementation*>(this); }
 
-    const Implementation& asImp_() const
+    OPM_HOST_DEVICE const Implementation& asImp_() const
     { return *static_cast<const Implementation*>(this); }
 
-    Scalar solventSaturation_() const
+    OPM_HOST_DEVICE Scalar solventSaturation_() const
     {
         if constexpr (enableSolvent) {
             if (primaryVarsMeaningSolvent() == SolventMeaning::Ss) {
@@ -1045,7 +982,7 @@ private:
         return 0.0;
     }
 
-    Scalar zFraction_() const
+    OPM_HOST_DEVICE Scalar zFraction_() const
     {
         if constexpr (enableExtbo) {
             return (*this)[Indices::zFractionIdx];
@@ -1055,7 +992,7 @@ private:
         }
     }
 
-    Scalar saltConcentration_() const
+    OPM_HOST_DEVICE Scalar saltConcentration_() const
     {
         if constexpr (enableBrine) {
             return (*this)[Indices::saltConcentrationIdx];
@@ -1065,21 +1002,28 @@ private:
         }
     }
 
-    Scalar temperature_(const Problem& problem, [[maybe_unused]] unsigned globalDofIdx) const
+    Scalar biofilmVolumeFraction_() const
     {
-        if constexpr (enableEnergy) {
+        if constexpr (enableBioeffects)
+            return (*this)[Indices::biofilmVolumeFractionIdx];
+        else
+            return 0.0;
+    }
+
+    OPM_HOST_DEVICE Scalar temperature_(const Problem& problem, [[maybe_unused]] unsigned globalDofIdx) const
+    {
+        if constexpr (energyModuleType == EnergyModules::FullyImplicitThermal) {
             return (*this)[Indices::temperatureIdx];
         }
-        else if constexpr (enableTemperature) {
-            return problem.temperature(globalDofIdx, /*timeIdx*/ 0);
-        }
-        else {
+        else if (energyModuleType == EnergyModules::NoTemperature) {
             return FluidSystem::reservoirTemperature();
+        } else {
+            return problem.temperature(globalDofIdx, /*timeIdx*/ 0);
         }
     }
 
     template <class Container>
-    void computeCapillaryPressures_(Container& result,
+    OPM_HOST_DEVICE void computeCapillaryPressures_(Container& result,
                                     Scalar so,
                                     Scalar sg,
                                     Scalar sw,
@@ -1105,20 +1049,34 @@ private:
         MaterialLaw::capillaryPressures(result, matParams, fluidState);
     }
 
-    Scalar pressure_() const
-    { return (*this)[Indices::pressureSwitchIdx] * this->pressureScale_; }
+    OPM_HOST_DEVICE Scalar pressure_() const
+    {
+        return (*this)[Indices::pressureSwitchIdx] * this->getPressureScale();
+    }
+
+    OPM_HOST_DEVICE constexpr Scalar getPressureScale() const
+    {
+        // In device code, we do not have access to static members, so we return 1.0
+        // In most cases, the pressure scale is set to 1.0 anyway, so this is acceptable.
+        #if OPM_IS_INSIDE_DEVICE_FUNCTION
+        return Scalar(1.0);
+        #else
+        return this->pressureScale_;
+        #endif
+    }
 
     void setScaledPressure_(Scalar pressure)
-    { (*this)[Indices::pressureSwitchIdx] = pressure / (this->pressureScale_); }
+    { (*this)[Indices::pressureSwitchIdx] = pressure / (this->getPressureScale()); }
 
+    // NOTE: When adding new member variables, be sure to update the template copy constructor,
     WaterMeaning primaryVarsMeaningWater_{WaterMeaning::Disabled};
     PressureMeaning primaryVarsMeaningPressure_{PressureMeaning::Po};
     GasMeaning primaryVarsMeaningGas_{GasMeaning::Disabled};
     BrineMeaning primaryVarsMeaningBrine_{BrineMeaning::Disabled};
     SolventMeaning primaryVarsMeaningSolvent_{SolventMeaning::Disabled};
-    unsigned short pvtRegionIdx_;
-    Scalar pcFactor_;
-    static inline Scalar pressureScale_ = 1.0;
+    unsigned short pvtRegionIdx_{};
+    Scalar pcFactor_{};
+    inline static Scalar pressureScale_ = 1.0;
 };
 
 } // namespace Opm

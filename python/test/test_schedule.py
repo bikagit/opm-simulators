@@ -3,7 +3,7 @@ import unittest
 import datetime as dt
 from pathlib import Path
 import re
-from opm.simulators import BlackOilSimulator
+from .pytest_common import create_black_oil_simulator
 from opm.io.parser import Parser
 from opm.io.ecl_state import EclipseState
 from opm.io.schedule import Schedule
@@ -13,9 +13,6 @@ from .pytest_common import pushd
 class TestBasic(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
-        # NOTE: See comment in test_basic.py for the reason why we are
-        #   only using a single test_all() function instead of splitting
-        #   it up in multiple test functions
         test_dir = Path(os.path.dirname(__file__))
         cls.data_dir = test_dir.parent.joinpath("test_data/SPE1CASE1b")
 
@@ -32,9 +29,9 @@ class TestBasic(unittest.TestCase):
             self.assertTrue('INJ'  in self.schedule)
             self.assertEqual(dt.datetime(2015, 1, 1),   self.schedule.start)
             self.assertEqual(dt.datetime(2016, 1, 1), self.schedule.end)
-            self.sim = BlackOilSimulator(
-                self.deck, state, self.schedule, summary_config  )
-            tsteps = self.schedule.timesteps
+            self.sim = create_black_oil_simulator(
+                self.deck, state, self.schedule, summary_config)
+            tsteps = self.schedule.reportsteps
             self.assertEqual(dt.datetime(2015, 1, 1), tsteps[0])
             last_step = len(tsteps) - 1
             self.assertEqual(dt.datetime(2016, 1, 1), tsteps[last_step])

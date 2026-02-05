@@ -93,7 +93,9 @@ private:
         ThreePhaseMaterialTraits<Scalar,
                                  /*wettingPhaseIdx=*/FluidSystem::waterPhaseIdx,
                                  /*nonWettingPhaseIdx=*/FluidSystem::oilPhaseIdx,
-                                 /*gasPhaseIdx=*/FluidSystem::gasPhaseIdx>;
+                                 /*gasPhaseIdx=*/FluidSystem::gasPhaseIdx,
+                                 /* hysteresis */ false,
+                                 /* endpointscaling */ false>;
 
 public:
     using type = Opm::LinearMaterial<Traits>;
@@ -501,6 +503,18 @@ public:
     template <class Context>
     Scalar temperature(const Context& /*context*/,
                        unsigned /*spaceIdx*/,
+                       unsigned /*timeIdx*/) const
+    { return temperature_; }
+
+   /*!
+     * \copydoc FvBaseMultiPhaseProblem::temperature
+     *
+     * The black-oil model assumes constant temperature to define its
+     * parameters. Although temperature is thus not really used by the
+     * model, it gets written to the VTK output. Who nows, maybe we
+     * will need it one day?
+     */
+    Scalar temperature(unsigned /*globalDofIdx*/,
                        unsigned /*timeIdx*/) const
     { return temperature_; }
 

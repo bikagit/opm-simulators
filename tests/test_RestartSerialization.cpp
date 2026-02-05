@@ -151,12 +151,14 @@ TEST_FOR_TYPE_NAMED(BVec, BlockVectorWrapper)
 BOOST_AUTO_TEST_CASE(SingleWellState)
 {
     Opm::ParallelWellInfo<double> dummy;
-    auto data_out = Opm::SingleWellState<double>::serializationTestObject(dummy);
+    using IndexTraits = Opm::BlackOilDefaultFluidSystemIndices;
+    using PhaseUsage = Opm::PhaseUsageInfo<IndexTraits>;
+    auto data_out = Opm::SingleWellState<double, IndexTraits>::serializationTestObject(dummy);
     Opm::Serialization::MemPacker packer;
     Opm::Serializer ser(packer);
     ser.pack(data_out);
     const size_t pos1 = ser.position();
-    decltype(data_out) data_in("", dummy, false, 0.0, {}, Opm::PhaseUsage{}, 0.0);
+    decltype(data_out) data_in("", dummy, PhaseUsage{}, false, 0.0, {}, 0.0);
     ser.unpack(data_in);
     const size_t pos2 = ser.position();
     BOOST_CHECK_MESSAGE(pos1 == pos2, "Packed size differ from unpack size for SingleWellState");
@@ -180,7 +182,8 @@ BOOST_AUTO_TEST_CASE(WellContainer)
 BOOST_AUTO_TEST_CASE(WellState)
 {
     Opm::ParallelWellInfo<double> dummy;
-    auto data_out = Opm::WellState<double>::serializationTestObject(dummy);
+    using IndexTraits = Opm::BlackOilDefaultFluidSystemIndices;
+    auto data_out = Opm::WellState<double, IndexTraits>::serializationTestObject(dummy);
     Opm::Serialization::MemPacker packer;
     Opm::Serializer ser(packer);
     ser.pack(data_out);
@@ -195,13 +198,15 @@ BOOST_AUTO_TEST_CASE(WellState)
 BOOST_AUTO_TEST_CASE(WGState)
 {
     Opm::ParallelWellInfo<double> dummy;
-    auto data_out = Opm::WGState<double>::serializationTestObject(dummy);
+    using IndexTraits = Opm::BlackOilDefaultFluidSystemIndices;
+    using PhaseUsage = Opm::PhaseUsageInfo<IndexTraits>;
+    auto data_out = Opm::WGState<double, IndexTraits>::serializationTestObject(dummy);
     Opm::Serialization::MemPacker packer;
     Opm::Serializer ser(packer);
     ser.pack(data_out);
     const size_t pos1 = ser.position();
-    decltype(data_out) data_in(Opm::PhaseUsage{});
-    data_in.well_state = Opm::WellState<double>(dummy);
+    decltype(data_out) data_in(PhaseUsage{});
+    data_in.well_state = Opm::WellState<double, IndexTraits>(dummy);
     ser.unpack(data_in);
     const size_t pos2 = ser.position();
     BOOST_CHECK_MESSAGE(pos1 == pos2, "Packed size differ from unpack size for WGState");
@@ -293,24 +298,26 @@ BOOST_AUTO_TEST_CASE(FlowGenericProblemFem)
 #endif // HAVE_DUNE_FEM
 
 namespace Opm {
-
-class BlackoilWellModelGenericTest : public BlackoilWellModelGeneric<double>
+using IndexTraits = Opm::BlackOilDefaultFluidSystemIndices;
+using PhaseUsage = Opm::PhaseUsageInfo<IndexTraits>;
+class BlackoilWellModelGenericTest : public BlackoilWellModelGeneric<double, IndexTraits>
 {
 public:
     BlackoilWellModelGenericTest(Schedule& schedule,
-                                 BlackoilWellModelGasLiftGeneric<double>& gaslift,
+                                 BlackoilWellModelGasLiftGeneric<double, IndexTraits>& gaslift,
                                  const SummaryState& summaryState,
                                  const EclipseState& eclState,
                                  const PhaseUsage& phase_usage,
                                  const Parallel::Communication& comm,
                                  bool deserialize)
-        : BlackoilWellModelGeneric<double>(schedule, gaslift, summaryState,
+        : BlackoilWellModelGeneric<double, IndexTraits>(schedule, gaslift, network_, summaryState,
                                            eclState, phase_usage, comm)
+        , network_(*this)
     {
         if (deserialize) {
-            active_wgstate_.well_state = WellState<double>(dummy);
-            last_valid_wgstate_.well_state = WellState<double>(dummy);
-            nupcol_wgstate_.well_state = WellState<double>(dummy);
+            active_wgstate_.well_state = WellState<double, IndexTraits>(dummy);
+            last_valid_wgstate_.well_state = WellState<double, IndexTraits>(dummy);
+            nupcol_wgstate_.well_state = WellState<double, IndexTraits>(dummy);
         }
     }
 
@@ -322,27 +329,26 @@ public:
         local_shut_wells_ = {2, 3};
         closed_this_step_ = {"test1", "test2"};
         guideRate_.setSerializationTestData();
-        node_pressures_ = {{"test3", 4.0}};
-        active_wgstate_ = WGState<double>::serializationTestObject(dummy);
-        last_valid_wgstate_ = WGState<double>::serializationTestObject(dummy);
-        nupcol_wgstate_ = WGState<double>::serializationTestObject(dummy);
+        genNetwork_.setNodePressures({{"test3", 4.0}});
+        active_wgstate_ = WGState<double, IndexTraits>::serializationTestObject(dummy);
+        last_valid_wgstate_ = WGState<double, IndexTraits>::serializationTestObject(dummy);
+        nupcol_wgstate_ = WGState<double, IndexTraits>::serializationTestObject(dummy);
         switched_prod_groups_ = {{"test4", {Group::ProductionCMode::NONE, Group::ProductionCMode::ORAT}}};
         const auto controls = {Group::InjectionCMode::NONE, Group::InjectionCMode::RATE, Group::InjectionCMode::RATE };
         switched_inj_groups_ = {{"test4", {controls, {}, controls} }};
         closed_offending_wells_ = {{"test4", {"test5", "test6"}}};
     }
 
-    void calcResvCoeff(const int, const int, const std::vector<double>&, std::vector<double>&) override
+    void calcResvCoeff(const int, const int, const std::vector<double>&, std::vector<double>&) const override
     {}
 
-    void calcInjResvCoeff(const int, const int, std::vector<double>&) override
+    void calcInjResvCoeff(const int, const int, std::vector<double>&) const override
     {}
 
     void computePotentials(const std::size_t,
-                           const WellState<double>&,
+                           const WellState<double, IndexTraits>&,
                            std::string&,
-                           ExceptionType::ExcEnum&,
-                           DeferredLogger&) override
+                           ExceptionType::ExcEnum&) override
     {}
 
     void createWellContainer(const int) override
@@ -365,14 +371,15 @@ public:
     }
 
 private:
+    BlackoilWellModelNetworkGeneric<double, IndexTraits> network_;
     ParallelWellInfo<double> dummy;
 };
 
-class BlackoilWellModelGasLiftGenericTest : public BlackoilWellModelGasLiftGeneric<double>
+class BlackoilWellModelGasLiftGenericTest : public BlackoilWellModelGasLiftGeneric<double, IndexTraits>
 {
 public:
     BlackoilWellModelGasLiftGenericTest()
-        : BlackoilWellModelGasLiftGeneric<double>(false)
+        : BlackoilWellModelGasLiftGeneric<double, IndexTraits>(false)
     {
         this->last_glift_opt_time_ = 1234.5;
     }
@@ -526,6 +533,8 @@ struct AquiferFixture {
             "test_RestartSerialization",
             "--ecl-deck-file-name=GLIFT1.DATA"
         };
+        // Since this parameter is registered in opm/models/nonlinear/newtonmethodparams.cpp but not accessed here
+        Parameters::Register<Parameters::NewtonMaxIterations>("The maximum number of Newton iterations per time step");
         Opm::ThreadManager::registerParameters();
         AdaptiveTimeStepping<TT>::registerParameters();
         BlackoilModelParameters<double>::registerParameters();

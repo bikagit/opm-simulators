@@ -26,10 +26,12 @@
 #include <opm/input/eclipse/Schedule/Schedule.hpp>
 #include <opm/input/eclipse/Schedule/Well/WellTestConfig.hpp>
 
+#include <opm/material/fluidsystems/BlackOilDefaultFluidSystemIndices.hpp>
+
 #include <opm/simulators/utils/DeferredLoggingErrorHelpers.hpp>
 
 #include <opm/simulators/wells/BlackoilWellModelGeneric.hpp>
-#include <opm/simulators/wells/WellGroupHelpers.hpp>
+#include <opm/simulators/wells/GroupStateHelper.hpp>
 
 #include <fmt/format.h>
 
@@ -52,9 +54,9 @@ std::string simTimeToString(const std::time_t start_time, const double sim_time)
     return ss.str();
 }
 
-template<class Scalar>
-GroupEconomicLimitsChecker<Scalar>::
-GroupEconomicLimitsChecker(const BlackoilWellModelGeneric<Scalar>& well_model,
+template<typename Scalar, typename IndexTraits>
+GroupEconomicLimitsChecker<Scalar, IndexTraits>::
+GroupEconomicLimitsChecker(const BlackoilWellModelGeneric<Scalar, IndexTraits>& well_model,
                            WellTestState& well_test_state,
                            const Group& group,
                            const double simulation_time,
@@ -76,13 +78,10 @@ GroupEconomicLimitsChecker(const BlackoilWellModelGeneric<Scalar>& well_model,
     for (std::size_t i = 0; i < this->phase_idx_map_.size(); i++) {
         auto phase_idx = this->phase_idx_map_[i];
         this->phase_idx_reverse_map_[phase_idx] = static_cast<int>(i);
-        auto phase_pos = this->well_model_.phaseUsage().phase_pos[phase_idx];
-        Scalar production_rate = WellGroupHelpers<Scalar>::sumWellSurfaceRates(this->group_,
-                                                                               this->schedule_,
-                                                                               this->well_state_,
-                                                                               this->report_step_idx_,
-                                                                               phase_pos,
-                                                                               /*isInjector*/false);
+        auto phase_pos = this->well_model_.phaseUsage().canonicalToActivePhaseIdx(phase_idx);
+        Scalar production_rate = this->well_model_.groupStateHelper().sumWellSurfaceRates(
+            this->group_, phase_pos, /*isInjector*/false
+        );
         this->production_rates_[i] = this->well_model_.comm().sum(production_rate);
     }
 }
@@ -91,22 +90,22 @@ GroupEconomicLimitsChecker(const BlackoilWellModelGeneric<Scalar>& well_model,
  * Public methods in alphabetical order
  ****************************************/
 
-template<class Scalar>
-void GroupEconomicLimitsChecker<Scalar>::
+template<typename Scalar, typename IndexTraits>
+void GroupEconomicLimitsChecker<Scalar, IndexTraits>::
 activateEndRun()
 {
     displayDebugMessage("activate end run");
 }
 
-template<class Scalar>
-void GroupEconomicLimitsChecker<Scalar>::
+template<typename Scalar, typename IndexTraits>
+void GroupEconomicLimitsChecker<Scalar, IndexTraits>::
 closeWells()
 {
     closeWellsRecursive(this->group_);
 }
 
-template<class Scalar>
-void GroupEconomicLimitsChecker<Scalar>::
+template<typename Scalar, typename IndexTraits>
+void GroupEconomicLimitsChecker<Scalar, IndexTraits>::
 doWorkOver()
 {
     if (this->gecon_props_.workover() != GroupEconProductionLimits::EconWorkover::NONE) {
@@ -114,8 +113,8 @@ doWorkOver()
     }
 }
 
-template<class Scalar>
-bool GroupEconomicLimitsChecker<Scalar>::
+template<typename Scalar, typename IndexTraits>
+bool GroupEconomicLimitsChecker<Scalar, IndexTraits>::
 endRun()
 {
     if (this->gecon_props_.endRun()) {
@@ -124,12 +123,12 @@ endRun()
     return false;
 }
 
-template<class Scalar>
-bool GroupEconomicLimitsChecker<Scalar>::
+template<typename Scalar, typename IndexTraits>
+bool GroupEconomicLimitsChecker<Scalar, IndexTraits>::
 GOR()
 {
-    auto oil_phase_idx = this->phase_idx_reverse_map_[BlackoilPhases::Liquid];
-    auto gas_phase_idx = this->phase_idx_reverse_map_[BlackoilPhases::Vapour];
+    auto oil_phase_idx = this->phase_idx_reverse_map_[IndexTraits::oilPhaseIdx];
+    auto gas_phase_idx = this->phase_idx_reverse_map_[IndexTraits::gasPhaseIdx];
     auto oil_rate = this->production_rates_[oil_phase_idx];
     auto gas_rate = this->production_rates_[gas_phase_idx];
     Scalar gor;
@@ -158,11 +157,11 @@ GOR()
     return false;
 }
 
-template<class Scalar>
-bool GroupEconomicLimitsChecker<Scalar>::
+template<typename Scalar, typename IndexTraits>
+bool GroupEconomicLimitsChecker<Scalar, IndexTraits>::
 minGasRate()
 {
-    auto phase_idx = this->phase_idx_reverse_map_[BlackoilPhases::Vapour];
+    auto phase_idx = this->phase_idx_reverse_map_[IndexTraits::gasPhaseIdx];
     auto gas_production_rate = this->production_rates_[phase_idx];
     if (this->debug_) {
         const std::string msg = fmt::format(
@@ -185,11 +184,11 @@ minGasRate()
     return false;
 }
 
-template<class Scalar>
-bool GroupEconomicLimitsChecker<Scalar>::
+template<typename Scalar, typename IndexTraits>
+bool GroupEconomicLimitsChecker<Scalar, IndexTraits>::
 minOilRate()
 {
-    auto phase_idx = this->phase_idx_reverse_map_[BlackoilPhases::Liquid];
+    auto phase_idx = this->phase_idx_reverse_map_[IndexTraits::oilPhaseIdx];
     auto oil_production_rate = this->production_rates_[phase_idx];
     if (this->debug_) {
         const std::string msg = fmt::format(
@@ -212,26 +211,26 @@ minOilRate()
     return false;
 }
 
-template<class Scalar>
-int GroupEconomicLimitsChecker<Scalar>::
+template<typename Scalar, typename IndexTraits>
+int GroupEconomicLimitsChecker<Scalar, IndexTraits>::
 numProducersOpen()
 {
     return 1;
 }
 
-template<class Scalar>
-int GroupEconomicLimitsChecker<Scalar>::
+template<typename Scalar, typename IndexTraits>
+int GroupEconomicLimitsChecker<Scalar, IndexTraits>::
 numProducersOpenInitially()
 {
     return 1;
 }
 
-template<class Scalar>
-bool GroupEconomicLimitsChecker<Scalar>::
+template<typename Scalar, typename IndexTraits>
+bool GroupEconomicLimitsChecker<Scalar, IndexTraits>::
 waterCut()
 {
-    auto oil_phase_idx = this->phase_idx_reverse_map_[BlackoilPhases::Liquid];
-    auto water_phase_idx = this->phase_idx_reverse_map_[BlackoilPhases::Aqua];
+    auto oil_phase_idx = this->phase_idx_reverse_map_[IndexTraits::oilPhaseIdx];
+    auto water_phase_idx = this->phase_idx_reverse_map_[IndexTraits::waterPhaseIdx];
     auto oil_rate = this->production_rates_[oil_phase_idx];
     auto water_rate = this->production_rates_[water_phase_idx];
     auto liquid_rate = oil_rate + water_rate;
@@ -266,12 +265,12 @@ waterCut()
     return false;
 }
 
-template<class Scalar>
-bool GroupEconomicLimitsChecker<Scalar>::
+template<typename Scalar, typename IndexTraits>
+bool GroupEconomicLimitsChecker<Scalar, IndexTraits>::
 WGR()
 {
-    auto water_phase_idx = this->phase_idx_reverse_map_[BlackoilPhases::Aqua];
-    auto gas_phase_idx = this->phase_idx_reverse_map_[BlackoilPhases::Vapour];
+    auto water_phase_idx = this->phase_idx_reverse_map_[IndexTraits::waterPhaseIdx];
+    auto gas_phase_idx = this->phase_idx_reverse_map_[IndexTraits::gasPhaseIdx];
     auto water_rate = this->production_rates_[water_phase_idx];
     auto gas_rate = this->production_rates_[gas_phase_idx];
     Scalar wgr;
@@ -304,8 +303,8 @@ WGR()
  * Private methods in alphabetical order
  ****************************************/
 
-template<class Scalar>
-void GroupEconomicLimitsChecker<Scalar>::
+template<typename Scalar, typename IndexTraits>
+void GroupEconomicLimitsChecker<Scalar, IndexTraits>::
 displayDebugMessage(const std::string& msg) const
 {
     if (this->debug_) {
@@ -315,8 +314,8 @@ displayDebugMessage(const std::string& msg) const
     }
 }
 
-template<class Scalar>
-void GroupEconomicLimitsChecker<Scalar>::
+template<typename Scalar, typename IndexTraits>
+void GroupEconomicLimitsChecker<Scalar, IndexTraits>::
 addPrintMessage(const std::string& msg,
                 const Scalar value,
                 const Scalar limit,
@@ -338,8 +337,8 @@ addPrintMessage(const std::string& msg,
     this->message_ += message;
 }
 
-template<class Scalar>
-bool GroupEconomicLimitsChecker<Scalar>::
+template<typename Scalar, typename IndexTraits>
+bool GroupEconomicLimitsChecker<Scalar, IndexTraits>::
 closeWellsRecursive(const Group& group, int level)
 {
     bool wells_closed = false;
@@ -382,9 +381,12 @@ closeWellsRecursive(const Group& group, int level)
             const std::string msg = fmt::format("\n{} Closing well {}", indent, well_name);
             this->message_ += msg;
 
-            this->well_test_state_.close_well(
-                well_name, WellTestConfig::Reason::GROUP, this->simulation_time_);
-            this->well_model_.updateClosedWellsThisStep(well_name);
+            // Only update the well_test_state_ on ranks that have the well in question.
+            if (well_model_.hasLocalWell(well_name)) {
+                this->well_test_state_.close_well(
+                    well_name, WellTestConfig::Reason::GROUP, this->simulation_time_);
+                this->well_model_.updateClosedWellsThisStep(well_name);
+            }
         }
     }
 
@@ -396,8 +398,8 @@ closeWellsRecursive(const Group& group, int level)
     return wells_closed;
 }
 
-template<class Scalar>
-void GroupEconomicLimitsChecker<Scalar>::
+template<typename Scalar, typename IndexTraits>
+void GroupEconomicLimitsChecker<Scalar, IndexTraits>::
 throwNotImplementedError(const std::string& error) const
 {
     const std::string msg = fmt::format("Group: {} : GECON : {} not implemented",
@@ -405,10 +407,10 @@ throwNotImplementedError(const std::string& error) const
     OPM_DEFLOG_THROW(std::runtime_error, msg, this->deferred_logger_);
 }
 
-template class GroupEconomicLimitsChecker<double>;
+template class GroupEconomicLimitsChecker<double, BlackOilDefaultFluidSystemIndices>;
 
 #if FLOW_INSTANTIATE_FLOAT
-template class GroupEconomicLimitsChecker<float>;
+template class GroupEconomicLimitsChecker<float, BlackOilDefaultFluidSystemIndices>;
 #endif
 
 } // namespace Opm
