@@ -502,7 +502,8 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
                 if (!FluidSystem::phaseIsActive(phaseIdx)) {
                     continue;
                 }
-                const unsigned compIdx = Indices::canonicalToActiveComponentIndex(FluidSystem::solventComponentIndex(phaseIdx));
+                // const unsigned compIdx = Indices::canonicalToActiveComponentIndex(FluidSystem::solventComponentIndex(phaseIdx));
+                const unsigned compIdx = FluidSystem::canonicalToActiveCompIdx(FluidSystem::solventComponentIndex(phaseIdx));
 
                 B_avg[compIdx] += 1.0 / fs.invB(phaseIdx).value();
                 const auto R2 = tempresid[cell_idx][compIdx];
@@ -519,8 +520,9 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
 
             for (unsigned phaseIdx = 0; phaseIdx < FluidSystem::numPhases; ++phaseIdx)
             {
-                const unsigned compIdx = Indices::canonicalToActiveComponentIndex(FluidSystem::solventComponentIndex(phaseIdx));
-                
+                // const unsigned compIdx = Indices::canonicalToActiveCompIdx(FluidSystem::solventComponentIndex(phaseIdx));
+                const unsigned compIdx = FluidSystem::canonicalToActiveCompIdx(FluidSystem::solventComponentIndex(phaseIdx));
+
                 // oil
                 cnv_resid_oil_ = B_avg[0]/Scalar( global_nc_) * simulator_.timeStepSize() *  maxCoeff[0];
                 // std::cout<<"resid_oil: "<<resid_oil<<std::endl;
