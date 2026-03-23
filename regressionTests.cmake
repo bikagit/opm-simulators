@@ -70,6 +70,7 @@ add_multiple_tests(
 set(_spe1_brine_tests
   SPE1CASE1_BRINE
   SPE1CASE2_BRINE_GASWATER
+  SPE1CASE1_BRINE_THERMAL
 )
 
 add_multiple_tests(
@@ -416,6 +417,20 @@ add_test_compareECLFiles(CASENAME gconinje_resv_gas_01
                          REL_TOL ${rel_tol}
                          DIR resv_ctrl)
 
+add_test_compareECLFiles(CASENAME gconinje_resv1
+                         FILENAME GCONINJE-01
+                         SIMULATOR flow
+                         ABS_TOL ${abs_tol}
+                         REL_TOL ${rel_tol}
+                         DIR gconinje)
+
+add_test_compareECLFiles(CASENAME gconinje_resv2
+                         FILENAME GCONINJE-02
+                         SIMULATOR flow
+                         ABS_TOL ${abs_tol}
+                         REL_TOL ${rel_tol}
+                         DIR gconinje)
+
 set(_gconprod_cases
   T1L
   T1W
@@ -631,7 +646,8 @@ add_test_compareECLFiles(CASENAME ppcwmax
                          REL_TOL ${rel_tol}
                          DIR ppcwmax)
 
-if (opm-common_EMBEDDED_PYTHON)
+get_property(opm-common_EMBEDDED_PYTHON TARGET opmcommon PROPERTY EMBEDDED_PYTHON)
+if(opm-common_EMBEDDED_PYTHON)
   add_test_compareECLFiles(CASENAME udq_pyaction
                            FILENAME PYACTION_WCONPROD
                            SIMULATOR flow

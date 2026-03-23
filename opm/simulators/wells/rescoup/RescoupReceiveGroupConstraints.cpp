@@ -18,49 +18,45 @@
 */
 #include <config.h>
 #include <opm/material/fluidsystems/BlackOilDefaultFluidSystemIndices.hpp>
-#include <opm/simulators/wells/rescoup/RescoupReceiveGroupTargets.hpp>
+#include <opm/simulators/wells/rescoup/RescoupReceiveGroupConstraints.hpp>
 
 #include <fmt/format.h>
 
 namespace Opm {
 
 template <class Scalar, class IndexTraits>
-RescoupReceiveGroupTargets<Scalar, IndexTraits>::
-RescoupReceiveGroupTargets(
+RescoupReceiveGroupConstraints<Scalar, IndexTraits>::
+RescoupReceiveGroupConstraints(
     GuideRateHandler<Scalar, IndexTraits>& guide_rate_handler,
-    const WellState<Scalar, IndexTraits>& well_state,
-    const GroupState<Scalar>& group_state,
-    const int report_step_idx
+    GroupStateHelper<Scalar, IndexTraits>& group_state_helper
 )
     : guide_rate_handler_{guide_rate_handler}
-    , well_state_{well_state}
-    , group_state_{group_state}
-    , report_step_idx_{report_step_idx}
+    , group_state_helper_{group_state_helper}
     , reservoir_coupling_slave_{guide_rate_handler.reservoirCouplingSlave()}
 {
 }
 
 template <class Scalar, class IndexTraits>
 void
-RescoupReceiveGroupTargets<Scalar, IndexTraits>::
-receiveGroupTargetsFromMaster()
+RescoupReceiveGroupConstraints<Scalar, IndexTraits>::
+receiveGroupConstraintsFromMaster()
 {
     // NOTE: All ranks must call these functions because they contain broadcasts.
     //   The MPI_Recv parts inside the functions have their own rank 0 checks.
     auto& rescoup_slave = this->reservoir_coupling_slave_;
-    auto [num_inj_targets, num_prod_targets] = rescoup_slave.receiveNumGroupTargetsFromMaster();
+    auto [num_inj_targets, num_prod_constraints] = rescoup_slave.receiveNumGroupConstraintsFromMaster();
     if (num_inj_targets > 0) {
         rescoup_slave.receiveInjectionGroupTargetsFromMaster(num_inj_targets);
     }
-    if (num_prod_targets > 0) {
-        rescoup_slave.receiveProductionGroupTargetsFromMaster(num_prod_targets);
+    if (num_prod_constraints > 0) {
+        rescoup_slave.receiveProductionGroupConstraintsFromMaster(num_prod_constraints);
     }
 }
 
-template class RescoupReceiveGroupTargets<double, BlackOilDefaultFluidSystemIndices>;
+template class RescoupReceiveGroupConstraints<double, BlackOilDefaultFluidSystemIndices>;
 
 #if FLOW_INSTANTIATE_FLOAT
-template class RescoupReceiveGroupTargets<float, BlackOilDefaultFluidSystemIndices>;
+template class RescoupReceiveGroupConstraints<float, BlackOilDefaultFluidSystemIndices>;
 #endif
 
 } // namespace Opm

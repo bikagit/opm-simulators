@@ -86,10 +86,21 @@ namespace Opm {
 template<class FluidSystem>
 FlowsContainer<FluidSystem>::
 FlowsContainer(const Schedule& schedule,
-               const SummaryConfig& summaryConfig)
+               const SummaryConfig& summaryConfig,
+               std::function<bool(const int)> isInterior)
 {
-    // Check for any BFLOW[I|J|K] summary keys
-    blockFlows_ = summaryConfig.keywords("BFLOW*").size() > 0;
+    using namespace std::string_literals;
+    using Dir = FaceDir::DirEnum;
+    const std::array<int, 3> phaseIdxs = {gasPhaseIdx, oilPhaseIdx, waterPhaseIdx};
+    const std::array<int, 3> compIdxs = {gasCompIdx, oilCompIdx, waterCompIdx};
+    const auto nameIdxs = std::array{ "G"s, "O"s, "W"s };
+    const auto ijkIdxs = std::array{ "I-"s, "I"s, "J-"s, "J"s, "K-"s, "K"s };
+    const auto dirIdxs = std::array{ FaceDir::ToIntersectionIndex(Dir::XMinus),
+                                     FaceDir::ToIntersectionIndex(Dir::XPlus),
+                                     FaceDir::ToIntersectionIndex(Dir::YMinus),
+                                     FaceDir::ToIntersectionIndex(Dir::YPlus),
+                                     FaceDir::ToIntersectionIndex(Dir::ZMinus),
+                                     FaceDir::ToIntersectionIndex(Dir::ZPlus) };
 
     // Check if FLORES/FLOWS is set in any RPTRST in the schedule
     enableFlores_ = false;  // Used for the output of i+, j+, k+
@@ -97,39 +108,120 @@ FlowsContainer(const Schedule& schedule,
     enableFlows_ = false;
     enableFlowsn_ = false;
 
-    anyFlores_ = std::any_of(schedule.begin(), schedule.end(),
-                             [](const auto& block)
-                             {
-                                const auto& rstkw = block.rst_config().keywords;
-                                return rstkw.find("FLORES") != rstkw.end();
-                             });
-    anyFlows_ = std::any_of(schedule.begin(), schedule.end(),
-                            [](const auto& block)
-                            {
-                                const auto& rstkw = block.rst_config().keywords;
-                                return rstkw.find("FLOWS") != rstkw.end();
-                            });
+    anyFlores_ = std::ranges::any_of(schedule,
+                                     [](const auto& block)
+                                     {
+                                         const auto& rstkw = block.rst_config().keywords;
+                                         return rstkw.find("FLORES") != rstkw.end();
+                                     });
+    anyFlows_ = std::ranges::any_of(schedule,
+                                    [](const auto& block)
+                                    {
+                                        const auto& rstkw = block.rst_config().keywords;
+                                        return rstkw.find("FLOWS") != rstkw.end();
+                                    });
+
+    // Check for any BVEL[G|O|W][I|J|K][|-] summary keys
+    if (summaryConfig.keywords("BVEL*").size() > 0) {
+        for (unsigned ii = 0; ii < phaseIdxs.size(); ++ii) {
+            if (FluidSystem::phaseIsActive(phaseIdxs[ii])) {
+                for (unsigned jj = 0; jj < dirIdxs.size(); ++jj) {
+                    std::string blockid = "BVEL" + nameIdxs[ii] + ijkIdxs[jj];
+                    if (summaryConfig.keywords(blockid).size() == 0) {
+                        continue;
+                    }
+                    for (const auto& node : summaryConfig.keywords(blockid)) {
+                        if (isInterior(node.number() - 1)) {
+                            blockVelocityIds_[compIdxs[ii]][dirIdxs[jj]].push_back(node.number() - 1);
+                            blockVelocityAllIds_.push_back(node.number() - 1);
+                        }
+                    }
+                }
+            }
+        }
+        std::ranges::sort(blockVelocityAllIds_);
+        auto last = std::unique(blockVelocityAllIds_.begin(), blockVelocityAllIds_.end());
+        blockVelocityAllIds_.erase(last, blockVelocityAllIds_.end());
+    }
+
+    // Check for any BFLO[G|O|W][I|J|K][|-] summary keys
+    if (summaryConfig.keywords("BFLO*").size() > 0 && !anyFlows_) {
+        for (unsigned ii = 0; ii < phaseIdxs.size(); ++ii) {
+            if (FluidSystem::phaseIsActive(phaseIdxs[ii])) {
+                for (unsigned jj = 0; jj < dirIdxs.size(); ++jj) {
+                    std::string blockid = "BFLO" + nameIdxs[ii] + ijkIdxs[jj];
+                    if (summaryConfig.keywords(blockid).size() == 0) {
+                        continue;
+                    }
+                    for (const auto& node : summaryConfig.keywords(blockid)) {
+                        if (isInterior(node.number() - 1)) {
+                            blockFlowsIds_[compIdxs[ii]][dirIdxs[jj]].push_back(node.number() - 1);
+                            blockFlowsAllIds_.push_back(node.number() - 1);
+                        }
+                    }
+                }
+            }
+        }
+        std::ranges::sort(blockFlowsAllIds_);
+        auto last = std::unique(blockFlowsAllIds_.begin(), blockFlowsAllIds_.end());
+        blockFlowsAllIds_.erase(last, blockFlowsAllIds_.end());
+    }
 }
 
 template<class FluidSystem>
 void FlowsContainer<FluidSystem>::
 allocate(const std::size_t bufferSize,
+         const SummaryConfig& summaryConfig,
          const unsigned numOutputNnc,
          const bool allocRestart,
          std::map<std::string, int>& rstKeywords)
 {
+    using namespace std::string_literals;
     using Dir = FaceDir::DirEnum;
+    const std::array<int, 3> phaseIdxs = {gasPhaseIdx, oilPhaseIdx, waterPhaseIdx};
+    const std::array<int, 3> compIdxs = {gasCompIdx, oilCompIdx, waterCompIdx};
+    const auto nameIdxs = std::array{ "G"s, "O"s, "W"s };
+    const auto ijkIdxs = std::array{ "I-"s, "I"s, "J-"s, "J"s, "K-"s, "K"s };
+    const auto dirIdxs = std::array{ FaceDir::ToIntersectionIndex(Dir::XMinus),
+                                     FaceDir::ToIntersectionIndex(Dir::XPlus),
+                                     FaceDir::ToIntersectionIndex(Dir::YMinus),
+                                     FaceDir::ToIntersectionIndex(Dir::YPlus),
+                                     FaceDir::ToIntersectionIndex(Dir::ZMinus),
+                                     FaceDir::ToIntersectionIndex(Dir::ZPlus) };
 
-    // Flows may need to be allocated even when there is no restart due to BFLOW* summary keywords
-    if (blockFlows_ ) {
-        const std::array<int, 3> phaseIdxs { gasPhaseIdx, oilPhaseIdx, waterPhaseIdx };
-        const std::array<int, 3> compIdxs { gasCompIdx, oilCompIdx, waterCompIdx };
+    // Allocate vels for BVEL[G|O|W][I|J|K][|-] summary keywords
+    if (!blockVelocityAllIds_.empty()) {
+        for (unsigned ii = 0; ii < phaseIdxs.size(); ++ii) {
+            if (FluidSystem::phaseIsActive(phaseIdxs[ii])) {
+                for (unsigned jj = 0; jj < dirIdxs.size(); ++jj) {
+                    velocity_[compIdxs[ii]][dirIdxs[jj]].resize(blockVelocityIds_[compIdxs[ii]][dirIdxs[jj]].size(), 0.0);
+                }
+            }
+        }
+    }
 
+    // Allocate flows for BFLO[G|O|W][I|J|K][|-] summary keywords
+    if (!blockFlowsAllIds_.empty()) {
+        for (unsigned ii = 0; ii < phaseIdxs.size(); ++ii) {
+            if (FluidSystem::phaseIsActive(phaseIdxs[ii])) {
+                for (unsigned jj = 0; jj < dirIdxs.size(); ++jj) {
+                    flows_[compIdxs[ii]][dirIdxs[jj]].resize(blockFlowsIds_[compIdxs[ii]][dirIdxs[jj]].size(), 0.0);
+                }
+            }
+        }
+    }
+    else if (summaryConfig.keywords("BFLO*").size() > 0) {
         for (unsigned ii = 0; ii < phaseIdxs.size(); ++ii) {
             if (FluidSystem::phaseIsActive(phaseIdxs[ii])) {
                 flows_[compIdxs[ii]][FaceDir::ToIntersectionIndex(Dir::XPlus)].resize(bufferSize, 0.0);
                 flows_[compIdxs[ii]][FaceDir::ToIntersectionIndex(Dir::YPlus)].resize(bufferSize, 0.0);
                 flows_[compIdxs[ii]][FaceDir::ToIntersectionIndex(Dir::ZPlus)].resize(bufferSize, 0.0);
+                for (unsigned jj = 0; jj < 3; ++jj) {
+                    std::string blockid = "BFLO" + nameIdxs[ii] + ijkIdxs[2*jj];
+                    if (summaryConfig.keywords(blockid).size() > 0) {
+                        flows_[compIdxs[ii]][dirIdxs[2*jj]].resize(bufferSize, 0.0);
+                    }
+                }
             }
         }
     }
@@ -144,18 +236,13 @@ allocate(const std::size_t bufferSize,
     if (rstFlows) {
         rstKeywords["FLOWS"] = 0;
         enableFlows_ = true;
-
-        const std::array<int, 3> phaseIdxs = { gasPhaseIdx, oilPhaseIdx, waterPhaseIdx };
-        const std::array<int, 3> compIdxs = { gasCompIdx, oilCompIdx, waterCompIdx };
         const auto rstName = std::array { "FLOGASN+", "FLOOILN+", "FLOWATN+" };
 
         for (unsigned ii = 0; ii < phaseIdxs.size(); ++ii) {
             if (FluidSystem::phaseIsActive(phaseIdxs[ii])) {
-                if (!blockFlows_) { // Already allocated if summary vectors requested
-                    flows_[compIdxs[ii]][FaceDir::ToIntersectionIndex(Dir::XPlus)].resize(bufferSize, 0.0);
-                    flows_[compIdxs[ii]][FaceDir::ToIntersectionIndex(Dir::YPlus)].resize(bufferSize, 0.0);
-                    flows_[compIdxs[ii]][FaceDir::ToIntersectionIndex(Dir::ZPlus)].resize(bufferSize, 0.0);
-                }
+                flows_[compIdxs[ii]][FaceDir::ToIntersectionIndex(Dir::XPlus)].resize(bufferSize, 0.0);
+                flows_[compIdxs[ii]][FaceDir::ToIntersectionIndex(Dir::YPlus)].resize(bufferSize, 0.0);
+                flows_[compIdxs[ii]][FaceDir::ToIntersectionIndex(Dir::ZPlus)].resize(bufferSize, 0.0);
 
                 if (rstKeywords["FLOWS-"] > 0) {
                     flows_[compIdxs[ii]][FaceDir::ToIntersectionIndex(Dir::XMinus)].resize(bufferSize, 0.0);
@@ -182,9 +269,6 @@ allocate(const std::size_t bufferSize,
     if (rstKeywords["FLORES"] > 0) {
         rstKeywords["FLORES"] = 0;
         enableFlores_ = true;
-
-        const std::array<int, 3> phaseIdxs = { gasPhaseIdx, oilPhaseIdx, waterPhaseIdx };
-        const std::array<int, 3> compIdxs = { gasCompIdx, oilCompIdx, waterCompIdx };
         const auto rstName = std::array{ "FLRGASN+", "FLROILN+", "FLRWATN+" };
 
         for (unsigned ii = 0; ii < phaseIdxs.size(); ++ii) {
@@ -258,6 +342,22 @@ assignFlows(const unsigned globalDofIdx,
 
 template<class FluidSystem>
 void FlowsContainer<FluidSystem>::
+assignBlockVelocity(const unsigned index,
+                    const int faceId,
+                    const int comp_idx,
+                    const Scalar velocity)
+{ velocity_[comp_idx][faceId][index] = velocity; }
+
+template<class FluidSystem>
+void FlowsContainer<FluidSystem>::
+assignBlockFlows(const unsigned index,
+                 const int faceId,
+                 const int comp_idx,
+                 const Scalar flow)
+{ flows_[comp_idx][faceId][index] = flow; }
+
+template<class FluidSystem>
+void FlowsContainer<FluidSystem>::
 outputRestart(data::Solution& sol)
 {
     auto doInsert = [&sol](ScalarBuffer& value,
@@ -283,24 +383,24 @@ outputRestart(data::Solution& sol)
         addEntry<waterCompIdx>(entries, "FLOWAT", UnitSystem::measure::liquid_surface_rate, flows_);
     }
 
-    std::for_each(entries.begin(), entries.end(),
-                  [&doInsert](auto& array)
-                  {
-                      static const auto dirs = std::array{
-                          std::pair{FaceDir::ToIntersectionIndex(Dir::XMinus), "I-"},
-                          std::pair{FaceDir::ToIntersectionIndex(Dir::XPlus), "I+"},
-                          std::pair{FaceDir::ToIntersectionIndex(Dir::YMinus), "J-"},
-                          std::pair{FaceDir::ToIntersectionIndex(Dir::YPlus), "J+"},
-                          std::pair{FaceDir::ToIntersectionIndex(Dir::ZMinus), "K-"},
-                          std::pair{FaceDir::ToIntersectionIndex(Dir::ZPlus), "K+"},
-                      };
-                      const auto& name = std::get<0>(array);
-                      const auto& measure = std::get<1>(array);
-                      auto& value = std::get<2>(array);
-                      for (const auto& [index, postfix] : dirs) {
-                          doInsert(value[index], name + postfix, measure);
-                      }
-                  });
+    std::ranges::for_each(entries,
+                          [&doInsert](auto& array)
+                          {
+                              static const auto dirs = std::array{
+                                  std::pair{FaceDir::ToIntersectionIndex(Dir::XMinus), "I-"},
+                                  std::pair{FaceDir::ToIntersectionIndex(Dir::XPlus), "I+"},
+                                  std::pair{FaceDir::ToIntersectionIndex(Dir::YMinus), "J-"},
+                                  std::pair{FaceDir::ToIntersectionIndex(Dir::YPlus), "J+"},
+                                  std::pair{FaceDir::ToIntersectionIndex(Dir::ZMinus), "K-"},
+                                  std::pair{FaceDir::ToIntersectionIndex(Dir::ZPlus), "K+"},
+                              };
+                              const auto& name = std::get<0>(array);
+                              const auto& measure = std::get<1>(array);
+                              auto& value = std::get<2>(array);
+                              for (const auto& [index, postfix] : dirs) {
+                                  doInsert(value[index], name + postfix, measure);
+                              }
+                          });
 }
 
 template<class T> using FS = BlackOilFluidSystem<T, BlackOilDefaultFluidSystemIndices>;

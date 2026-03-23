@@ -189,7 +189,7 @@ public:
     }
 
     template <class SubDomainType>
-    void linearizeDomain(const SubDomainType& domain, bool isNlddLocalSolve = false)
+    void linearizeDomain(const SubDomainType& domain)
     {
         OPM_TIMEBLOCK(linearizeDomain);
         // we defer the initialization of the Jacobian matrix until here because the
@@ -200,7 +200,7 @@ public:
         }
 
         // Called here because it is no longer called from linearize_().
-        if (isNlddLocalSolve) {
+        if (problem_().iterationContext().inLocalSolve()) {
             resetSystem_(domain);
         }
         else {
@@ -332,6 +332,15 @@ public:
      */
     const auto& getFloresInfo() const
     { return floresInfo_; }
+
+    /*!
+     * \brief Return constant reference to the velocityInfo.
+     *
+     * (This object is only non-empty if dispersion, bioeffects, or block
+     * velocities are active.)
+     */
+    const auto& getVelocityInfo() const
+    { return velocityInfo_; }
 
     template <class SubDomainType>
     void resetSystem_(const SubDomainType& domain)
@@ -519,7 +528,7 @@ private:
         // before the first iteration of each time step, we need to update the
         // constraints. (i.e., we assume that constraints can be time dependent, but they
         // can't depend on the solution.)
-        if (model_().newtonMethod().numIterations() == 0) {
+        if (problem_().iterationContext().isFirstGlobalIteration()) {
             updateConstraintsMap_();
         }
 
@@ -683,6 +692,13 @@ private:
     };
     SparseTable<FlowInfo> flowsInfo_;
     SparseTable<FlowInfo> floresInfo_;
+
+    struct VelocityInfo
+    {
+        int faceId;
+        VectorBlock velocity;
+    };
+    SparseTable<VelocityInfo> velocityInfo_;
 
     // the jacobian matrix
     std::unique_ptr<SparseMatrixAdapter> jacobian_;

@@ -63,14 +63,14 @@ void RSTConv::outputRestart(data::Solution& sol)
     if (!this->cnv_X_.empty()) {
         constexpr const std::array names{"CNV_OIL", "CNV_GAS", "CNV_WAT",
                                          "CNV_PLY", "CNV_SAL", "CNV_SOL"};
-        std::for_each(this->cnv_X_.begin(), this->cnv_X_.end(),
-                      [i = 0, &names, &sol](auto& cnv) mutable
-                      {
-                          if (!cnv.empty()) {
-                              sol.insert(names[i], std::move(cnv), data::TargetType::RESTART_SOLUTION);
-                          }
-                          ++i;
-                      });
+        std::ranges::for_each(this->cnv_X_,
+                              [i = 0, &names, &sol](auto& cnv) mutable
+                              {
+                                  if (!cnv.empty()) {
+                                      sol.insert(names[i], std::move(cnv), data::TargetType::RESTART_SOLUTION);
+                                  }
+                                  ++i;
+                              });
         sol.insert("CONV_NEW", std::move(conv_new_), data::TargetType::RESTART_SOLUTION);
     }
 }
@@ -82,7 +82,7 @@ bool RSTConv::hasConv() const
 
 void RSTConv::prepareConv()
 {
-    std::fill(conv_new_.begin(), conv_new_.end(), 1);
+    std::ranges::fill(conv_new_, 1);
 }
 
 void RSTConv::updateNewton(const std::vector<int>& convNewt)

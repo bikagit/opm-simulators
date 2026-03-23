@@ -36,6 +36,7 @@
 
 #include <opm/models/blackoil/blackoilmodel.hh>
 
+#include <opm/simulators/linalg/FlexibleSolver.hpp>
 #include <opm/simulators/linalg/matrixblock.hh>
 
 #include <cstddef>
@@ -51,7 +52,9 @@ template<class Grid, class GridView, class DofMapper, class Stencil, class Fluid
 class GenericTemperatureModel
 {
 public:
-    using EnergyMatrix = Dune::BCRSMatrix<Opm::MatrixBlock<Scalar, 1, 1>>;
+    // the jacobian matrix
+    using MatrixBlockTemp = MatrixBlock<Scalar, 1, 1>;
+    using EnergyMatrix = Dune::BCRSMatrix<MatrixBlockTemp>;
     using EnergyVector = Dune::BlockVector<Dune::FieldVector<Scalar, 1>>;
     using CartesianIndexMapper = Dune::CartesianIndexMapper<Grid>;
     static constexpr int dimWorld = Grid::dimensionworld;
@@ -77,6 +80,7 @@ protected:
      */
     void doInit(std::size_t numGridDof);
 
+    void setupLinearSolver(const EnergyMatrix& M);
     bool linearSolve_(const EnergyMatrix& M, EnergyVector& x, EnergyVector& b);
 
     const GridView& gridView_;
@@ -85,11 +89,18 @@ protected:
     const DofMapper& dofMapper_;
 
     EnergyVector energyVector_;
-    std::unique_ptr<EnergyMatrix> energyMatrix_;
     std::vector<Scalar> temperature_;
     std::vector<Scalar> energy_rates_;
     bool doTemp_{false};
     Scalar maxTempChange_{5.0};
+
+    using AbstractSolverType = Dune::InverseOperator<EnergyVector, EnergyVector>;
+    using AbstractOperatorType = Dune::AssembledLinearOperator<EnergyMatrix, EnergyVector, EnergyVector>;
+    using AbstractPreconditionerType = Dune::PreconditionerWithUpdate<EnergyVector, EnergyVector>;
+
+    std::unique_ptr<AbstractSolverType> linear_solver_;
+    std::unique_ptr<AbstractOperatorType> op_;
+    AbstractPreconditionerType* pre_ = nullptr;
 };
 
 } // namespace Opm

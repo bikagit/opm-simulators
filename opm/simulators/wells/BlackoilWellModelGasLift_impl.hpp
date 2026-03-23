@@ -86,12 +86,13 @@ maybeDoGasLiftOptimize(const Simulator& simulator,
         //  them to the GasLiftGroupInfo constructor.
         GLiftEclWells ecl_well_map;
         initGliftEclWellMap(well_container, ecl_well_map);
+        const auto& iterCtx = simulator.problem().iterationContext();
         GasLiftGroupInfo group_info {
             ecl_well_map,
             simulator.vanguard().schedule(),
             simulator.vanguard().summaryState(),
             simulator.episodeIndex(),
-            simulator.model().newtonMethod().numIterations(),
+            iterCtx,
             deferred_logger,
             wellState,
             groupState,
@@ -125,10 +126,9 @@ maybeDoGasLiftOptimize(const Simulator& simulator,
         if constexpr (glift_debug) {
             std::vector<WellInterfaceGeneric<Scalar, IndexTraits>*> wc;
             wc.reserve(well_container.size());
-            std::transform(well_container.begin(), well_container.end(),
-                           std::back_inserter(wc),
-                           [](const auto& w)
-                           { return static_cast<WellInterfaceGeneric<Scalar, IndexTraits>*>(w.get()); });
+            std::ranges::transform(well_container, std::back_inserter(wc),
+                                   [](const auto& w)
+                                   { return static_cast<WellInterfaceGeneric<Scalar, IndexTraits>*>(w.get()); });
             this->gliftDebugShowALQ(wc,
                                     wellState,
                                     deferred_logger);
@@ -281,7 +281,8 @@ gasLiftOptimizationStage1SingleWell(WellInterface<TypeTag>* well,
                                                               sync_groups,
                                                               simulator.vanguard().gridView().comm(),
                                                               this->glift_debug);
-    auto state = glift->runOptimize(simulator.model().newtonMethod().numIterations());
+    const auto& iterCtx = simulator.problem().iterationContext();
+    auto state = glift->runOptimize(iterCtx.iteration());
     if (state) {
         state_map.emplace(well->name(), std::move(state));
         glift_wells.emplace(well->name(), std::move(glift));

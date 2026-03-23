@@ -133,13 +133,14 @@ class BlackOilIntensiveQuantitiesGlobalIndex
 public:
     using FluidState = BlackOilFluidState<Evaluation,
                                           FluidSystem,
-                                          energyModuleType == EnergyModules::ConstantTemperature,
-                                          (energyModuleType == EnergyModules::FullyImplicitThermal || energyModuleType == EnergyModules::SequentialImplicitThermal),
+                                          energyModuleType != EnergyModules::NoTemperature,
+                                          energyModuleType == EnergyModules::FullyImplicitThermal,
                                           compositionSwitchEnabled,
                                           enableVapwat,
                                           enableBrine,
                                           enableSaltPrecipitation,
                                           false,
+                                          enableSolvent,
                                           Indices::numPhases>;
     using Problem = GetPropType<TypeTag, Properties::Problem>;
 
@@ -520,6 +521,14 @@ public:
     const Evaluation& permFactor() const
     {
         throw std::logic_error("permFactor() is not yet implemented for compositional modeling");
+    }
+
+    /*!
+     * \brief Returns the fluid system used by this intensive quantities.
+     */
+    OPM_HOST_DEVICE const auto& getFluidSystem() const
+    {
+        return fluidState_.fluidSystem();
     }
 
 private:

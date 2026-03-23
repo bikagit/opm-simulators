@@ -49,14 +49,16 @@
 #include <opm/simulators/wells/GroupStateHelper.hpp>
 
 #ifdef RESERVOIR_COUPLING_ENABLED
-#include <opm/simulators/wells/rescoup/RescoupReceiveGroupTargets.hpp>
+#include <opm/simulators/wells/rescoup/RescoupReceiveGroupConstraints.hpp>
 #include <opm/simulators/wells/rescoup/RescoupReceiveSlaveGroupData.hpp>
 #include <opm/simulators/wells/rescoup/RescoupSendSlaveGroupData.hpp>
-#include <opm/simulators/wells/rescoup/RescoupTargetCalculator.hpp>
+#include <opm/simulators/wells/rescoup/RescoupConstraintsCalculator.hpp>
 #endif
 
 #include <opm/simulators/utils/DeferredLoggingErrorHelpers.hpp>
+#if HAVE_MPI
 #include <opm/simulators/utils/MPIPacker.hpp>
+#endif
 
 #if COMPILE_GPU_BRIDGE
 #include <opm/simulators/linalg/gpubridge/WellContributions.hpp>
@@ -370,6 +372,7 @@ namespace Opm {
         this->wellState().gliftTimeStepInit();
 
         const double simulationTime = simulator_.time();
+        const auto& iterCtx = simulator_.problem().iterationContext();
         OPM_BEGIN_PARALLEL_TRY_CATCH();
         {
             // test wells
@@ -389,7 +392,7 @@ namespace Opm {
             // we need to update the group data after the well is created
             // to make sure we get the correct mapping.
             this->updateAndCommunicateGroupData(reportStepIdx,
-                                    simulator_.model().newtonMethod().numIterations(),
+                                    iterCtx,
                                     param_.nupcol_group_rate_tolerance_, /*update_wellgrouptarget*/ false);
 
             // Wells are active if they are active wells on at least one process.
@@ -467,11 +470,14 @@ namespace Opm {
         this->guide_rate_handler_.updateGuideRates(
             reportStepIdx, simulationTime, this->wellState(), this->groupState()
         );
+        bool slave_needs_well_solution = false;
 #ifdef RESERVOIR_COUPLING_ENABLED
         if (this->isReservoirCouplingSlave()) {
             if (this->reservoirCouplingSlave().isFirstSubstepOfSyncTimestep()) {
                 this->sendSlaveGroupDataToMaster();
-                this->receiveGroupTargetsFromMaster(reportStepIdx);
+                this->receiveGroupConstraintsFromMaster();
+                this->groupStateHelper().updateSlaveGroupCmodesFromMaster();
+                slave_needs_well_solution = true;
             }
         }
 #endif
@@ -484,13 +490,16 @@ namespace Opm {
             }
             const double dt = simulator_.timeStepSize();
             const Group& fieldGroup = this->schedule().getGroup("FIELD", reportStepIdx);
-            this->groupStateHelper().updateGpMaintTargetForGroups(fieldGroup,
-                                                          regionalAveragePressureCalculator_,
-                                                          dt);
+            try {
+                this->groupStateHelper().updateGpMaintTargetForGroups(fieldGroup,
+                                                              regionalAveragePressureCalculator_,
+                                                              dt);
+            }
+            OPM_PARALLEL_CATCH_CLAUSE(exc_type, exc_msg);
         }
 
         this->updateAndCommunicateGroupData(reportStepIdx,
-                                    simulator_.model().newtonMethod().numIterations(),
+                                    iterCtx,
                                     param_.nupcol_group_rate_tolerance_,
                                     /*update_wellgrouptarget*/ true);
         try {
@@ -506,7 +515,7 @@ namespace Opm {
                 const bool dyn_status_change = this->wellState().well(well->name()).status
                         != this->prevWellState().well(well->name()).status;
 
-                if (event || dyn_status_change) {
+                if (event || dyn_status_change || slave_needs_well_solution) {
                     try {
                         well->scaleSegmentRatesAndPressure(this->wellState());
                         well->calculateExplicitQuantities(simulator_, this->groupStateHelper());
@@ -526,9 +535,22 @@ namespace Opm {
         OPM_PARALLEL_CATCH_CLAUSE(exc_type, exc_msg);
 
 #ifdef RESERVOIR_COUPLING_ENABLED
+        if (this->isReservoirCouplingSlave()) {
+            if (slave_needs_well_solution) {
+                this->updateAndCommunicateGroupData(reportStepIdx,
+                                            iterCtx,
+                                            param_.nupcol_group_rate_tolerance_,
+                                            /*update_wellgrouptarget*/ false);
+                this->sendSlaveGroupDataToMaster();
+            }
+        }
+#endif
+
+#ifdef RESERVOIR_COUPLING_ENABLED
         if (this->isReservoirCouplingMaster()) {
             if (this->reservoirCouplingMaster().isFirstSubstepOfSyncTimestep()) {
-                this->sendMasterGroupTargetsToSlaves();
+                this->sendMasterGroupConstraintsToSlaves();
+                this->receiveSlaveGroupData();
             }
         }
 #endif
@@ -597,28 +619,26 @@ namespace Opm {
     template<typename TypeTag>
     void
     BlackoilWellModel<TypeTag>::
-    sendMasterGroupTargetsToSlaves()
+    sendMasterGroupConstraintsToSlaves()
     {
-        // This function is called by the master process to send the group targets to the slaves.
-        RescoupTargetCalculator<Scalar, IndexTraits> target_calculator{
+        // This function is called by the master process to send the group constraints to the slaves.
+        RescoupConstraintsCalculator<Scalar, IndexTraits> constraints_calculator{
             this->guide_rate_handler_,
             this->groupStateHelper()
         };
-        target_calculator.calculateMasterGroupTargetsAndSendToSlaves();
+        constraints_calculator.calculateMasterGroupConstraintsAndSendToSlaves();
     }
 
     template<typename TypeTag>
     void
     BlackoilWellModel<TypeTag>::
-    receiveGroupTargetsFromMaster(int reportStepIdx)
+    receiveGroupConstraintsFromMaster()
     {
-        RescoupReceiveGroupTargets<Scalar, IndexTraits> target_receiver{
+        RescoupReceiveGroupConstraints<Scalar, IndexTraits> constraint_receiver{
             this->guide_rate_handler_,
-            this->wellState(),
-            this->groupState(),
-            reportStepIdx
+            this->groupStateHelper()
         };
-        target_receiver.receiveGroupTargetsFromMaster();
+        constraint_receiver.receiveGroupConstraintsFromMaster();
     }
 
 #endif // RESERVOIR_COUPLING_ENABLED
@@ -673,7 +693,9 @@ namespace Opm {
                                   ecl_well_map,
                                   this->well_open_times_);
             } catch (const std::exception& e) {
-                const std::string msg = fmt::format("Exception during testing of well: {}. The well will not open.\n Exception message: {}", wellEcl.name(), e.what());
+                const std::string msg =
+                  fmt::format(fmt::runtime("Exception during testing of well: {}. The well will not open.\n"
+                                           "Exception message: {}"), wellEcl.name(), e.what());
                 deferred_logger.warning("WELL_TESTING_FAILED", msg);
             }
         }
@@ -772,8 +794,7 @@ namespace Opm {
 
         this->calculateProductivityIndexValues(local_deferredLogger);
 
-        const auto& glo = this->schedule().glo(reportStepIdx);
-        this->updateNONEProductionGroups(glo, local_deferredLogger);
+        this->groupStateHelper().updateNONEProductionGroups();
 
         this->commitWGState();
 
@@ -882,7 +903,7 @@ namespace Opm {
 
             // First loop and check for status changes. This is necessary
             // as wcycle needs the updated open/close times.
-            std::for_each(this->wells_ecl_.begin(), this->wells_ecl_.end(),
+            std::ranges::for_each(this->wells_ecl_,
                           [this, &wg_events = this->report_step_start_events_](const auto& well_ecl)
                           {
                               if (!well_ecl.hasConnections()) {
@@ -1000,7 +1021,7 @@ namespace Opm {
                         : well_ecl.injectionControls(this->summaryState_).anyZeroRateConstraint();
                     if (any_zero_rate_constraint) {
                         // Treat as shut, do not add to container.
-                        local_deferredLogger.debug(fmt::format("  Well {} gets shut due to having zero rate constraint and disallowing crossflow ", well_ecl.name()) );
+                        local_deferredLogger.debug(fmt::format(fmt::runtime("  Well {} gets shut due to having zero rate constraint and disallowing crossflow "), well_ecl.name()));
                         this->wellState().shutWell(w);
                         this->well_close_times_.erase(well_name);
                         this->well_open_times_.erase(well_name);
@@ -1130,14 +1151,14 @@ namespace Opm {
                           DeferredLogger& deferred_logger) const
     {
         // Finding the location of the well in wells_ecl
-        const auto it = std::find_if(this->wells_ecl_.begin(),
-                                     this->wells_ecl_.end(),
-                                     [&well_name](const auto& w)
-                                     { return well_name == w.name(); });
+        const auto it =
+            std::ranges::find_if(this->wells_ecl_,
+                                 [&well_name](const auto& w)
+                                 { return well_name == w.name(); });
         // It should be able to find in wells_ecl.
         if (it == this->wells_ecl_.end()) {
             OPM_DEFLOG_THROW(std::logic_error,
-                             fmt::format("Could not find well {} in wells_ecl ", well_name),
+                             fmt::format(fmt::runtime("Could not find well {} in wells_ecl"), well_name),
                              deferred_logger);
         }
 
@@ -1150,17 +1171,18 @@ namespace Opm {
     template<typename TypeTag>
     void
     BlackoilWellModel<TypeTag>::
-    assemble(const int iterationIdx,
-             const double dt)
+    assemble(const double dt)
     {
         OPM_TIMEFUNCTION();
         auto logger_guard = this->groupStateHelper().pushLogger();
         auto& local_deferredLogger = this->groupStateHelper().deferredLogger();
 
+        const auto& iterCtx = simulator_.problem().iterationContext();
+
         if constexpr (BlackoilWellModelGasLift<TypeTag>::glift_debug) {
             if (gaslift_.terminalOutput()) {
                 const std::string msg =
-                    fmt::format("assemble() : iteration {}" , iterationIdx);
+                    fmt::format(fmt::runtime("assemble() : iteration {}"), iterCtx.iteration());
                 gaslift_.gliftDebug(msg, local_deferredLogger);
             }
         }
@@ -1177,8 +1199,9 @@ namespace Opm {
             }
         }
 
-        if (iterationIdx == 0 && this->wellsActive()) {
-	    OPM_TIMEBLOCK(firstIterationAssmble);
+        // Timestep initialization: should run once at the start of each timestep.
+        if (iterCtx.needsTimestepInit() && this->wellsActive()) {
+            OPM_TIMEBLOCK(firstIterationAssemble);
             // try-catch is needed here as updateWellControls
             // contains global communication and has either to
             // be reached by all processes or all need to abort
@@ -1189,7 +1212,7 @@ namespace Opm {
                 prepareTimeStep(local_deferredLogger);
             }
             OPM_END_PARALLEL_TRY_CATCH_LOG(local_deferredLogger,
-                                           "assemble() failed (It=0): ",
+                                           "assemble() failed during well initialization: ",
                                            this->terminal_output_, grid().comm());
         }
 
@@ -1236,12 +1259,12 @@ namespace Opm {
             if (network_update_iteration >= max_iteration ) {
                 // only output to terminal if we at the last newton iterations where we try to balance the network.
                 const int episodeIdx = simulator_.episodeIndex();
-                const int iterationIdx = simulator_.model().newtonMethod().numIterations();
-                if (this->network_.shouldBalance(episodeIdx, iterationIdx + 1)) {
+                const auto& iterCtx = simulator_.problem().iterationContext();
+                if (this->network_.willBalanceOnNextIteration(episodeIdx, iterCtx)) {
                     if (this->terminal_output_) {
                         const std::string msg = fmt::format("Maximum of {:d} network iterations has been used and we stop the update, \n"
-                            "and try again after the next Newton iteration (imbalance = {:.2e} bar, ctrl_change = {})",
-                            max_iteration, network_imbalance*1.0e-5, well_group_control_changed);
+                            "and try again after the next Newton iteration (imbalance = {:.2e} bar)",
+                            max_iteration, network_imbalance*1.0e-5);
                         local_deferredLogger.debug(msg);
                     }
                     // To avoid stopping the newton iterations too early, before the network is converged,
@@ -1250,8 +1273,8 @@ namespace Opm {
                 } else {
                     if (this->terminal_output_) {
                         const std::string msg = fmt::format("Maximum of {:d} network iterations has been used and we stop the update. \n"
-                            "The simulator will continue with unconverged network results (imbalance = {:.2e} bar, ctrl_change = {})",
-                            max_iteration, network_imbalance*1.0e-5, well_group_control_changed);
+                            "The simulator will continue with unconverged network results (imbalance = {:.2e} bar)",
+                            max_iteration, network_imbalance*1.0e-5);
                         local_deferredLogger.info(msg);
                     }
                 }
@@ -1283,9 +1306,9 @@ namespace Opm {
                                           DeferredLogger& local_deferredLogger)
     {
         OPM_TIMEFUNCTION();
-        const int iterationIdx = simulator_.model().newtonMethod().numIterations();
+        const auto& iterCtx = simulator_.problem().iterationContext();
         const int reportStepIdx = simulator_.episodeIndex();
-        this->updateAndCommunicateGroupData(reportStepIdx, iterationIdx,
+        this->updateAndCommunicateGroupData(reportStepIdx, iterCtx,
             param_.nupcol_group_rate_tolerance_, /*update_wellgrouptarget*/ true);
         // We need to call updateWellControls before we update the network as
         // network updates are only done on thp controlled wells.
@@ -1303,7 +1326,7 @@ namespace Opm {
             if (optimize_gas_lift) {
                 // we need to update the potentials if the thp limit as been modified by
                 // the network balancing
-                const bool updatePotentials = (this->network_.shouldBalance(reportStepIdx, iterationIdx) ||
+                const bool updatePotentials = (this->network_.shouldBalance(reportStepIdx, iterCtx) ||
                                                mandatory_network_balance);
                 alq_updated = gaslift_.maybeDoGasLiftOptimize(simulator_,
                                                           well_container_,
@@ -1332,8 +1355,8 @@ namespace Opm {
         }
         // we need to re-iterate the network when the well group controls changed or gaslift/alq is changed or
         // the inner iterations are did not converge
-        const bool more_network_update = this->network_.shouldBalance(reportStepIdx, iterationIdx) &&
-                    (more_inner_network_update || well_group_control_changed || alq_updated);
+        const bool more_network_update = this->network_.shouldBalance(reportStepIdx, iterCtx) &&
+                    (more_inner_network_update || alq_updated);
         return {well_group_control_changed, more_network_update, network_imbalance};
     }
 
@@ -1577,14 +1600,15 @@ namespace Opm {
     {
         // Get global (from all processes) convergence report.
         ConvergenceReport local_report;
-        const int iterationIdx = simulator_.model().newtonMethod().numIterations();
+        const auto& iterCtx = simulator_.problem().iterationContext();
+        const bool relaxTolerance = iterCtx.shouldRelax(param_.strict_outer_iter_wells_ + 1);
         {
             auto logger_guard = this->groupStateHelper().pushLogger();
             for (const auto& well : well_container_) {
                 if (well->isOperableAndSolvable() || well->wellIsStopped()) {
                     local_report += well->getWellConvergence(
                             this->groupStateHelper(), B_avg,
-                            iterationIdx > param_.strict_outer_iter_wells_);
+                            relaxTolerance);
                 } else {
                     ConvergenceReport report;
                     using CR = ConvergenceReport;
@@ -1645,7 +1669,6 @@ namespace Opm {
             return false;
         }
         const int episodeIdx = simulator_.episodeIndex();
-        const int iterationIdx = simulator_.model().newtonMethod().numIterations();
         const auto& comm = simulator_.vanguard().grid().comm();
         size_t iter = 0;
         bool changed_well_group = false;
@@ -1654,7 +1677,7 @@ namespace Opm {
         // iterate a few times to make sure all constraints are honored
         const std::size_t max_iter = param_.well_group_constraints_max_iterations_;
         while(!changed_well_group && iter < max_iter) {
-            changed_well_group = updateGroupControls(fieldGroup, deferred_logger, episodeIdx, iterationIdx);
+            changed_well_group = updateGroupControls(fieldGroup, deferred_logger, episodeIdx);
 
             // Check wells' group constraints and communicate.
             bool changed_well_to_group = false;
@@ -1678,7 +1701,7 @@ namespace Opm {
 
             changed_well_to_group = comm.sum(static_cast<int>(changed_well_to_group));
             if (changed_well_to_group) {
-                updateAndCommunicate(episodeIdx, iterationIdx);
+                updateAndCommunicate(episodeIdx);
                 changed_well_group = true;
             }
 
@@ -1703,7 +1726,7 @@ namespace Opm {
 
             changed_well_individual = comm.sum(static_cast<int>(changed_well_individual));
             if (changed_well_individual) {
-                updateAndCommunicate(episodeIdx, iterationIdx);
+                updateAndCommunicate(episodeIdx);
                 changed_well_group = true;
             }
             iter++;
@@ -1719,11 +1742,11 @@ namespace Opm {
     template<typename TypeTag>
     void
     BlackoilWellModel<TypeTag>::
-    updateAndCommunicate(const int reportStepIdx,
-                         const int iterationIdx)
+    updateAndCommunicate(const int reportStepIdx)
     {
+        const auto& iterCtx = simulator_.problem().iterationContext();
         this->updateAndCommunicateGroupData(reportStepIdx,
-                                            iterationIdx,
+                                            iterCtx,
                                             param_.nupcol_group_rate_tolerance_,
                                             /*update_wellgrouptarget*/ true);
 
@@ -1745,7 +1768,7 @@ namespace Opm {
         OPM_END_PARALLEL_TRY_CATCH("BlackoilWellModel::updateAndCommunicate failed: ",
                                    simulator_.gridView().comm())
         this->updateAndCommunicateGroupData(reportStepIdx,
-                                            iterationIdx,
+                                            iterCtx,
                                             param_.nupcol_group_rate_tolerance_,
                                             /*update_wellgrouptarget*/ true);
     }
@@ -1755,19 +1778,19 @@ namespace Opm {
     BlackoilWellModel<TypeTag>::
     updateGroupControls(const Group& group,
                         DeferredLogger& deferred_logger,
-                        const int reportStepIdx,
-                        const int iterationIdx)
+                        const int reportStepIdx)
     {
         OPM_TIMEFUNCTION();
+        const auto& iterCtx = simulator_.problem().iterationContext();
         bool changed = false;
         // restrict the number of group switches but only after nupcol iterations.
         const int nupcol = this->schedule()[reportStepIdx].nupcol();
         const int max_number_of_group_switches = param_.max_number_of_group_switches_;
-        const bool update_group_switching_log = iterationIdx >= nupcol;
+        const bool update_group_switching_log = !iterCtx.withinNupcol(nupcol);
         const bool changed_hc = this->checkGroupHigherConstraints(group, deferred_logger, reportStepIdx, max_number_of_group_switches, update_group_switching_log);
         if (changed_hc) {
             changed = true;
-            updateAndCommunicate(reportStepIdx, iterationIdx);
+            updateAndCommunicate(reportStepIdx);
         }
 
         bool changed_individual =
@@ -1785,11 +1808,11 @@ namespace Opm {
 
         if (changed_individual) {
             changed = true;
-            updateAndCommunicate(reportStepIdx, iterationIdx);
+            updateAndCommunicate(reportStepIdx);
         }
         // call recursively down the group hierarchy
         for (const std::string& groupName : group.groups()) {
-            bool changed_this = updateGroupControls( this->schedule().getGroup(groupName, reportStepIdx), deferred_logger, reportStepIdx,iterationIdx);
+            bool changed_this = updateGroupControls(this->schedule().getGroup(groupName, reportStepIdx), deferred_logger, reportStepIdx);
             changed = changed || changed_this;
         }
         return changed;
@@ -2050,9 +2073,9 @@ namespace Opm {
         // compute global average
         grid.comm().sum(B_avg.data(), B_avg.size());
         B_avg_.resize(B_avg.size());
-        std::transform(B_avg.begin(), B_avg.end(), B_avg_.begin(),
-                       [gcells = global_num_cells_](const auto bval)
-                       { return bval / gcells; });
+        std::ranges::transform(B_avg, B_avg_.begin(),
+                               [gcells = global_num_cells_](const auto bval)
+                               { return bval / gcells; });
     }
 
 
@@ -2118,11 +2141,10 @@ namespace Opm {
     getWell(const std::string& well_name) const
     {
         // finding the iterator of the well in wells_ecl
-        auto well = std::find_if(well_container_.begin(),
-                                     well_container_.end(),
-                                     [&well_name](const WellInterfacePtr& elem)->bool {
-                                         return elem->name() == well_name;
-                                     });
+        const auto well =
+            std::ranges::find_if(well_container_,
+                                 [&well_name](const WellInterfacePtr& elem) -> bool
+                                 { return elem->name() == well_name; });
 
         assert(well != well_container_.end());
 
@@ -2168,13 +2190,8 @@ namespace Opm {
     BlackoilWellModel<TypeTag>::
     computeWellTemperature()
     {
-        if constexpr (energyModuleType_ == EnergyModules::FullyImplicitThermal ||
-                      energyModuleType_ == EnergyModules::SequentialImplicitThermal) {
-            int np = this->numPhases();
-            Scalar cellInternalEnergy;
-            Scalar cellBinv;
-            Scalar cellDensity;
-            Scalar perfPhaseRate;
+        if constexpr (energyModuleType_ == EnergyModules::FullyImplicitThermal) {
+            const int np = this->numPhases();
             const int nw = this->numLocalWells();
             for (auto wellID = 0*nw; wellID < nw; ++wellID) {
                 const Well& well = this->wells_ecl_[wellID];
@@ -2185,38 +2202,17 @@ namespace Opm {
                         continue;
                     }
                 }
-
                 std::array<Scalar,2> weighted{0.0,0.0};
                 auto& [weighted_temperature, total_weight] = weighted;
-
-                auto& well_info = this->local_parallel_well_info_[wellID].get();
-                auto& perf_data = ws.perf_data;
-                auto& perf_phase_rate = perf_data.phase_rates;
-
+                const auto& well_info = this->local_parallel_well_info_[wellID].get();
                 using int_type = decltype(this->well_perf_data_[wellID].size());
                 for (int_type perf = 0, end_perf = this->well_perf_data_[wellID].size(); perf < end_perf; ++perf) {
                     const int cell_idx = this->well_perf_data_[wellID][perf].cell_index;
                     const auto& intQuants = simulator_.model().intensiveQuantities(cell_idx, /*timeIdx=*/0);
                     const auto& fs = intQuants.fluidState();
-
-                    // we on only have one temperature pr cell any phaseIdx will do
-                    Scalar cellTemperatures = fs.temperature(/*phaseIdx*/0).value();
-
-                    Scalar weight_factor = 0.0;
-                    for (unsigned phaseIdx = 0; phaseIdx < FluidSystem::numPhases; ++phaseIdx) {
-                        if (!FluidSystem::phaseIsActive(phaseIdx)) {
-                            continue;
-                        }
-                        cellInternalEnergy = fs.enthalpy(phaseIdx).value() -
-                                             fs.pressure(phaseIdx).value() / fs.density(phaseIdx).value();
-                        cellBinv = fs.invB(phaseIdx).value();
-                        cellDensity = fs.density(phaseIdx).value();
-                        perfPhaseRate = perf_phase_rate[perf*np + phaseIdx];
-                        weight_factor += cellDensity * perfPhaseRate / cellBinv * cellInternalEnergy / cellTemperatures;
-                    }
-                    weight_factor = std::abs(weight_factor) + 1e-13;
+                    Scalar weight_factor = computeTemperatureWeightFactor(perf, np, fs, ws);
                     total_weight += weight_factor;
-                    weighted_temperature += weight_factor * cellTemperatures;
+                    weighted_temperature += weight_factor * fs.temperature(/*phaseIdx*/0).value();
                 }
                 well_info.communication().sum(weighted.data(), 2);
                 this->wellState().well(wellID).temperature = weighted_temperature / total_weight;
@@ -2237,6 +2233,18 @@ namespace Opm {
         BlackoilWellModelGeneric<Scalar, IndexTraits>::assignWellTracerRates(wsrpt, trMod.getWellSolTracerRates(), reportStepIdx);
 
         this->assignMswTracerRates(wsrpt, trMod.getMswTracerRates(), reportStepIdx);
+    }
+
+    template <typename TypeTag>
+    void BlackoilWellModel<TypeTag>::
+    assignWellSpeciesRates(data::Wells& wsrpt) const
+    {
+        const auto reportStepIdx = static_cast<unsigned int>(this->reportStepIndex());
+        const auto& geochemMod = this->simulator_.problem().geochemistryModel();
+
+        BlackoilWellModelGeneric<Scalar, IndexTraits>::assignWellTracerRates(wsrpt, geochemMod.getWellSpeciesRates(), reportStepIdx);
+
+        this->assignMswTracerRates(wsrpt, geochemMod.getMswSpeciesRates(), reportStepIdx);
     }
 
 } // namespace Opm

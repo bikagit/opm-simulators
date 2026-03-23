@@ -137,24 +137,25 @@ class BlackOilIntensiveQuantities
 public:
     using FluidState = BlackOilFluidState<Evaluation,
                                           FluidSystem,
-                                          energyModuleType == EnergyModules::ConstantTemperature,
-                                          (energyModuleType == EnergyModules::FullyImplicitThermal || energyModuleType == EnergyModules::SequentialImplicitThermal),
+                                          energyModuleType != EnergyModules::NoTemperature,
+                                          energyModuleType == EnergyModules::FullyImplicitThermal,
                                           compositionSwitchEnabled,
                                           enableVapwat,
                                           enableBrine,
                                           enableSaltPrecipitation,
                                           enableDisgasInWater,
+                                          enableSolvent,
                                           Indices::numPhases>;
     using ScalarFluidState = BlackOilFluidState<Scalar,
                                                 FluidSystem,
-                                                energyModuleType == EnergyModules::ConstantTemperature,
-                                                (energyModuleType == EnergyModules::FullyImplicitThermal || 
-                                                    energyModuleType == EnergyModules::SequentialImplicitThermal),
+                                                energyModuleType != EnergyModules::NoTemperature,
+                                                energyModuleType == EnergyModules::FullyImplicitThermal,
                                                 compositionSwitchEnabled,
                                                 enableVapwat,
                                                 enableBrine,
                                                 enableSaltPrecipitation,
                                                 enableDisgasInWater,
+                                                enableSolvent,
                                                 Indices::numPhases>;
     using Problem = GetPropType<TypeTag, Properties::Problem>;
 
@@ -633,8 +634,7 @@ public:
         if constexpr (enablePolymer) {
             asImp_().polymerPropertiesUpdate_(elemCtx, dofIdx, timeIdx);
         }
-        if constexpr (energyModuleType == EnergyModules::FullyImplicitThermal ||
-                      energyModuleType == EnergyModules::SequentialImplicitThermal) {
+        if constexpr (energyModuleType == EnergyModules::FullyImplicitThermal) {
             asImp_().updateEnergyQuantities_(elemCtx, dofIdx, timeIdx);
         }
         if constexpr (enableFoam) {
@@ -812,6 +812,14 @@ public:
         else {
             throw std::logic_error("permFactor() called but salt precipitation or bioeffects are disabled");
         }
+    }
+
+    /*!
+     * \brief Returns the fluid system used by this intensive quantities.
+     */
+    OPM_HOST_DEVICE const auto& getFluidSystem() const
+    {
+        return fluidState_.fluidSystem();
     }
 
 private:

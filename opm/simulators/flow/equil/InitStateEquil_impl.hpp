@@ -51,9 +51,10 @@
 
 #include <algorithm>
 #include <cassert>
+#include <cmath>
 #include <cstddef>
 #include <limits>
-#include <cmath>
+#include <numbers>
 #include <stdexcept>
 
 namespace Opm {
@@ -233,13 +234,13 @@ void computeBlockDip(const CellCornerData<Scalar>& cellCorners,
         if (std::abs(nx) > 1e-10 || std::abs(ny) > 1e-10) {
             dipAzimuth = std::atan2(ny, nx);
             // Convert to 0-2π range
-            dipAzimuth = std::fmod(dipAzimuth + 2*M_PI, 2*M_PI);
+            dipAzimuth = std::fmod(dipAzimuth + 2*std::numbers::pi_v<Scalar>, 2*std::numbers::pi_v<Scalar>);
         } else {
             dipAzimuth = 0.0; // Vertical cell
         }
 
         // Clamp dip angle to reasonable values
-        const Scalar maxDip = M_PI/2 - 1e-6;
+        const Scalar maxDip = std::numbers::pi_v<Scalar>/2 - static_cast<Scalar>(1e-6);
         dipAngle = std::min(dipAngle, maxDip);
     } else {
         // Degenerate cell - assume horizontal
@@ -1443,14 +1444,15 @@ equilnum(const EclipseState& eclipseState,
 
     if (eclipseState.fieldProps().has_int("EQLNUM")) {
         const auto& e = eclipseState.fieldProps().get_int("EQLNUM");
-        std::transform(e.begin(), e.end(), eqlnum.begin(), [](int n){ return n - 1;});
+        std::ranges::transform(e, eqlnum.begin(), [](int n) { return n - 1; });
     }
     OPM_BEGIN_PARALLEL_TRY_CATCH();
     const int num_regions = eclipseState.getTableManager().getEqldims().getNumEquilRegions();
-    if ( std::any_of(eqlnum.begin(), eqlnum.end(), [num_regions](int n){return n >= num_regions;}) ) {
-        throw std::runtime_error("Values larger than maximum Equil regions " + std::to_string(num_regions) + " provided in EQLNUM");
+    if (std::ranges::any_of(eqlnum, [num_regions](int n){return n >= num_regions;})) {
+        throw std::runtime_error("Values larger than maximum Equil regions " +
+                                 std::to_string(num_regions) + " provided in EQLNUM");
     }
-    if ( std::any_of(eqlnum.begin(), eqlnum.end(), [](int n){return n < 0;}) ) {
+    if (std::ranges::any_of(eqlnum, [](int n){return n < 0;})) {
         throw std::runtime_error("zero or negative values provided in EQLNUM");
     }
     OPM_END_PARALLEL_TRY_CATCH("Invalied EQLNUM numbers: ", gridview.comm());
@@ -1498,7 +1500,7 @@ InitialStateComputer(MaterialLawManager& materialLawManager,
             } else {
                 const auto& input = eclipseState.fieldProps().get_double("SWATINIT");
                 swatInit_.resize(input.size());
-                std::copy(input.begin(), input.end(), swatInit_.begin());
+                std::ranges::copy(input, swatInit_.begin());
             }
         }
     }
@@ -1527,7 +1529,7 @@ InitialStateComputer(MaterialLawManager& materialLawManager,
         } else {
             std::vector<Scalar> output;
             output.resize(input.size());
-            std::copy(input.begin(), input.end(), output.begin());
+            std::ranges::copy(input, output.begin());
             return output;
         }
     };
@@ -2423,7 +2425,7 @@ equilibrateTiltedFaultBlock(const CellRange&        cells,
                 return std::atan2(a[1] - cy, a[0] - cx) < std::atan2(b[1] - cy, b[0] - cx);
             };
 
-            std::sort(intersectionPoints.begin(), intersectionPoints.end(), angleCompare);
+            std::ranges::sort(intersectionPoints, angleCompare);
 
             return polygonArea(intersectionPoints);
 

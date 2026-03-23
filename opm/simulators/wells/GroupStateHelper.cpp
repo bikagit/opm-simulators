@@ -21,18 +21,23 @@
 #include <opm/simulators/wells/GroupStateHelper.hpp>
 
 #include <opm/common/TimingMacros.hpp>
+#include <opm/input/eclipse/Schedule/GasLiftOpt.hpp>
 #include <opm/input/eclipse/Schedule/Group/GConSale.hpp>
 #include <opm/input/eclipse/Schedule/Group/GroupSatelliteInjection.hpp>
 #include <opm/input/eclipse/Schedule/Network/ExtNetwork.hpp>
 #include <opm/material/fluidsystems/BlackOilDefaultFluidSystemIndices.hpp>
 #include <opm/simulators/utils/DeferredLoggingErrorHelpers.hpp>
+#include <opm/input/eclipse/Schedule/ResCoup/ReservoirCouplingInfo.hpp>
 #include <opm/simulators/wells/FractionCalculator.hpp>
 #include <opm/simulators/wells/TargetCalculator.hpp>
+
+#include <fmt/format.h>
 
 #include <array>
 #include <cstddef>
 #include <stack>
 #include <set>
+#include <unordered_set>
 
 namespace Opm
 {
@@ -124,8 +129,6 @@ GroupStateHelper<Scalar, IndexTraits>::checkGroupConstraintsInj(const std::strin
     // If we are here, we are at the topmost group to be visited in the recursion.
     // This is the group containing the control we will check against.
     GroupStateHelpers::InjectionTargetCalculator<Scalar, IndexTraits> tcalc {*this,
-                                                                             resv_coeff,
-                                                                             group,
                                                                              injection_phase};
 
     GroupStateHelpers::FractionCalculator fcalc {this->schedule_,
@@ -133,7 +136,7 @@ GroupStateHelper<Scalar, IndexTraits>::checkGroupConstraintsInj(const std::strin
                                                  this->summary_state_,
                                                  this->report_step_,
                                                  &this->guide_rate_,
-                                                 tcalc.guideTargetMode(),
+                                                 this->getInjectionGuideTargetMode(injection_phase),
                                                  /*is_producer=*/false,
                                                  injection_phase};
 
@@ -187,7 +190,7 @@ GroupStateHelper<Scalar, IndexTraits>::checkGroupConstraintsInj(const std::strin
         return std::make_pair(current_well_rate_available > group_target_rate_available, scale);
     }
 
-    const Scalar orig_target = tcalc.groupTarget();
+    const Scalar orig_target = this->getInjectionGroupTarget(group, injection_phase, resv_coeff);
     const Scalar current_rate_available = tcalc.calcModeRateFromRates(rates);
     const std::size_t local_reduction_level = this->getLocalReductionLevel_(
         chain, /*is_production_group=*/false, injection_phase);
@@ -269,7 +272,7 @@ GroupStateHelper<Scalar, IndexTraits>::checkGroupConstraintsProd(const std::stri
                                                                       this->summary_state_,
                                                                       this->report_step_,
                                                                       &this->guide_rate_,
-                                                                      tcalc.guideTargetMode(),
+                                                                      this->getProductionGuideTargetMode(group),
                                                                       /*is_producer=*/true,
                                                                       /*injection_phase=*/Phase::OIL};
 
@@ -286,7 +289,7 @@ GroupStateHelper<Scalar, IndexTraits>::checkGroupConstraintsProd(const std::stri
         return tcalc.calcModeRateFromRates(group_surface_rates);
     };
 
-    const Scalar orig_target = tcalc.groupTarget();
+    const Scalar orig_target = this->getProductionGroupTarget(group);
     // Assume we have a chain of groups as follows: BOTTOM -> MIDDLE -> TOP.
     // Then ...
     // TODO finish explanation.
@@ -353,60 +356,69 @@ GroupStateHelper<Scalar, IndexTraits>::checkGroupConstraintsProd(const std::stri
     return std::make_pair(current_rate_available > target_rate_available, scale);
 }
 
-template <typename Scalar, typename IndexTraits>
-Scalar
-GroupStateHelper<Scalar, IndexTraits>::getGuideRate(const std::string& name,
-                                                   const GuideRateModel::Target target) const
+template<typename Scalar, typename IndexTraits>
+std::pair<Group::ProductionCMode, Scalar>
+GroupStateHelper<Scalar, IndexTraits>::
+checkGroupProductionConstraints(const Group& group) const
 {
-    if (this->schedule_.hasWell(name, this->report_step_)) {
-        if (this->guide_rate_.has(name) || this->guide_rate_.hasPotentials(name)) {
-            return this->guide_rate_.get(name, target, this->getWellRateVector(name));
-        } else {
-            return 0.0;
+    const auto controls = group.productionControls(this->summary_state_);
+    const auto currentControl = this->groupState().production_control(group.name());
+
+    for (const auto cmode : {
+        Group::ProductionCMode::ORAT,
+        Group::ProductionCMode::WRAT,
+        Group::ProductionCMode::GRAT,
+        Group::ProductionCMode::LRAT,
+        Group::ProductionCMode::RESV})
+    {
+        if (!group.has_control(cmode) || currentControl == cmode) {
+            continue;
+        }
+
+        Scalar current_rate = this->sumProductionRateForControlMode_(group, cmode);
+        Scalar target = this->getProductionConstraintTarget_(group, cmode, controls);
+
+        // LRAT skip heuristic: if liquid and oil targets are equal
+        // and water rate is ~0, skip the LRAT check.
+        if (cmode == Group::ProductionCMode::LRAT
+            && target == controls.oil_target)
+        {
+            const auto& pu = this->phaseUsage();
+            Scalar water_rate = this->sumWellSurfaceRates(group,
+                pu.canonicalToActivePhaseIdx(IndexTraits::waterPhaseIdx),
+                /*injector=*/false);
+            water_rate = this->comm().sum(water_rate);
+            if (std::abs(water_rate) < 1e-12) {
+                this->deferredLogger().debug(
+                    "LRAT_ORAT_GROUP",
+                    "GROUP " + group.name()
+                    + " The LRAT target is equal the ORAT target"
+                      " and the water rate is zero, skip checking LRAT");
+                continue;
+            }
+        }
+
+        auto result = this->checkProductionRateConstraint_(
+            group, cmode, currentControl, target, current_rate);
+        if (result.first != Group::ProductionCMode::NONE) {
+            return result;
         }
     }
 
-    if (this->guide_rate_.has(name)) {
-        return this->guide_rate_.get(name, target, this->getProductionGroupRateVector(name));
+    if (group.has_control(Group::ProductionCMode::CRAT)) {
+        OPM_DEFLOG_THROW(std::runtime_error,
+            "Group " + group.name()
+            + "CRAT control for production groups not implemented",
+            this->deferredLogger());
+    }
+    if (group.has_control(Group::ProductionCMode::PRBL)) {
+        OPM_DEFLOG_THROW(std::runtime_error,
+            "Group " + group.name()
+            + "PRBL control for production groups not implemented",
+            this->deferredLogger());
     }
 
-    Scalar total_guide_rate = 0.0;
-    const Group& group = this->schedule_.getGroup(name, this->report_step_);
-
-    for (const std::string& group_name : group.groups()) {
-        const Group::ProductionCMode& current_group_control
-            = this->groupState().production_control(group_name);
-        if (current_group_control == Group::ProductionCMode::FLD
-            || current_group_control == Group::ProductionCMode::NONE) {
-            // accumulate from sub wells/groups
-            total_guide_rate += this->getGuideRate(group_name, target);
-        }
-    }
-
-    for (const std::string& well_name : group.wells()) {
-        const auto& well_tmp = this->schedule_.getWell(well_name, this->report_step_);
-
-        if (well_tmp.isInjector())
-            continue;
-
-        const auto well_index = this->wellState().index(well_name);
-        if (!well_index.has_value())
-            continue;
-
-        const auto& ws = this->wellState().well(well_index.value());
-        if (ws.status == Well::Status::SHUT)
-            continue;
-
-        if (!this->wellState().isProductionGrup(well_name))
-            continue;
-
-        // Only count wells under group control or the ru
-        if (!this->wellState().isProductionGrup(well_name))
-            continue;
-
-        total_guide_rate += this->getGuideRate(well_name, target);
-    }
-    return total_guide_rate;
+    return {Group::ProductionCMode::NONE, Scalar(1.0)};
 }
 
 template <typename Scalar, typename IndexTraits>
@@ -417,67 +429,30 @@ getInjectionGroupTarget(
     const Phase& injection_phase,
     const std::vector<Scalar>& resv_coeff) const
 {
-    const auto& pu = this->phaseUsage();
-    const int pos = this->phaseToActivePhaseIdx(injection_phase);
-    Group::InjectionCMode cmode = this->groupState().injection_control(group.name(), injection_phase);
-    Group::InjectionControls ctrl = group.injectionControls(injection_phase, this->summary_state_);
-    bool use_gpmaint = group.has_gpmaint_control(injection_phase, cmode)
-                                && this->groupState().has_gpmaint_target(group.name());
-    switch (cmode) {
-    case Group::InjectionCMode::RATE:
-        if (use_gpmaint) {
-            return this->groupState().gpmaint_target(group.name());
-        }
-        return ctrl.surface_max_rate;
-    case Group::InjectionCMode::RESV:
-        if (use_gpmaint)
-            return this->groupState().gpmaint_target(group.name()) / resv_coeff[pos];
+    const auto cmode = this->groupState().injection_control(group.name(), injection_phase);
 
-        return ctrl.resv_max_rate / resv_coeff[pos];
-    case Group::InjectionCMode::REIN: {
-        Scalar production_rate = this->groupState().injection_rein_rates(ctrl.reinj_group)[pos];
-        return ctrl.target_reinj_fraction * production_rate;
-    }
-    case Group::InjectionCMode::VREP: {
-        // We use the injection_reservoir_rates directly instead of the reduction rates here to account for the
-        // possibility that the group in question has both a VREP control and another injection control for a different phase.
-        const std::vector<Scalar>& group_injection_reservoir_rates =
-                                this->groupState().injection_reservoir_rates(group.name());
-        Scalar voidage_rate = this->groupState().injection_vrep_rate(ctrl.voidage_group) * ctrl.target_void_fraction;
-        if (ctrl.phase != Phase::WATER && pu.phaseIsActive(IndexTraits::waterPhaseIdx)) {
-            const int water_pos = pu.canonicalToActivePhaseIdx(IndexTraits::waterPhaseIdx);
-            voidage_rate -= group_injection_reservoir_rates[water_pos];
+#ifdef RESERVOIR_COUPLING_ENABLED
+    // Check for master group target override
+    if (this->isReservoirCouplingSlave()
+        && this->reservoirCouplingSlave().hasMasterInjectionTarget(group.name(), injection_phase))
+    {
+        auto [master_target, master_cmode] =
+            this->reservoirCouplingSlave().masterInjectionTarget(group.name(), injection_phase);
+        auto filter = this->getInjectionFilterFlag_(group.name(), injection_phase);
+        using FilterFlag = ReservoirCoupling::GrupSlav::FilterFlag;
+        if (filter == FilterFlag::MAST) {
+            return master_target;
         }
-        if (ctrl.phase != Phase::OIL && pu.phaseIsActive(IndexTraits::oilPhaseIdx)) {
-            const int oil_pos = pu.canonicalToActivePhaseIdx(IndexTraits::oilPhaseIdx);
-            voidage_rate -= group_injection_reservoir_rates[oil_pos];
+        if (filter == FilterFlag::BOTH) {
+            Scalar slave_target = this->getInjectionGroupTargetForMode_(
+                group, injection_phase, resv_coeff, cmode);
+            return std::min(master_target, slave_target);
         }
-        if (ctrl.phase != Phase::GAS && pu.phaseIsActive(IndexTraits::gasPhaseIdx)) {
-            const int gas_pos = pu.canonicalToActivePhaseIdx(IndexTraits::gasPhaseIdx);
-            voidage_rate -= group_injection_reservoir_rates[gas_pos];
-        }
-        return voidage_rate / resv_coeff[pos];
+        // FilterFlag::SLAV: fall through to non-reservoir coupling logic below
     }
-    case Group::InjectionCMode::SALE: {
-        assert(pos == pu.canonicalToActivePhaseIdx(IndexTraits::gasPhaseIdx) );
-        Scalar sales_target = 0;
-        if (this->schedule_[this->report_step_].gconsale().has(group.name())) {
-            const auto& gconsale
-                = this->schedule_[this->report_step_].gconsale().get(group.name(), this->summary_state_);
-            sales_target = gconsale.sales_target;
-        }
-        // Gas injection rate = Total gas production rate + gas import rate - gas consumption rate - sales rate;
-        // Gas import and consumption is already included in the REIN rates
-        Scalar inj_rate = this->groupState().injection_rein_rates(group.name())[pos];
-        inj_rate -= sales_target;
-        return inj_rate;
-    }
-    default:
-        OPM_DEFLOG_THROW(std::logic_error,
-                         "Invalid Group::InjectionCMode in getInjectionGroupTarget",
-                         this->deferredLogger());
-        return 0.0;
-    }
+#endif
+
+    return this->getInjectionGroupTargetForMode_(group, injection_phase, resv_coeff, cmode);
 }
 
 template <typename Scalar, typename IndexTraits>
@@ -492,41 +467,46 @@ Scalar
 GroupStateHelper<Scalar, IndexTraits>::
 getProductionGroupTarget(const Group& group) const
 {
-    Group::ProductionCMode cmode = this->groupState().production_control(group.name());
-    Group::ProductionControls ctrl = group.productionControls(this->summary_state_);
-    switch (cmode) {
-    case Group::ProductionCMode::ORAT:
-        return ctrl.oil_target;
-    case Group::ProductionCMode::WRAT:
-        return ctrl.water_target;
-    case Group::ProductionCMode::GRAT:
+    const auto cmode = this->groupState().production_control(group.name());
+
+#ifdef RESERVOIR_COUPLING_ENABLED
+    // Check for master group target override
+    if (this->isReservoirCouplingSlave()
+        && this->reservoirCouplingSlave().hasMasterProductionTarget(group.name()))
     {
-        Scalar grat_target_from_sales = 0.0;
-        if (this->groupState().has_grat_sales_target(group.name())) {
-            grat_target_from_sales = this->groupState().grat_sales_target(group.name());
+        auto [master_target, master_cmode] =
+            this->reservoirCouplingSlave().masterProductionTarget(group.name());
+        // Slave group's cmode should already be updated to the master cmode,
+        // see updateSlaveGroupCmodesFromMaster()
+        if (cmode != master_cmode) {
+            OPM_DEFLOG_THROW(std::runtime_error,
+                "Group " + group.name()
+                + " cmode mismatch between slave and master",
+                this->deferredLogger());
         }
-        // gas target may have been adjusted by GCONSALE
-        if (grat_target_from_sales > 0)
-            return grat_target_from_sales;
+        auto filter = this->getProductionFilterFlag_(group.name(), master_cmode);
+        using FilterFlag = ReservoirCoupling::GrupSlav::FilterFlag;
+        if (filter == FilterFlag::MAST) {
+            return master_target;
+        }
+        if (filter == FilterFlag::BOTH) {
+            Scalar slave_target = this->getProductionGroupTargetForMode_(group, cmode);
+            return std::min(master_target, slave_target);
+        }
+        // FilterFlag::SLAV: fall through to non-reservoir coupling logic below
+    }
+#endif
 
-        return ctrl.gas_target;
-    }
-    case Group::ProductionCMode::LRAT:
-        return ctrl.liquid_target;
-    case Group::ProductionCMode::RESV:
-    {
-        bool use_gpmaint = group.has_gpmaint_control(cmode);
-        if (use_gpmaint && this->groupState().has_gpmaint_target(group.name()))
-            return this->groupState().gpmaint_target(group.name());
+    return this->getProductionGroupTargetForMode_(group, cmode);
+}
 
-        return ctrl.resv_target;
-    }
-    default:
-        OPM_DEFLOG_THROW(std::logic_error,
-                         "Invalid Group::ProductionCMode in getProductionGroupTarget",
-                         this->deferredLogger());
-        return 0.0;
-    }
+template<typename Scalar, typename IndexTraits>
+Scalar
+GroupStateHelper<Scalar, IndexTraits>::
+getProductionGroupTargetForMode(const Group& group,
+                                const Group::ProductionCMode cmode) const
+{
+    return this->getProductionGroupTargetForMode_(group, cmode);
 }
 
 template<typename Scalar, typename IndexTraits>
@@ -569,6 +549,82 @@ getInjectionGuideTargetMode(Phase injection_phase) const
                          this->deferredLogger());
         return GuideRateModel::Target::NONE;
     }
+}
+
+template<typename Scalar, typename IndexTraits>
+std::pair<Scalar, Group::ProductionCMode>
+GroupStateHelper<Scalar, IndexTraits>::
+getAutoChokeGroupProductionTargetRate(const Group& bottom_group,
+                                      const Group& group,
+                                      const std::vector<Scalar>& resv_coeff,
+                                      Scalar efficiencyFactor) const
+{
+    const Group::ProductionCMode& currentGroupControl
+        = this->groupState().production_control(group.name());
+    if (currentGroupControl == Group::ProductionCMode::FLD ||
+        currentGroupControl == Group::ProductionCMode::NONE) {
+        if (!group.productionGroupControlAvailable()) {
+            return std::make_pair(1.0, currentGroupControl);
+        } else {
+            // Produce share of parents control
+            const auto& parent = this->schedule_.getGroup(group.parent(), this->report_step_);
+            efficiencyFactor *= group.getGroupEfficiencyFactor();
+            return this->getAutoChokeGroupProductionTargetRate(bottom_group, parent,
+                                                               resv_coeff, efficiencyFactor);
+        }
+    }
+
+    if (!group.isProductionGroup()) {
+        return std::make_pair(1.0, currentGroupControl);
+    }
+
+    // If we are here, we are at the topmost group to be visited in the recursion.
+    // This is the group containing the control we will check against.
+
+    GroupStateHelpers::TargetCalculator<Scalar, IndexTraits> tcalc{*this,
+                                                                    resv_coeff,
+                                                                    group};
+
+    GroupStateHelpers::FractionCalculator<Scalar, IndexTraits> fcalc(this->schedule_,
+                                                                      *this,
+                                                                      this->summary_state_,
+                                                                      this->report_step_,
+                                                                      &this->guide_rate_,
+                                                                      this->getProductionGuideTargetMode(group),
+                                                                      true,
+                                                                      Phase::OIL);
+
+    auto localFraction = [&](const std::string& child) {
+        return fcalc.localFraction(child, child); //Note child needs to be passed to always include since the global isGrup map is not updated yet.
+    };
+
+    auto localReduction = [&](const std::string& group_name) {
+        const std::vector<Scalar>& groupTargetReductions
+            = this->groupState().production_reduction_rates(group_name);
+        return tcalc.calcModeRateFromRates(groupTargetReductions);
+    };
+
+    const Scalar orig_target = this->getProductionGroupTarget(group);
+    const auto chain = this->groupChainTopBot(bottom_group.name(), group.name());
+    const std::size_t local_reduction_level = this->getLocalReductionLevel_(
+        chain, /*is_production_group=*/true, Phase::OIL);
+
+    // Delegate to applyReductionsAndFractions_ with no addback.  Addback is not
+    // needed because autochoke wells are excluded from reductions via the
+    // !group.as_choke() check in updateGroupTargetReductionRecursive_().
+    const Scalar target = this->applyReductionsAndFractions_(chain,
+                                                              orig_target,
+                                                              /*current_rate_available=*/Scalar(0.0),
+                                                              local_reduction_level,
+                                                              /*is_production_group=*/true,
+                                                              /*injection_phase=*/Phase::OIL,
+                                                              localReduction,
+                                                              localFraction,
+                                                              /*do_addback=*/false);
+    // Avoid negative target rates coming from too large local reductions.
+    const Scalar target_rate = std::max(Scalar(0.0), target / efficiencyFactor);
+
+    return std::make_pair(target_rate, currentGroupControl);
 }
 
 template <typename Scalar, typename IndexTraits>
@@ -640,8 +696,6 @@ GroupStateHelper<Scalar, IndexTraits>::getWellGroupTargetInjector(const std::str
     // If we are here, we are at the topmost group to be visited in the recursion.
     // This is the group containing the control we will check against.
     GroupStateHelpers::InjectionTargetCalculator<Scalar, IndexTraits> tcalc{*this,
-                                                                             resv_coeff,
-                                                                             group,
                                                                              injection_phase};
 
     GroupStateHelpers::FractionCalculator<Scalar, IndexTraits> fcalc {this->schedule_,
@@ -649,7 +703,7 @@ GroupStateHelper<Scalar, IndexTraits>::getWellGroupTargetInjector(const std::str
                                                                       this->summary_state_,
                                                                       this->report_step_,
                                                                       &this->guide_rate_,
-                                                                      tcalc.guideTargetMode(),
+                                                                      this->getInjectionGuideTargetMode(injection_phase),
                                                                       /*is_producer=*/false,
                                                                       injection_phase};
 
@@ -667,7 +721,7 @@ GroupStateHelper<Scalar, IndexTraits>::getWellGroupTargetInjector(const std::str
         return fcalc.localFraction(child, always_included);
     };
 
-    const Scalar orig_target = tcalc.groupTarget();
+    const Scalar orig_target = this->getInjectionGroupTarget(group, injection_phase, resv_coeff);
     const Scalar current_rate_available = tcalc.calcModeRateFromRates(rates);
     const auto chain = this->groupChainTopBot(name, group.name());
 
@@ -744,7 +798,7 @@ GroupStateHelper<Scalar, IndexTraits>::getWellGroupTargetProducer(const std::str
                                                                       this->summary_state_,
                                                                       this->report_step_,
                                                                       &this->guide_rate_,
-                                                                      tcalc.guideTargetMode(),
+                                                                      this->getProductionGuideTargetMode(group),
                                                                       /*is_producer=*/true,
                                                                       /*injection_phase=*/Phase::OIL};
 
@@ -762,7 +816,7 @@ GroupStateHelper<Scalar, IndexTraits>::getWellGroupTargetProducer(const std::str
         return fcalc.localFraction(child, always_included);
     };
 
-    const Scalar orig_target = tcalc.groupTarget();
+    const Scalar orig_target = this->getProductionGroupTarget(group);
     // Switch sign since 'rates' are negative for producers.
     const Scalar current_rate_available = -tcalc.calcModeRateFromRates(rates);
     const auto chain = this->groupChainTopBot(name, group.name());
@@ -818,7 +872,7 @@ GroupStateHelper<Scalar, IndexTraits>::groupChainTopBot(const std::string& botto
     assert(chain.back() == top);
 
     // Reverse order and return.
-    std::reverse(chain.begin(), chain.end());
+    std::ranges::reverse(chain);
     return chain;
 }
 
@@ -985,9 +1039,23 @@ GroupStateHelper<Scalar, IndexTraits>::sumWellPhaseRates(bool res_rates,
         if (this->isSatelliteGroup_(group)) {
             return this->getSatelliteRate_(group, phase_pos, res_rates, is_injector);
         }
+#ifdef RESERVOIR_COUPLING_ENABLED
         if (this->isReservoirCouplingMasterGroup(group)) {
-            return this->getReservoirCouplingMasterGroupRate_(group, phase_pos, res_rates, is_injector);
+            using RateKind = ReservoirCoupling::RateKind;
+            RateKind kind;
+            if (is_injector) {
+                kind = res_rates ? RateKind::InjectionReservoir : RateKind::InjectionSurface;
+            } else {
+                if (res_rates)
+                    kind = RateKind::ProductionReservoir;
+                else if (network)
+                    kind = RateKind::ProductionNetworkSurface;
+                else
+                    kind = RateKind::ProductionSurface;
+            }
+            return this->getReservoirCouplingMasterGroupRate_(group, phase_pos, kind);
         }
+#endif
     }
     Scalar rate = 0.0;
     for (const std::string& group_name : group.groups()) {
@@ -1136,6 +1204,77 @@ GroupStateHelper<Scalar, IndexTraits>::updateNetworkLeafNodeProductionRates()
 
 template <typename Scalar, typename IndexTraits>
 void
+GroupStateHelper<Scalar, IndexTraits>::
+updateNONEProductionGroups()
+{
+    auto& group_state = this->groupState();
+    const auto& prod_group_controls = group_state.get_production_controls();
+    if (prod_group_controls.empty()) {
+        return;
+    }
+
+    const auto targeted = this->collectTargetedProductionGroups_();
+
+    const std::size_t num_gpc = prod_group_controls.size();
+    std::vector<std::string> gnames;
+    gnames.reserve(num_gpc);
+    std::vector<int> production_control_used;
+    production_control_used.reserve(num_gpc);
+
+    for (const auto& [name, _] : prod_group_controls) {
+        gnames.emplace_back(name);
+        const bool is_used = targeted.count(name) > 0;
+        production_control_used.emplace_back(is_used ? 1 : 0);
+    }
+
+    // Synchronize across all MPI ranks
+    if (this->comm_.size() > 1) {
+        this->comm_.sum(production_control_used.data(),
+                        static_cast<int>(num_gpc));
+    }
+
+    const auto& glo = this->schedule_.glo(this->report_step_);
+
+#ifdef RESERVOIR_COUPLING_ENABLED
+    // Collect RC master hierarchy groups (master groups + ancestors up to FIELD).
+    // These groups actively distribute targets to slave groups and must retain
+    // their scheduled production control.
+    const auto rc_hierarchy = this->isReservoirCouplingMaster()
+        ? this->collectMasterGroupHierarchy_()
+        : std::unordered_set<std::string>{};
+#endif
+
+    for (std::size_t i = 0; i < num_gpc; ++i) {
+        if (production_control_used[i] > 0) {
+            continue;
+        }
+        const auto& gname = gnames[i];
+        if (group_state.production_control(gname) == Group::ProductionCMode::NONE ||
+            group_state.production_control(gname) == Group::ProductionCMode::FLD) {
+            continue;
+        }
+        // Gas lift optimization requires non-NONE/FLD control mode
+        if (glo.active() && glo.has_group(gname)) {
+            continue;
+        }
+#ifdef RESERVOIR_COUPLING_ENABLED
+        // RC master hierarchy groups distribute targets to slaves —
+        // do not reset their production control to NONE
+        if (rc_hierarchy.count(gname) > 0) {
+            continue;
+        }
+#endif
+        if (this->comm_.rank() == 0) {
+            this->deferredLogger().info(
+                "Production group " + gname
+                + " has no constraints active, setting control mode to NONE");
+        }
+        group_state.production_control(gname, Group::ProductionCMode::NONE);
+    }
+}
+
+template <typename Scalar, typename IndexTraits>
+void
 GroupStateHelper<Scalar, IndexTraits>::updateREINForGroups(const Group& group,
                                                           bool sum_rank)
 {
@@ -1183,6 +1322,38 @@ GroupStateHelper<Scalar, IndexTraits>::updateReservoirRatesInjectionGroups(const
     }
     this->groupState().update_injection_reservoir_rates(group.name(), resv);
 }
+
+#ifdef RESERVOIR_COUPLING_ENABLED
+template <typename Scalar, typename IndexTraits>
+void
+GroupStateHelper<Scalar, IndexTraits>::
+updateSlaveGroupCmodesFromMaster()
+{
+    using FilterFlag = ReservoirCoupling::GrupSlav::FilterFlag;
+    auto& slave = this->reservoirCouplingSlave();
+    for (std::size_t i = 0; i < slave.numSlaveGroups(); ++i) {
+        const auto& gname = slave.slaveGroupIdxToGroupName(i);
+        // Production cmode
+        if (slave.hasMasterProductionTarget(gname)) {
+            auto [master_target, master_cmode] = slave.masterProductionTarget(gname);
+            auto filter = this->getProductionFilterFlag_(gname, master_cmode);
+            if (filter != FilterFlag::SLAV) {
+                this->groupState().production_control(gname, master_cmode);
+            }
+        }
+        // Injection cmode — check each phase
+        for (const auto phase : {Phase::WATER, Phase::OIL, Phase::GAS}) {
+            if (slave.hasMasterInjectionTarget(gname, phase)) {
+                auto [master_target, master_cmode] = slave.masterInjectionTarget(gname, phase);
+                auto filter = this->getInjectionFilterFlag_(gname, phase);
+                if (filter != FilterFlag::SLAV) {
+                    this->groupState().injection_control(gname, phase, master_cmode);
+                }
+            }
+        }
+    }
+}
+#endif
 
 template <typename Scalar, typename IndexTraits>
 void
@@ -1434,39 +1605,22 @@ GroupStateHelper<Scalar, IndexTraits>::worstOffendingWell(const Group& group,
     return offending_well;
 }
 
-// ---------------------------------------------------------------------
+// ============================================================================
 // Private methods
-// ---------------------------------------------------------------------
+// ============================================================================
 
-#ifdef RESERVOIR_COUPLING_ENABLED
-template <typename Scalar, typename IndexTraits>
-ReservoirCoupling::Phase
-GroupStateHelper<Scalar, IndexTraits>::
-activePhaseIdxToRescoupPhase_(int phase_pos) const
-{
-    const auto& pu = this->phase_usage_info_;
-    // Map active phase index back to canonical phase, then to ReservoirCoupling::Phase
-    if (pu.phaseIsActive(IndexTraits::oilPhaseIdx) &&
-        phase_pos == pu.canonicalToActivePhaseIdx(IndexTraits::oilPhaseIdx)) {
-        return ReservoirCoupling::Phase::Oil;
-    }
-    if (pu.phaseIsActive(IndexTraits::gasPhaseIdx) &&
-        phase_pos == pu.canonicalToActivePhaseIdx(IndexTraits::gasPhaseIdx)) {
-        return ReservoirCoupling::Phase::Gas;
-    }
-    if (pu.phaseIsActive(IndexTraits::waterPhaseIdx) &&
-        phase_pos == pu.canonicalToActivePhaseIdx(IndexTraits::waterPhaseIdx)) {
-        return ReservoirCoupling::Phase::Water;
-    }
-    // TODO: We would like to use OPM_DEFLOG_THROW() here, but it is requires the deferred logger to be passed
-    //   as an argument to all the sumWellPhaseRates() calls, which is a major refactoring effort.
-    //   Alternatively, we could store a reference to the deferred logger in the GroupStateHelper class,
-    //   which would also require a major refactoring effort.
-    throw std::logic_error("Invalid phase_pos in activePhaseIdxToRescoupPhase");
-    return ReservoirCoupling::Phase::Oil; // just to avoid warning
-}
-#endif
+// ============================================================================
+// Private: Constraint checking helpers
+//   Called from: checkGroupConstraintsInj(), checkGroupConstraintsProd(),
+//               checkGroupProductionConstraints()
+//   Also from:  getAutoChokeGroupProductionTargetRate(),
+//               getWellGroupTargetInjector(), getWellGroupTargetProducer(),
+//               updateNONEProductionGroups()
+// ============================================================================
 
+// Called from checkGroupConstraintsInj(), checkGroupConstraintsProd(), checkGroupProductionConstraints(),
+//     getAutoChokeGroupProductionTargetRate(), getWellGroupTargetInjector(), getWellGroupTargetProducer().
+// - Computes the guide rate distributed fraction of a higher level group target.
 template <typename Scalar, typename IndexTraits>
 template <typename ReductionLambda, typename FractionLambda>
 Scalar
@@ -1512,6 +1666,63 @@ GroupStateHelper<Scalar, IndexTraits>::applyReductionsAndFractions_(const std::v
     return target;
 }
 
+// Called from updateNONEProductionGroups().
+// - Scans all wells on this rank and collects the names of groups that are
+//   actively targeted by at least one open producer with GRUP control.
+template <typename Scalar, typename IndexTraits>
+std::unordered_set<std::string>
+GroupStateHelper<Scalar, IndexTraits>::
+collectTargetedProductionGroups_() const
+{
+    std::unordered_set<std::string> targeted;
+    const auto& well_state = this->wellState();
+    targeted.reserve(well_state.size());
+    for (std::size_t w = 0; w < well_state.size(); ++w) {
+        const auto& ws = well_state.well(w);
+        if (ws.producer
+            && ws.production_cmode == WellProducerCMode::GRUP
+            && ws.status == Well::Status::OPEN)
+        {
+            if (ws.group_target.has_value()) {
+                targeted.insert(ws.group_target->group_name);
+            } else {
+                OPM_DEFLOG_THROW(std::runtime_error,
+                    fmt::format("Well {} is on GRUP control but has no "
+                                "group target assigned.", ws.name),
+                    this->deferredLogger());
+            }
+        }
+    }
+    return targeted;
+}
+
+// Called from checkGroupProductionConstraints() which is called during well model assemble to check
+// if the group's individual control should be updated.
+template<typename Scalar, typename IndexTraits>
+std::pair<Group::ProductionCMode, Scalar>
+GroupStateHelper<Scalar, IndexTraits>::
+checkProductionRateConstraint_(const Group& group,
+                                Group::ProductionCMode cmode,
+                                Group::ProductionCMode currentControl,
+                                Scalar target,
+                                Scalar current_rate) const
+{
+    if (!group.has_control(cmode)) {
+        return {Group::ProductionCMode::NONE, Scalar(1.0)};
+    }
+    if (currentControl == cmode) {
+        return {Group::ProductionCMode::NONE, Scalar(1.0)};
+    }
+    if (target < current_rate) {
+        Scalar scale = 1.0;
+        if (current_rate > 1e-12)
+            scale = target / current_rate;
+        return {cmode, scale};
+    }
+    return {Group::ProductionCMode::NONE, Scalar(1.0)};
+}
+
+// Called from applyReductionsAndFractions_() to compute the addback efficiency factor.
 template <typename Scalar, typename IndexTraits>
 Scalar
 GroupStateHelper<Scalar, IndexTraits>::computeAddbackEfficiency_(const std::vector<std::string>& chain,
@@ -1539,47 +1750,10 @@ GroupStateHelper<Scalar, IndexTraits>::computeAddbackEfficiency_(const std::vect
     return efficiency;
 }
 
-template <typename Scalar, typename IndexTraits>
-std::string
-GroupStateHelper<Scalar, IndexTraits>::controlGroup_(const Group& group) const
-{
-    const Group::ProductionCMode& currentGroupControl = this->groupState().production_control(group.name());
-
-    if (currentGroupControl == Group::ProductionCMode::FLD
-        || currentGroupControl == Group::ProductionCMode::NONE) {
-        const auto& parent_name = group.control_group();
-        if (parent_name) {
-            const auto& parent = this->schedule_.getGroup(parent_name.value(), this->report_step_);
-            return this->controlGroup_(parent);
-        }
-    }
-
-    return group.name();
-}
-
-template <class Scalar, typename IndexTraits>
-Opm::GuideRate::RateVector
-GroupStateHelper<Scalar, IndexTraits>::getGuideRateVector_(const std::vector<Scalar>& rates) const
-{
-    const auto& pu = this->phase_usage_info_;
-    Scalar oilRate = 0.0;
-    if (pu.phaseIsActive(IndexTraits::oilPhaseIdx)) {
-        oilRate = rates[pu.canonicalToActivePhaseIdx(IndexTraits::oilPhaseIdx)];
-    }
-
-    Scalar gasRate = 0.0;
-    if (pu.phaseIsActive(IndexTraits::gasPhaseIdx)) {
-        gasRate = rates[pu.canonicalToActivePhaseIdx(IndexTraits::gasPhaseIdx)];
-    }
-
-    Scalar waterRate = 0.0;
-    if (pu.phaseIsActive(IndexTraits::waterPhaseIdx)) {
-        waterRate = rates[pu.canonicalToActivePhaseIdx(IndexTraits::waterPhaseIdx)];
-    }
-
-    return {oilRate, gasRate, waterRate};
-}
-
+// Called from the same public methods as applyReductionsAndFractions_().
+// - Finds the deepest group level with both a guide rate and group-controlled wells.
+// - This is the level where the bottom group's reduction rate must be added back to the target
+//   when it is about to switch from individual control to higher level group control.
 template <typename Scalar, typename IndexTraits>
 std::size_t
 GroupStateHelper<Scalar, IndexTraits>::getLocalReductionLevel_(const std::vector<std::string>& chain,
@@ -1606,104 +1780,290 @@ GroupStateHelper<Scalar, IndexTraits>::getLocalReductionLevel_(const std::vector
     return local_reduction_level;
 }
 
-template <typename Scalar, typename IndexTraits>
+// ============================================================================
+// Private: Injection & production target helpers
+//   Called from: getInjectionGroupTarget(), getProductionGroupTarget(),
+//               getProductionGroupTargetForMode(),
+//               checkGroupProductionConstraints()
+// ============================================================================
+
+// Called from getInjectionGroupTarget().
+// - Returns the injection target rate for a given injection control mode (RATE, RESV, REIN, VREP, SALE).
+// - This is needed when distributing a higher level group's target to a subordinate group/well, or
+//   when sending a master group's target to a slave group.
+template<typename Scalar, typename IndexTraits>
 Scalar
-GroupStateHelper<Scalar, IndexTraits>::getReservoirCouplingMasterGroupRate_([[maybe_unused]] const Group& group,
-                                                                            [[maybe_unused]] const int phase_pos,
-                                                                            [[maybe_unused]] const bool res_rates,
-                                                                            [[maybe_unused]] const bool is_injector) const
+GroupStateHelper<Scalar, IndexTraits>::
+getInjectionGroupTargetForMode_(
+    const Group& group,
+    const Phase& injection_phase,
+    const std::vector<Scalar>& resv_coeff,
+    const Group::InjectionCMode cmode) const
 {
-#ifdef RESERVOIR_COUPLING_ENABLED
-    if (this->isReservoirCouplingMaster()) {
-        ReservoirCoupling::Phase rescoup_phase = this->activePhaseIdxToRescoupPhase_(phase_pos);
-        if (is_injector) {
-            return this->reservoirCouplingMaster().getMasterGroupInjectionRate(group.name(), rescoup_phase, res_rates);
+    const auto& pu = this->phaseUsage();
+    const int pos = this->phaseToActivePhaseIdx(injection_phase);
+    Group::InjectionControls ctrl = group.injectionControls(injection_phase, this->summary_state_);
+    bool use_gpmaint = group.has_gpmaint_control(injection_phase, cmode)
+                                && this->groupState().has_gpmaint_target(group.name());
+    switch (cmode) {
+    case Group::InjectionCMode::RATE:
+        if (use_gpmaint) {
+            return this->groupState().gpmaint_target(group.name());
         }
-        else {
-            return this->reservoirCouplingMaster().getMasterGroupProductionRate(group.name(), rescoup_phase, res_rates);
-        }
+        return ctrl.surface_max_rate;
+    case Group::InjectionCMode::RESV: {
+        // GPMAINT targets (WINJ/GINJ/OINJ) are already per-phase RESV rates,
+        // so no other-phase subtraction is needed.
+        if (use_gpmaint)
+            return this->groupState().gpmaint_target(group.name()) / resv_coeff[pos];
+
+        // GCONINJE RESV (Item 5) is a total group reservoir volume target;
+        // subtract other phases' reservoir injection to get this phase's share.
+        const std::vector<Scalar>& group_injection_reservoir_rates =
+            this->groupState().injection_reservoir_rates(group.name());
+        return this->subtractOtherPhaseResvInjection_(
+            injection_phase, ctrl.resv_max_rate, group_injection_reservoir_rates) / resv_coeff[pos];
     }
-    else {
+    case Group::InjectionCMode::REIN: {
+        Scalar production_rate = this->groupState().injection_rein_rates(ctrl.reinj_group)[pos];
+        return ctrl.target_reinj_fraction * production_rate;
+    }
+    case Group::InjectionCMode::VREP: {
+        const std::vector<Scalar>& group_injection_reservoir_rates =
+            this->groupState().injection_reservoir_rates(group.name());
+        Scalar voidage_rate = this->groupState().injection_vrep_rate(ctrl.voidage_group)
+            * ctrl.target_void_fraction;
+        return this->subtractOtherPhaseResvInjection_(
+            injection_phase, voidage_rate, group_injection_reservoir_rates) / resv_coeff[pos];
+    }
+    case Group::InjectionCMode::SALE: {
+        assert(pos == pu.canonicalToActivePhaseIdx(IndexTraits::gasPhaseIdx) );
+        Scalar sales_target = 0;
+        if (this->schedule_[this->report_step_].gconsale().has(group.name())) {
+            const auto& gconsale
+                = this->schedule_[this->report_step_].gconsale().get(group.name(), this->summary_state_);
+            sales_target = gconsale.sales_target;
+        }
+        // Gas injection rate = Total gas production rate + gas import rate - gas consumption rate - sales rate;
+        // Gas import and consumption is already included in the REIN rates
+        Scalar inj_rate = this->groupState().injection_rein_rates(group.name())[pos];
+        inj_rate -= sales_target;
+        return inj_rate;
+    }
+    default:
+        OPM_DEFLOG_THROW(std::logic_error,
+                         "Invalid Group::InjectionCMode in getInjectionGroupTargetForMode_",
+                         this->deferredLogger());
         return 0.0;
     }
-#else
-    return 0.0;
-#endif
 }
 
-template <typename Scalar, typename IndexTraits>
+// Called from checkGroupProductionConstraints().
+// - Returns the production constraint target for a given control mode, applying master limits
+//   for reservoir coupling slave groups if applicable.
+// - This is used to check if a group's constraint is broken by the current group's production rates.
+template<typename Scalar, typename IndexTraits>
 Scalar
-GroupStateHelper<Scalar, IndexTraits>::getSatelliteRate_(const Group& group,
-                                                               const int phase_pos,
-                                                               const bool res_rates,
-                                                               const bool is_injector) const
+GroupStateHelper<Scalar, IndexTraits>::
+getProductionConstraintTarget_(const Group& group,
+                                Group::ProductionCMode cmode,
+                                const Group::ProductionControls& controls) const
 {
-    // Only obtain satellite rates once (on rank 0)
-    assert(this->isRank0() && this->isSatelliteGroup_(group));
+    Scalar target = 0.0;
+    switch (cmode) {
+    case Group::ProductionCMode::ORAT: target = controls.oil_target; break;
+    case Group::ProductionCMode::WRAT: target = controls.water_target; break;
+    case Group::ProductionCMode::GRAT: target = controls.gas_target; break;
+    case Group::ProductionCMode::LRAT: target = controls.liquid_target; break;
+    case Group::ProductionCMode::RESV: {
+        if (group.has_gpmaint_control(Group::ProductionCMode::RESV))
+            target = this->groupState().gpmaint_target(group.name());
+        else
+            target = controls.resv_target;
+        break;
+    }
+    default: return 0.0;
+    }
+#ifdef RESERVOIR_COUPLING_ENABLED
+    if (this->isReservoirCouplingSlave()
+        && this->isReservoirCouplingSlaveGroup(group))
+    {
+        target = this->getEffectiveProductionLimit_(group.name(), cmode, target);
+    }
+#endif
+    return target;
+}
+
+// Called from getProductionGroupTarget() and getProductionGroupTargetForMode() (public overload).
+// - Returns the production target for a given control mode (ORAT, WRAT, GRAT, LRAT, RESV).
+// - This is needed when distributing a higher level group's target to a subordinate group/well, or
+//   when sending a master group's target to a slave group.
+template<typename Scalar, typename IndexTraits>
+Scalar
+GroupStateHelper<Scalar, IndexTraits>::
+getProductionGroupTargetForMode_(const Group& group,
+                                 const Group::ProductionCMode cmode) const
+{
+    Group::ProductionControls ctrl = group.productionControls(this->summary_state_);
+    switch (cmode) {
+    case Group::ProductionCMode::ORAT:
+        return ctrl.oil_target;
+    case Group::ProductionCMode::WRAT:
+        return ctrl.water_target;
+    case Group::ProductionCMode::GRAT:
+    {
+        Scalar grat_target_from_sales = 0.0;
+        if (this->groupState().has_grat_sales_target(group.name())) {
+            grat_target_from_sales = this->groupState().grat_sales_target(group.name());
+        }
+        // gas target may have been adjusted by GCONSALE
+        if (grat_target_from_sales > 0)
+            return grat_target_from_sales;
+
+        return ctrl.gas_target;
+    }
+    case Group::ProductionCMode::LRAT:
+        return ctrl.liquid_target;
+    case Group::ProductionCMode::RESV:
+    {
+        bool use_gpmaint = group.has_gpmaint_control(cmode);
+        if (use_gpmaint && this->groupState().has_gpmaint_target(group.name()))
+            return this->groupState().gpmaint_target(group.name());
+
+        return ctrl.resv_target;
+    }
+    default:
+        OPM_DEFLOG_THROW(std::logic_error,
+                         "Invalid Group::ProductionCMode in getProductionGroupTargetForMode_",
+                         this->deferredLogger());
+        return 0.0;
+    }
+}
+
+// Called from getInjectionGroupTargetForMode_() for RESV and VREP control modes.
+// - Subtracts other-phase reservoir injection rates from the base reservoir rate target,
+//   so that only the injection phase's share of the total reservoir volume remains.
+template<typename Scalar, typename IndexTraits>
+Scalar
+GroupStateHelper<Scalar, IndexTraits>::
+subtractOtherPhaseResvInjection_(
+    const Phase injection_phase,
+    Scalar base_reservoir_rate,
+    const std::vector<Scalar>& group_injection_reservoir_rates) const
+{
+    const auto& pu = this->phaseUsage();
+    if (injection_phase != Phase::WATER && pu.phaseIsActive(IndexTraits::waterPhaseIdx)) {
+        base_reservoir_rate -= group_injection_reservoir_rates[
+            pu.canonicalToActivePhaseIdx(IndexTraits::waterPhaseIdx)];
+    }
+    if (injection_phase != Phase::OIL && pu.phaseIsActive(IndexTraits::oilPhaseIdx)) {
+        base_reservoir_rate -= group_injection_reservoir_rates[
+            pu.canonicalToActivePhaseIdx(IndexTraits::oilPhaseIdx)];
+    }
+    if (injection_phase != Phase::GAS && pu.phaseIsActive(IndexTraits::gasPhaseIdx)) {
+        base_reservoir_rate -= group_injection_reservoir_rates[
+            pu.canonicalToActivePhaseIdx(IndexTraits::gasPhaseIdx)];
+    }
+    return base_reservoir_rate;
+}
+
+// Called from checkGroupProductionConstraints().
+// - Sums the well surface or reservoir rates for the group for the given production control mode.
+// - This is used to check if a group's constraint is broken by the current group's production rates.
+template<typename Scalar, typename IndexTraits>
+Scalar
+GroupStateHelper<Scalar, IndexTraits>::
+sumProductionRateForControlMode_(const Group& group,
+                    Group::ProductionCMode cmode) const
+{
+    const auto& pu = this->phaseUsage();
     Scalar rate = 0.0;
-    if (is_injector) {
-        return this->satelliteInjectionRate_(this->schedule_[this->report_step_], group, phase_pos, res_rates);
-    } else {
-        const auto rate_comp = this->selectRateComponent_(phase_pos);
-        if (rate_comp.has_value()) {
-            return this->satelliteProductionRate_(this->schedule_[this->report_step_], group, *rate_comp, res_rates);
+    switch (cmode) {
+    case Group::ProductionCMode::ORAT:
+        rate = this->sumWellSurfaceRates(group,
+            pu.canonicalToActivePhaseIdx(IndexTraits::oilPhaseIdx), /*injector=*/false);
+        break;
+    case Group::ProductionCMode::WRAT:
+        rate = this->sumWellSurfaceRates(group,
+            pu.canonicalToActivePhaseIdx(IndexTraits::waterPhaseIdx), /*injector=*/false);
+        break;
+    case Group::ProductionCMode::GRAT:
+        rate = this->sumWellSurfaceRates(group,
+            pu.canonicalToActivePhaseIdx(IndexTraits::gasPhaseIdx), /*injector=*/false);
+        break;
+    case Group::ProductionCMode::LRAT:
+        rate = this->sumWellSurfaceRates(group,
+            pu.canonicalToActivePhaseIdx(IndexTraits::oilPhaseIdx), /*injector=*/false);
+        rate += this->sumWellSurfaceRates(group,
+            pu.canonicalToActivePhaseIdx(IndexTraits::waterPhaseIdx), /*injector=*/false);
+        break;
+    case Group::ProductionCMode::RESV:
+        rate = this->sumWellResRates(group,
+            pu.canonicalToActivePhaseIdx(IndexTraits::waterPhaseIdx), /*injector=*/false);
+        rate += this->sumWellResRates(group,
+            pu.canonicalToActivePhaseIdx(IndexTraits::oilPhaseIdx), /*injector=*/false);
+        rate += this->sumWellResRates(group,
+            pu.canonicalToActivePhaseIdx(IndexTraits::gasPhaseIdx), /*injector=*/false);
+        break;
+    default:
+        break;
+    }
+    return this->comm().sum(rate);
+}
+
+// ============================================================================
+// Private: Guide rate & hierarchy navigation helpers
+//   Called from: getProductionGroupRateVector(), getWellRateVector(),
+//               isAutoChokeGroupUnderperforming_()
+// ============================================================================
+
+// Called from isAutoChokeGroupUnderperforming_().
+// - Walks up the group hierarchy to find the nearest ancestor with individual control.
+template <typename Scalar, typename IndexTraits>
+std::string
+GroupStateHelper<Scalar, IndexTraits>::controlGroup_(const Group& group) const
+{
+    const Group::ProductionCMode& currentGroupControl = this->groupState().production_control(group.name());
+
+    if (currentGroupControl == Group::ProductionCMode::FLD
+        || currentGroupControl == Group::ProductionCMode::NONE) {
+        const auto& parent_name = group.control_group();
+        if (parent_name) {
+            const auto& parent = this->schedule_.getGroup(parent_name.value(), this->report_step_);
+            return this->controlGroup_(parent);
         }
     }
-    return rate;
+
+    return group.name();
 }
 
-template <typename Scalar, typename IndexTraits>
-bool
-GroupStateHelper<Scalar, IndexTraits>::isAutoChokeGroupUnderperforming_(const Group& group) const
+// Called from getProductionGroupRateVector() and getWellRateVector().
+// - Converts a phase-indexed rate vector into a GuideRate::RateVector (oil, gas, water).
+template <class Scalar, typename IndexTraits>
+Opm::GuideRate::RateVector
+GroupStateHelper<Scalar, IndexTraits>::getGuideRateVector_(const std::vector<Scalar>& rates) const
 {
-    // Only applies to production auto choke groups
-    if (!group.as_choke()) {
-        return false;
+    const auto& pu = this->phase_usage_info_;
+    Scalar oilRate = 0.0;
+    if (pu.phaseIsActive(IndexTraits::oilPhaseIdx)) {
+        oilRate = rates[pu.canonicalToActivePhaseIdx(IndexTraits::oilPhaseIdx)];
     }
 
-    // Auto choke groups inherit control from an ancestor (cmode == FLD or NONE)
-    const auto ctrl = this->groupState().production_control(group.name());
-    if (ctrl != Group::ProductionCMode::FLD && ctrl != Group::ProductionCMode::NONE) {
-        return false;
+    Scalar gasRate = 0.0;
+    if (pu.phaseIsActive(IndexTraits::gasPhaseIdx)) {
+        gasRate = rates[pu.canonicalToActivePhaseIdx(IndexTraits::gasPhaseIdx)];
     }
 
-    // Check if guide rate is set for this group
-    const auto& group_guide_rate = group.productionControls(this->summary_state_).guide_rate;
-    if (group_guide_rate <= 0) {
-        return false;
+    Scalar waterRate = 0.0;
+    if (pu.phaseIsActive(IndexTraits::waterPhaseIdx)) {
+        waterRate = rates[pu.canonicalToActivePhaseIdx(IndexTraits::waterPhaseIdx)];
     }
 
-    // Find the ancestor group that has actual control
-    const auto& control_group_name = this->controlGroup_(group);
-    const auto& control_group = this->schedule_.getGroup(control_group_name, this->report_step_);
-
-    // Calculate target rate for this auto choke group
-    const auto num_phases = this->numPhases();
-    std::vector<Scalar> resv_coeff(num_phases, 1.0);
-    GroupStateHelpers::TargetCalculator<Scalar, IndexTraits> tcalc{*this,
-                                                                   resv_coeff,
-                                                                   control_group};
-    const auto& control_group_target = tcalc.groupTarget();
-    const auto& control_group_guide_rate
-        = this->getGuideRate(control_group_name, tcalc.guideTargetMode());
-
-    if (control_group_guide_rate <= 0) {
-        return false;
-    }
-
-    const Scalar target_rate = control_group_target * group_guide_rate / control_group_guide_rate;
-
-    // Calculate current rate for this group
-    std::vector<Scalar> rates(num_phases, 0.0);
-    for (int phase_pos = 0; phase_pos < num_phases; ++phase_pos) {
-        rates[phase_pos] = this->sumWellSurfaceRates(group, phase_pos, /*injector=*/false);
-    }
-    const Scalar current_rate = tcalc.calcModeRateFromRates(rates);
-
-    // If underperforming, wells should be excluded from GCW count
-    return current_rate < target_rate;
+    return {oilRate, gasRate, waterRate};
 }
 
+// Called from checkGroupConstraintsInj() and checkGroupConstraintsProd().
+// - Checks whether 'bottom' (well or group) is a descendant of 'top' in the group hierarchy.
 template <typename Scalar, typename IndexTraits>
 bool
 GroupStateHelper<Scalar, IndexTraits>::isInGroupChainTopBot_(const std::string& bottom,
@@ -1728,6 +2088,218 @@ GroupStateHelper<Scalar, IndexTraits>::isInGroupChainTopBot_(const std::string& 
     return true;
 }
 
+// ============================================================================
+// Private: Reservoir coupling helpers
+//   Called from: getInjectionGroupTarget(), getProductionConstraintTarget_(),
+//               sumWellPhaseRates(), updateNONEProductionGroups()
+// ============================================================================
+
+#ifdef RESERVOIR_COUPLING_ENABLED
+
+// Called from getReservoirCouplingMasterGroupRate_().
+// - Maps an active phase index to the corresponding ReservoirCoupling::Phase enum.
+template <typename Scalar, typename IndexTraits>
+ReservoirCoupling::Phase
+GroupStateHelper<Scalar, IndexTraits>::
+activePhaseIdxToRescoupPhase_(int phase_pos) const
+{
+    const auto& pu = this->phase_usage_info_;
+    // Map active phase index back to canonical phase, then to ReservoirCoupling::Phase
+    if (pu.phaseIsActive(IndexTraits::oilPhaseIdx) &&
+        phase_pos == pu.canonicalToActivePhaseIdx(IndexTraits::oilPhaseIdx)) {
+        return ReservoirCoupling::Phase::Oil;
+    }
+    if (pu.phaseIsActive(IndexTraits::gasPhaseIdx) &&
+        phase_pos == pu.canonicalToActivePhaseIdx(IndexTraits::gasPhaseIdx)) {
+        return ReservoirCoupling::Phase::Gas;
+    }
+    if (pu.phaseIsActive(IndexTraits::waterPhaseIdx) &&
+        phase_pos == pu.canonicalToActivePhaseIdx(IndexTraits::waterPhaseIdx)) {
+        return ReservoirCoupling::Phase::Water;
+    }
+    OPM_DEFLOG_THROW(std::logic_error,
+                     "Invalid phase_pos in activePhaseIdxToRescoupPhase",
+                     this->deferredLogger());
+    return ReservoirCoupling::Phase::Oil; // just to avoid warning
+}
+
+// Called from updateNONEProductionGroups().
+// - Collects master groups (from GRUPMAST) and all their ancestors up to FIELD.
+// - These groups participate in the guide-rate distribution hierarchy and must
+//   retain their scheduled production control.
+// TODO: To determine if a master group's constraint is truly active would require the slave
+//    to communicate back its well activity status to the master, this would require additional
+//    MPI communication.
+template <typename Scalar, typename IndexTraits>
+std::unordered_set<std::string>
+GroupStateHelper<Scalar, IndexTraits>::
+collectMasterGroupHierarchy_() const
+{
+    std::unordered_set<std::string> hierarchy_groups;
+    const auto& rescoup_master = this->reservoirCouplingMaster();
+    const auto num_slaves = rescoup_master.numSlaves();
+    for (std::size_t slave_idx = 0; slave_idx < num_slaves; ++slave_idx) {
+        const auto& master_groups =
+            rescoup_master.getMasterGroupNamesForSlave(slave_idx);
+        for (const auto& mgname : master_groups) {
+            // Walk from master group up to FIELD
+            auto gname = mgname;
+            while (true) {
+                hierarchy_groups.insert(gname);
+                const auto& group = this->schedule_.getGroup(
+                    gname, this->report_step_);
+                if (group.is_field()) {
+                    break;
+                }
+                gname = group.parent();
+            }
+        }
+    }
+    return hierarchy_groups;
+}
+
+// Called from getProductionConstraintTarget_().
+// - Returns the effective production limit for a slave group, considering master-imposed limits
+//   and the GRUPSLAV filter flag (MAST, BOTH, or SLAV).
+template <typename Scalar, typename IndexTraits>
+Scalar
+GroupStateHelper<Scalar, IndexTraits>::
+getEffectiveProductionLimit_(
+    const std::string& gname,
+    Group::ProductionCMode rate_type,
+    Scalar slave_local_target) const
+{
+    auto& slave = this->reservoirCouplingSlave();
+    if (!slave.hasMasterProductionLimits(gname)) {
+        return slave_local_target;
+    }
+    const auto& limits = slave.masterProductionLimits(gname);
+    Scalar master_limit = -1;
+    switch (rate_type) {
+    case Group::ProductionCMode::ORAT: master_limit = limits.oil_limit; break;
+    case Group::ProductionCMode::WRAT: master_limit = limits.water_limit; break;
+    case Group::ProductionCMode::GRAT: master_limit = limits.gas_limit; break;
+    case Group::ProductionCMode::LRAT: master_limit = limits.liquid_limit; break;
+    case Group::ProductionCMode::RESV: master_limit = limits.resv_limit; break;
+    default: return slave_local_target;
+    }
+    if (master_limit < 0) {
+        return slave_local_target;  // no master limit for this rate type
+    }
+    auto filter = this->getProductionFilterFlag_(gname, rate_type);
+    using FilterFlag = ReservoirCoupling::GrupSlav::FilterFlag;
+    if (filter == FilterFlag::MAST) {
+        return master_limit;
+    }
+    if (filter == FilterFlag::BOTH) {
+        return std::min(master_limit, slave_local_target);
+    }
+    // FilterFlag::SLAV
+    return slave_local_target;
+}
+
+// Called from getInjectionGroupTarget().
+// - Returns the GRUPSLAV injection filter flag for a slave group and phase.
+template <typename Scalar, typename IndexTraits>
+ReservoirCoupling::GrupSlav::FilterFlag
+GroupStateHelper<Scalar, IndexTraits>::
+getInjectionFilterFlag_(const std::string& group_name,
+                        const Phase injection_phase) const
+{
+    const auto& rescoup_info = this->schedule_[this->report_step_].rescoup();
+    if (!rescoup_info.hasGrupSlav(group_name)) {
+        return ReservoirCoupling::GrupSlav::FilterFlag::MAST;
+    }
+    const auto& grup_slav = rescoup_info.grupSlav(group_name);
+    switch (injection_phase) {
+    case Phase::OIL:
+        return grup_slav.oilInjFlag();
+    case Phase::WATER:
+        return grup_slav.waterInjFlag();
+    case Phase::GAS:
+        return grup_slav.gasInjFlag();
+    default:
+        return ReservoirCoupling::GrupSlav::FilterFlag::MAST;
+    }
+}
+
+// Called from getEffectiveProductionLimit_().
+// - Returns the GRUPSLAV production filter flag for a slave group and control mode.
+template <typename Scalar, typename IndexTraits>
+ReservoirCoupling::GrupSlav::FilterFlag
+GroupStateHelper<Scalar, IndexTraits>::
+getProductionFilterFlag_(const std::string& group_name,
+                         const Group::ProductionCMode cmode) const
+{
+    const auto& rescoup_info = this->schedule_[this->report_step_].rescoup();
+    if (!rescoup_info.hasGrupSlav(group_name)) {
+        return ReservoirCoupling::GrupSlav::FilterFlag::MAST;
+    }
+    const auto& grup_slav = rescoup_info.grupSlav(group_name);
+    switch (cmode) {
+    case Group::ProductionCMode::ORAT:
+        return grup_slav.oilProdFlag();
+    case Group::ProductionCMode::WRAT:
+    case Group::ProductionCMode::LRAT:
+        return grup_slav.liquidProdFlag();
+    case Group::ProductionCMode::GRAT:
+        return grup_slav.gasProdFlag();
+    case Group::ProductionCMode::RESV:
+        return grup_slav.fluidVolumeProdFlag();
+    default:
+        return ReservoirCoupling::GrupSlav::FilterFlag::MAST;
+    }
+}
+
+// Called from sumWellPhaseRates().
+// - Returns the rate of a reservoir coupling master group as communicated from the corresponding slave group.
+template <typename Scalar, typename IndexTraits>
+Scalar
+GroupStateHelper<Scalar, IndexTraits>::
+getReservoirCouplingMasterGroupRate_(const Group& group,
+                                     const int phase_pos,
+                                     const ReservoirCoupling::RateKind kind) const
+{
+    if (this->isReservoirCouplingMaster()) {
+        ReservoirCoupling::Phase rescoup_phase = this->activePhaseIdxToRescoupPhase_(phase_pos);
+        return this->reservoirCouplingMaster().getMasterGroupRate(group.name(), rescoup_phase, kind);
+    }
+    else {
+        return 0.0;
+    }
+}
+#endif // RESERVOIR_COUPLING_ENABLED
+
+// ============================================================================
+// Private: Satellite group rate helpers
+//   Called from: sumWellPhaseRates() (via getSatelliteRate_)
+// ============================================================================
+
+// Called from sumWellPhaseRates().
+// - Returns the satellite-reported rate for a satellite group (GSATPROD/GSATINJE).
+template <typename Scalar, typename IndexTraits>
+Scalar
+GroupStateHelper<Scalar, IndexTraits>::getSatelliteRate_(const Group& group,
+                                                               const int phase_pos,
+                                                               const bool res_rates,
+                                                               const bool is_injector) const
+{
+    // Only obtain satellite rates once (on rank 0)
+    assert(this->isRank0() && this->isSatelliteGroup_(group));
+    Scalar rate = 0.0;
+    if (is_injector) {
+        return this->satelliteInjectionRate_(this->schedule_[this->report_step_], group, phase_pos, res_rates);
+    } else {
+        const auto rate_comp = this->selectRateComponent_(phase_pos);
+        if (rate_comp.has_value()) {
+            return this->satelliteProductionRate_(this->schedule_[this->report_step_], group, *rate_comp, res_rates);
+        }
+    }
+    return rate;
+}
+
+// Called from getSatelliteRate_().
+// - Returns true if the group has satellite production or injection data (GSATPROD/GSATINJE).
 template <typename Scalar, typename IndexTraits>
 bool
 GroupStateHelper<Scalar, IndexTraits>::isSatelliteGroup_(const Group& group) const
@@ -1735,6 +2307,8 @@ GroupStateHelper<Scalar, IndexTraits>::isSatelliteGroup_(const Group& group) con
     return group.hasSatelliteProduction() || group.hasSatelliteInjection();
 }
 
+// Called from getSatelliteRate_().
+// - Returns the satellite injection rate for the given phase from GSATINJE data.
 template <typename Scalar, typename IndexTraits>
 Scalar
 GroupStateHelper<Scalar, IndexTraits>::satelliteInjectionRate_(const ScheduleState& sched,
@@ -1770,6 +2344,8 @@ GroupStateHelper<Scalar, IndexTraits>::satelliteInjectionRate_(const ScheduleSta
     return rate;
 }
 
+// Called from getSatelliteRate_().
+// - Returns the satellite production rate for the given rate component from GSATPROD data.
 template <typename Scalar, typename IndexTraits>
 Scalar
 GroupStateHelper<Scalar, IndexTraits>::satelliteProductionRate_(
@@ -1789,6 +2365,8 @@ GroupStateHelper<Scalar, IndexTraits>::satelliteProductionRate_(
     return rate;
 }
 
+// Called from getSatelliteRate_().
+// - Maps an active phase index to the corresponding GSatProd rate component enum.
 template <typename Scalar, typename IndexTraits>
 std::optional<GSatProd::GSatProdGroupProp::Rate>
 GroupStateHelper<Scalar, IndexTraits>::selectRateComponent_(const int phase_pos) const
@@ -1812,6 +2390,107 @@ GroupStateHelper<Scalar, IndexTraits>::selectRateComponent_(const int phase_pos)
     return std::nullopt;
 }
 
+// ============================================================================
+// Private: Recursive update helpers
+//   Called from: updateGroupControlledWells(), updateGroupTargetReduction()
+// ============================================================================
+
+// Called from updateGroupControlledWellsRecursive_().
+// - Checks if a production auto choke group is producing below its guide-rate-derived target,
+//   which determines whether its wells should be excluded from the group controlled well count.
+template <typename Scalar, typename IndexTraits>
+bool
+GroupStateHelper<Scalar, IndexTraits>::isAutoChokeGroupUnderperforming_(const Group& group) const
+{
+    // Only applies to production auto choke groups
+    if (!group.as_choke()) {
+        return false;
+    }
+
+    // Auto choke groups inherit control from an ancestor (cmode == FLD or NONE)
+    const auto ctrl = this->groupState().production_control(group.name());
+    if (ctrl != Group::ProductionCMode::FLD && ctrl != Group::ProductionCMode::NONE) {
+        return false;
+    }
+
+    // Check if guide rate is set for this group
+    const auto& group_guide_rate = group.productionControls(this->summary_state_).guide_rate;
+    if (group_guide_rate <= 0) {
+        return false;
+    }
+
+    // Find the ancestor group that has actual control
+    const auto& control_group_name = this->controlGroup_(group);
+    const auto& control_group = this->schedule_.getGroup(control_group_name, this->report_step_);
+
+    // Calculate target rate for this auto choke group using a guide rate ratio
+    // formula. This is an approximation that ignores intermediate reductions.
+    // A more accurate calculation would use getAutoChokeGroupProductionTargetRate(),
+    // but that requires reduction rates not yet available during
+    // updateGroupControlledWells() (circular dependency). The efficiency factor is however accounted for
+    // below meaning that the current target rate will be correct for the special case where the control
+    // group has no reductions and the auto choke group is a direct child of the control group.
+    // TODO: The issue with missing handling of reductions should be fixed by refactoring the auto choke
+    // target calculation below to use the more accurate
+    // getAutoChokeGroupProductionTargetRate() function.
+    const auto num_phases = this->numPhases();
+    std::vector<Scalar> resv_coeff(num_phases, 1.0);
+    GroupStateHelpers::TargetCalculator<Scalar, IndexTraits> tcalc{*this,
+                                                                   resv_coeff,
+                                                                   control_group};
+    const Scalar control_group_target = this->getProductionGroupTarget(control_group);
+
+    // Sum guide rates of the control group's FLD children. The control group's
+    // own guide rate (from GCONPROD) is NOT used here — it governs the control
+    // group's share of its parent's target, not how its own target is distributed.
+    Scalar control_group_guide_rate = 0.0;
+    for (const std::string& child : control_group.groups()) {
+        const auto child_ctrl = this->groupState().production_control(child);
+        if (child_ctrl == Group::ProductionCMode::FLD
+            || child_ctrl == Group::ProductionCMode::NONE) {
+            if (this->guide_rate_.has(child)) {
+                control_group_guide_rate += this->guide_rate_.get(
+                    child, this->getProductionGuideTargetMode(control_group),
+                    this->getProductionGroupRateVector(child));
+            }
+        }
+    }
+
+    if (control_group_guide_rate <= 0) {
+        return false;
+    }
+
+    // Accumulate group efficiency factors from the autochoke group up to (but not
+    // including) the control group. This matches what
+    // getAutoChokeGroupProductionTargetRate() does during its recursion.
+    Scalar accumulated_efficiency = 1.0;
+    {
+        std::string current = group.name();
+        while (current != control_group_name) {
+            const auto& g = this->schedule_.getGroup(current, this->report_step_);
+            accumulated_efficiency *= g.getGroupEfficiencyFactor();
+            current = g.parent();
+        }
+    }
+
+    const Scalar target_rate = control_group_target * group_guide_rate
+                             / control_group_guide_rate / accumulated_efficiency;
+
+    // Calculate current rate for this group
+    std::vector<Scalar> rates(num_phases, 0.0);
+    for (int phase_pos = 0; phase_pos < num_phases; ++phase_pos) {
+        rates[phase_pos] = this->sumWellSurfaceRates(group, phase_pos, /*injector=*/false);
+    }
+    this->comm_.sum(rates.data(), rates.size());
+    const Scalar current_rate = tcalc.calcModeRateFromRates(rates);
+
+    // If underperforming, wells should be excluded from GCW count
+    return current_rate < target_rate;
+}
+
+// Called from updateGroupControlledWells().
+// - Recursively counts wells under group control (GCW) for guide rate distribution
+//   and target reduction. Wells under individual control are excluded from the count.
 template <typename Scalar, typename IndexTraits>
 int
 GroupStateHelper<Scalar, IndexTraits>::updateGroupControlledWellsRecursive_(
@@ -1901,6 +2580,8 @@ GroupStateHelper<Scalar, IndexTraits>::updateGroupControlledWellsRecursive_(
     return num_wells;
 }
 
+// Called from updateGroupTargetReduction().
+// - Recursively accumulates target reduction rates from sub-groups and wells not under group control.
 template <typename Scalar, typename IndexTraits>
 void
 GroupStateHelper<Scalar, IndexTraits>::updateGroupTargetReductionRecursive_(
@@ -1941,7 +2622,7 @@ GroupStateHelper<Scalar, IndexTraits>::updateGroupTargetReductionRecursive_(
                 } else {
                     // Accumulate from this subgroup only if no group guide rate is set for it.
                     // NOTE: For reservoir coupling master groups that are not under individual control
-                    //   it is required that they have a guide rate set, see GroupTargetCalculator.cpp.
+                    //   it is required that they have a guide rate set, see GroupConstraintCalculator.cpp.
                     if (!this->guide_rate_.has(sub_group.name(), phase)) {
                         group_target_reduction[phase_pos]
                             += sub_group_efficiency * sub_group_target_reduction[phase_pos];
@@ -1970,7 +2651,7 @@ GroupStateHelper<Scalar, IndexTraits>::updateGroupTargetReductionRecursive_(
             } else {
                 // The subgroup may participate in group control.
                 // NOTE: Reservoir coupling master groups that are not under individual control
-                //   must have a guide rate set, see GroupTargetCalculator.cpp.
+                //   must have a guide rate set, see GroupConstraintCalculator.cpp.
                 if (!this->guide_rate_.has(sub_group.name())) {
                     // Accumulate from this subgroup only if no group guide rate is set for it.
                     for (int phase = 0; phase < np; phase++) {
@@ -2032,7 +2713,6 @@ GroupStateHelper<Scalar, IndexTraits>::updateGroupTargetReductionRecursive_(
         this->groupState().update_production_reduction_rates(group.name(), group_target_reduction);
     }
 }
-
 
 template class GroupStateHelper<double, BlackOilDefaultFluidSystemIndices>;
 #ifdef FLOW_INSTANTIATE_FLOAT

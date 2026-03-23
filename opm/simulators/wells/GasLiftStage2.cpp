@@ -508,14 +508,12 @@ recalculateGradientAndUpdateData_(GradPairItr& grad_itr,
                 updateGradVector_(name, other_grads, grad->grad);
             }
             else {
-                auto new_end = std::remove_if(other_grads.begin(), other_grads.end(), [&name](const GradPair& pair)
-                                                                        {
-                                                                            return (name==pair.first);
-                                                                        }
-                            );
-                if (new_end != other_grads.end()) {
+                const auto orig_size = other_grads.size();
+                std::erase_if(other_grads,
+                              [&name](const GradPair& pair)
+                              { return name == pair.first; });
+                if (orig_size != other_grads.size()) {
                     this->deleteGrad_(name, !increase);
-                    other_grads.erase(new_end, other_grads.end());
                 }
             }
         }
@@ -768,7 +766,7 @@ sortGradients_(std::vector<GradPair>& grads)
     auto cmp = [](GradPair a, GradPair b) {
          return a.second <  b.second;
     };
-    std::sort(grads.begin(), grads.end(), cmp);
+    std::ranges::sort(grads, cmp);
 }
 
 template<typename Scalar, typename IndexTraits>
@@ -791,9 +789,9 @@ updateGradVector_(const std::string& name,
                   std::vector<GradPair>& grads,
                   Scalar grad)
 {
-    auto it = std::find_if(grads.begin(), grads.end(),
-                           [&name](const auto& itr)
-                           { return itr.first == name; });
+    auto it = std::ranges::find_if(grads,
+                                  [&name](const auto& itr)
+                                  { return itr.first == name; });
     if (it != grads.end()) {
         it->second = grad;
     }

@@ -38,7 +38,6 @@
 #include <opm/simulators/wells/BlackoilWellModel.hpp>
 #include <opm/simulators/wells/TargetCalculator.hpp>
 #include <opm/simulators/wells/WellBhpThpCalculator.hpp>
-#include <opm/simulators/wells/WellGroupControls.hpp>
 
 #include <fmt/format.h>
 
@@ -79,9 +78,7 @@ doPreStepRebalance(DeferredLogger& deferred_logger)
                                 well_model_.simulator().vanguard().grid().comm());
 
     if (!converged) {
-        const std::string msg =
-            fmt::format("Initial (pre-step) network balance did not converge.");
-        deferred_logger.warning(msg);
+        deferred_logger.warning("Initial (pre-step) network balance did not converge.");
     }
 }
 
@@ -99,13 +96,13 @@ update(const bool mandatory_network_balance,
         return {false, 0.0};
     }
 
-    const int iterationIdx = well_model_.simulator().model().newtonMethod().numIterations();
+    const auto& iterCtx = well_model_.simulator().problem().iterationContext();
     const auto& comm = well_model_.simulator().vanguard().grid().comm();
 
     // network related
     Scalar network_imbalance = 0.0;
     bool more_network_update = false;
-    if (this->shouldBalance(episodeIdx, iterationIdx) || mandatory_network_balance) {
+    if (this->shouldBalance(episodeIdx, iterCtx) || mandatory_network_balance) {
         OPM_TIMEBLOCK(BalanceNetwork);
         const double dt = well_model_.simulator().timeStepSize();
         // Calculate common THP for subsea manifold well group (item 3 of NODEPROP set to YES)
@@ -147,7 +144,7 @@ update(const bool mandatory_network_balance,
                 }
             }
             well_model_.updateAndCommunicateGroupData(episodeIdx,
-                                                      iterationIdx,
+                                                      iterCtx,
                                                       well_model_.param().nupcol_group_rate_tolerance_,
                                                       /*update_wellgrouptarget*/ true);
         }
@@ -194,10 +191,9 @@ computeWellGroupThp(const double dt, DeferredLogger& local_deferredLogger)
                 // derived via group guide rates
                 const Scalar efficiencyFactor = 1.0;
                 const Group& parentGroup = well_model_.schedule().getGroup(group.parent(), reportStepIdx);
-                auto target = WellGroupControls<Scalar, IndexTraits>::
+                auto target = well_model_.groupStateHelper().
                     getAutoChokeGroupProductionTargetRate(group,
                                                           parentGroup,
-                                                          well_model_.groupStateHelper(),
                                                           resv_coeff,
                                                           efficiencyFactor);
                 target_tmp = target.first;
@@ -208,7 +204,7 @@ computeWellGroupThp(const double dt, DeferredLogger& local_deferredLogger)
             if (!fld_none)
             {
                 // Target is set for the autochoke group itself
-                target_tmp = tcalc.groupTarget();
+                target_tmp = well_model_.groupStateHelper().getProductionGroupTarget(group);
             }
 
             const Scalar orig_target = target_tmp;

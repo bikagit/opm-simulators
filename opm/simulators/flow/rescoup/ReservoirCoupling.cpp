@@ -45,6 +45,20 @@ Phase convertPhaseToReservoirCouplingPhase(::Opm::Phase phase)
     }
 }
 
+::Opm::Phase convertToOpmPhase(const Phase phase)
+{
+    switch (phase) {
+    case Phase::Oil:
+        return ::Opm::Phase::OIL;
+    case Phase::Gas:
+        return ::Opm::Phase::GAS;
+    case Phase::Water:
+        return ::Opm::Phase::WATER;
+    default:
+        throw std::invalid_argument{"Unsupported ReservoirCoupling::Phase value for conversion to Opm::Phase."};
+    }
+}
+
 void customErrorHandler_(MPI_Comm* comm, int* err, const std::string &msg)
 {
     // It can be useful to have a custom error handler for debugging purposes.
@@ -81,7 +95,7 @@ std::pair<std::vector<char>, std::size_t> serializeStrings(const std::vector<std
     std::size_t total_size = 0;
     std::vector<char> serialized_data;
     for (const auto& str: data) {
-        std::copy(str.begin(), str.end(), std::back_inserter(serialized_data));
+        std::ranges::copy(str, std::back_inserter(serialized_data));
         serialized_data.push_back('\0');
         total_size += str.size() + 1;
     }
@@ -113,6 +127,18 @@ void setErrhandler(MPI_Comm comm, bool is_master)
 
 // Logger class alphabetically
 // ---------------------------
+
+void Logger::debug(const std::string &msg) const {
+    if (haveDeferredLogger()) {
+        // DeferredLogger: All ranks log - messages will be gathered later
+        this->deferred_logger_->debug(msg);
+    } else {
+        // OpmLog fallback: Only rank 0 logs (see comment in info() below)
+        if (comm_.rank() == 0) {
+            OpmLog::debug(msg);
+        }
+    }
+}
 
 void Logger::info(const std::string &msg) const {
     if (haveDeferredLogger()) {
@@ -181,11 +207,11 @@ bool Seconds::compare_lt_or_eq(double a, double b)
 }
 
 template struct InjectionGroupTarget<double>;
-template struct ProductionGroupTarget<double>;
+template struct ProductionGroupConstraints<double>;
 
 #if FLOW_INSTANTIATE_FLOAT
 template struct InjectionGroupTarget<float>;
-template struct ProductionGroupTarget<float>;
+template struct ProductionGroupConstraints<float>;
 #endif
 
 } // namespace ReservoirCoupling

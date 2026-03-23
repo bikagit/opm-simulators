@@ -123,6 +123,7 @@ template<class Scalar> class WellContributions;
             static constexpr EnergyModules energyModuleType_ = getPropValue<TypeTag, Properties::EnergyModuleType>();
             static constexpr bool has_energy_ = (energyModuleType_ == EnergyModules::FullyImplicitThermal);
             static constexpr bool has_micp_ = Indices::enableMICP;
+            static constexpr bool has_geochem_ = getPropValue<TypeTag, Properties::EnableGeochemistry>();
 
             // TODO: where we should put these types, WellInterface or Well Model?
             // or there is some other strategy, like TypeTag
@@ -156,8 +157,7 @@ template<class Scalar> class WellContributions;
             void beginIteration()
             {
                 OPM_TIMEBLOCK(beginIteration);
-                assemble(simulator_.model().newtonMethod().numIterations(),
-                         simulator_.timeStepSize());
+                assemble(simulator_.timeStepSize());
             }
 
             void endIteration()
@@ -218,6 +218,10 @@ template<class Scalar> class WellContributions;
 
                 this->assignWellTracerRates(wsrpt);
 
+                if constexpr (has_geochem_) {
+                    this->assignWellSpeciesRates(wsrpt);
+                }
+
                 if (const auto& rspec = eclState().runspec();
                     rspec.co2Storage() || rspec.h2Storage())
                 {
@@ -263,26 +267,23 @@ template<class Scalar> class WellContributions;
             // called at the beginning of a report step
             void beginReportStep(const int time_step);
 
-            // it should be able to go to prepareTimeStep(), however, the updateWellControls()
-            // makes it a little more difficult. unless we introduce if (iterationIdx != 0) to avoid doing the above function
-            // twice at the beginning of the time step
-            /// Calculating the explict quantities used in the well calculation. By explicit, we mean they are cacluated
-            /// at the beginning of the time step and no derivatives are included in these quantities
+            /// Calculating the explicit quantities used in the well calculation. By explicit, we mean they are calculated
+            /// at the beginning of the time step and no derivatives are included in these quantities.
+            /// Called from assemble() when needsTimestepInit() returns true.
             void calculateExplicitQuantities() const;
-            // some preparation work, mostly related to group control and RESV,
-            // at the beginning of each time step (Not report step)
+
+            /// One-time initialization at the start of each timestep.
+            /// Called once per timestep from assemble() when needsTimestepInit() returns true.
             void prepareTimeStep(DeferredLogger& deferred_logger);
 
             bool
             updateWellControls(DeferredLogger& deferred_logger);
 
-            void updateAndCommunicate(const int reportStepIdx,
-                                      const int iterationIdx);
+            void updateAndCommunicate(const int reportStepIdx);
 
             bool updateGroupControls(const Group& group,
                                     DeferredLogger& deferred_logger,
-                                    const int reportStepIdx,
-                                    const int iterationIdx);
+                                    const int reportStepIdx);
 
             const WellInterface<TypeTag>& getWell(const std::string& well_name) const;
 
@@ -432,8 +433,8 @@ template<class Scalar> class WellContributions;
             /// \brief Receive comprehensive slave group data from slaves
             void receiveSlaveGroupData();
 
-            void receiveGroupTargetsFromMaster(const int reportStepIdx);
-            void sendMasterGroupTargetsToSlaves();
+            void receiveGroupConstraintsFromMaster();
+            void sendMasterGroupConstraintsToSlaves();
 
             /// \brief Setup RAII guard for reservoir coupling logger
             ///
@@ -459,6 +460,28 @@ template<class Scalar> class WellContributions;
 
             const ModelParameters& param() const
             { return param_; }
+
+
+            template<class FluidState, class SingleWellState>
+            static Scalar computeTemperatureWeightFactor(const int perf_index, const int np, const FluidState& fs, const SingleWellState& ws)
+            {
+                const auto& perf_phase_rate = ws.perf_data.phase_rates;
+                // we only have one temperature pr cell any phaseIdx will do
+                Scalar cellTemperatures = fs.temperature(/*phaseIdx*/0).value();
+                Scalar weight_factor = 0.0;
+                for (unsigned phaseIdx = 0; phaseIdx < FluidSystem::numPhases; ++phaseIdx) {
+                    if (!FluidSystem::phaseIsActive(phaseIdx)) {
+                        continue;
+                    }
+                    Scalar cellInternalEnergy = fs.enthalpy(phaseIdx).value() -
+                                            fs.pressure(phaseIdx).value() / fs.density(phaseIdx).value();
+                    Scalar cellBinv = fs.invB(phaseIdx).value();
+                    Scalar cellDensity = fs.density(phaseIdx).value();
+                    Scalar perfPhaseRate = perf_phase_rate[perf_index*np + phaseIdx];
+                    weight_factor += cellDensity * (perfPhaseRate / cellBinv) * (cellInternalEnergy / cellTemperatures);
+                }
+                return (std::abs(weight_factor) + 1e-13);
+            }
 
         protected:
             Simulator& simulator_;
@@ -513,8 +536,7 @@ template<class Scalar> class WellContributions;
 
             // compute the well fluxes and assemble them in to the reservoir equations as source terms
             // and in the well equations.
-            void assemble(const int iterationIdx,
-                          const double dt);
+            void assemble(const double dt);
 
             // well controls and network pressures affect each other and are solved in an iterative manner.
             // the function handles one iteration of updating well controls and network pressures.
@@ -609,6 +631,7 @@ template<class Scalar> class WellContributions;
             std::map<int, RateVector> cellRates_;
 
             void assignWellTracerRates(data::Wells& wsrpt) const;
+            void assignWellSpeciesRates(data::Wells& wsrpt) const;
         };
 
 } // namespace Opm

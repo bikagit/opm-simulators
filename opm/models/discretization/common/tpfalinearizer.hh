@@ -341,10 +341,9 @@ public:
      * represented by the model object.
      *
      * \param domain The subdomain to linearize.
-     * \param isNlddLocalSolve If true, indicates this is an NLDD local solve.
      */
     template <class SubDomainType>
-    void linearizeDomain(const SubDomainType& domain, const bool isNlddLocalSolve = false)
+    void linearizeDomain(const SubDomainType& domain)
     {
         OPM_TIMEBLOCK(linearizeDomain);
         // we defer the initialization of the Jacobian matrix until here because the
@@ -355,14 +354,14 @@ public:
         }
 
         // Called here because it is no longer called from linearize_().
-        if (isNlddLocalSolve) {
+        if (problem_().iterationContext().inLocalSolve()) {
             resetSystem_(domain);
         }
         else {
             resetSystem_();
         }
 
-        linearize_(domain, isNlddLocalSolve);
+        linearize_(domain);
     }
 
     void finalize()
@@ -429,10 +428,10 @@ public:
         // increment indices and generate tag
         exportCount_ = exportIndex_ == idx ? ++exportCount_ : 0;
         exportIndex_ = idx;
-        tag = fmt::format("_{:03d}_{:02d}", exportIndex_, exportCount_);
+        tag = fmt::format(fmt::runtime("_{:03d}_{:02d}"), exportIndex_, exportCount_);
 
-        fmt::print("index = {:d}\n", exportIndex_);
-        fmt::print("count = {:d}\n", exportCount_);
+        fmt::print(fmt::runtime("index = {:d}\n"), exportIndex_);
+        fmt::print(fmt::runtime("count = {:d}\n"), exportCount_);
 
         Opm::exportSystem(jacobian_->istlMatrix(), residual_, export_sparsity, tag.c_str(), path);
     }
@@ -462,7 +461,8 @@ public:
     /*!
      * \brief Return constant reference to the velocityInfo.
      *
-     * (This object is only non-empty if the DISPERC keyword is true.)
+     * (This object is only non-empty if dispersion, bioeffects, or block
+     * velocities are active.)
      */
     const auto& getVelocityInfo() const
     { return velocityInfo_; }
@@ -675,18 +675,21 @@ private:
     void createFlows_()
     {
         OPM_TIMEBLOCK(createFlows);
-        // If FLOWS/FLORES is set in any RPTRST in the schedule, then we initializate the sparse tables
-        // For now, do the same also if any block flows are requested (TODO: only save requested cells...)
+        // If FLOWS/FLORES is set in any RPTRST in the schedule, then we initializate the sparse tables.
         // If DISPERC is in the deck, we initialize the sparse table here as well.
-        const bool anyFlows = simulator_().problem().eclWriter().outputModule().getFlows().anyFlows() ||
-                              simulator_().problem().eclWriter().outputModule().getFlows().hasBlockFlows();
-        const bool anyFlores = simulator_().problem().eclWriter().outputModule().getFlows().anyFlores();
+        const bool anyFlows = simulator_().problem().eclWriter().outputModule().getFlows().anyFlows();
+        const auto& blockFlows = simulator_().problem().eclWriter().outputModule().getFlows().blockFlows();
+        const auto& blockVelocity = simulator_().problem().eclWriter().outputModule().getFlows().blockVelocity();
+        const bool isTemp = simulator_().vanguard().eclState().getSimulationConfig().isTemp();
+        const bool anyFlores = simulator_().problem().eclWriter().outputModule().getFlows().anyFlores() || isTemp;
         const bool dispersionActive = simulator_().vanguard().eclState().getSimulationConfig().rock_config().dispersion();
-        if (((!anyFlows || !flowsInfo_.empty()) && (!anyFlores || !floresInfo_.empty())) && (!dispersionActive && !enableBioeffects)) {
+        if (!dispersionActive && !enableBioeffects && blockVelocity.empty()
+            && !((anyFlows || !blockFlows.empty()) && flowsInfo_.empty())
+            && !(anyFlores && floresInfo_.empty())) {
             return;
         }
         const auto& model = model_();
-        const auto& nncOutput = simulator_().problem().eclWriter().getOutputNnc();
+        const auto& nncOutput = simulator_().problem().eclWriter().getOutputNnc().front();
         Stencil stencil(gridView_(), model_().dofMapper());
         const unsigned numCells = model.numTotalDof();
         std::unordered_multimap<int, std::pair<int, int>> nncIndices;
@@ -705,17 +708,49 @@ private:
         if (anyFlows) {
             flowsInfo_.reserve(numCells, 6 * numCells);
         }
+        else if (!blockFlows.empty()) {
+            flowsInfo_.reserve(numCells, 6 * blockFlows.size());
+        }
         if (anyFlores) {
             floresInfo_.reserve(numCells, 6 * numCells);
         }
         if (dispersionActive || enableBioeffects) {
             velocityInfo_.reserve(numCells, 6 * numCells);
         }
+        else if (!blockVelocity.empty()) {
+            velocityInfo_.reserve(numCells, 6 * blockVelocity.size());
+        }
 
         for (const auto& elem : elements(gridView_())) {
             stencil.update(elem);
             for (unsigned primaryDofIdx = 0; primaryDofIdx < stencil.numPrimaryDof(); ++primaryDofIdx) {
                 const unsigned myIdx = stencil.globalSpaceIndex(primaryDofIdx);
+                bool blockFlowFound = false;
+                bool blockVelocityFound = false;
+                if (!blockFlows.empty()) {
+                    if (std::ranges::binary_search(blockFlows,
+                                                   simulator_().vanguard().cartesianIndex(myIdx))) {
+                        blockFlowFound = true;
+                    }
+                    else {
+                        flowsInfo_.appendRow(loc_flinfo.begin(), loc_flinfo.begin());
+                        if (!dispersionActive && !enableBioeffects && !anyFlores && blockVelocity.empty()) {
+                            continue;
+                        }
+                    }
+                }
+                if (!blockVelocity.empty() && !(dispersionActive || enableBioeffects)) {
+                    if (std::ranges::binary_search(blockVelocity,
+                                                   simulator_().vanguard().cartesianIndex(myIdx))) {
+                        blockVelocityFound = true;
+                    }
+                    else {
+                        velocityInfo_.appendRow(loc_vlinfo.begin(), loc_vlinfo.begin());
+                        if (!anyFlows && blockFlows.empty() && !anyFlores) {
+                            continue;
+                        }
+                    }
+                }
                 const int numFaces = stencil.numBoundaryFaces() + stencil.numInteriorFaces();
                 loc_flinfo.resize(numFaces);
                 loc_vlinfo.resize(stencil.numDof() - 1);
@@ -738,7 +773,7 @@ private:
                             }
                         }
                         loc_flinfo[dofIdx - 1] = FlowInfo{faceId, flow, nncId};
-                        loc_vlinfo[dofIdx - 1] = VelocityInfo{flow};
+                        loc_vlinfo[dofIdx - 1] = VelocityInfo{faceId, flow};
                     }
                 }
 
@@ -748,13 +783,13 @@ private:
                     loc_flinfo[stencil.numInteriorFaces() + bdfIdx] = FlowInfo{faceId, flow, nncId};
                 }
 
-                if (anyFlows) {
+                if (anyFlows || blockFlowFound) {
                     flowsInfo_.appendRow(loc_flinfo.begin(), loc_flinfo.end());
                 }
                 if (anyFlores) {
                     floresInfo_.appendRow(loc_flinfo.begin(), loc_flinfo.end());
                 }
-                if (dispersionActive || enableBioeffects) {
+                if (dispersionActive || enableBioeffects || blockVelocityFound) {
                     velocityInfo_.appendRow(loc_vlinfo.begin(), loc_vlinfo.end());
                 }
             }
@@ -782,10 +817,12 @@ public:
     void updateFlowsInfo()
     {
         OPM_TIMEBLOCK(updateFlows);
-        const bool enableFlows = simulator_().problem().eclWriter().outputModule().getFlows().hasFlows() ||
-                                 simulator_().problem().eclWriter().outputModule().getFlows().hasBlockFlows();
-        const bool enableFlores = simulator_().problem().eclWriter().outputModule().getFlows().hasFlores();
-        if (!enableFlows && !enableFlores) {
+        const bool enableFlows = simulator_().problem().eclWriter().outputModule().getFlows().hasFlows();
+        const auto& blockFlows = simulator_().problem().eclWriter().outputModule().getFlows().blockFlows();
+        // We reuse the fluxes in the TEMP option
+        const bool isTemp = simulator_().vanguard().eclState().getSimulationConfig().isTemp();
+        const bool enableFlores = simulator_().problem().eclWriter().outputModule().getFlows().hasFlores() || isTemp;
+        if (!enableFlows && !enableFlores && blockFlows.empty()) {
             return;
         }
         const unsigned int numCells = model_().numTotalDof();
@@ -812,7 +849,15 @@ public:
                     LocalResidual::computeFlux(adres, darcyFlux, globI, globJ, intQuantsIn,
                                                intQuantsEx, nbInfo.res_nbinfo, problem_().moduleParams());
                     adres *= nbInfo.res_nbinfo.faceArea;
-                    if (enableFlows) {
+                    if (!blockFlows.empty()) {
+                        if (std::ranges::binary_search(blockFlows,
+                                                       simulator_().vanguard().cartesianIndex(globI))) {
+                            for (unsigned eqIdx = 0; eqIdx < numEq; ++eqIdx) {
+                                flowsInfo_[globI][loc].flow[eqIdx] = adres[eqIdx].value();
+                            }
+                        }
+                    }
+                    else if (enableFlows) {
                         for (unsigned eqIdx = 0; eqIdx < numEq; ++eqIdx) {
                             flowsInfo_[globI][loc].flow[eqIdx] = adres[eqIdx].value();
                         }
@@ -851,7 +896,7 @@ public:
 
 private:
     template <class SubDomainType>
-    void linearize_(const SubDomainType& domain, bool isNlddLocalSolve)
+    void linearize_(const SubDomainType& domain)
     {
         // This check should be removed once this is addressed by
         // for example storing the previous timesteps' values for
@@ -868,6 +913,7 @@ private:
         // the full system to zero, not just our part.
         // Instead, that must be called before starting the linearization.
         const bool dispersionActive = simulator_().vanguard().eclState().getSimulationConfig().rock_config().dispersion();
+        const auto& blockVelocity = simulator_().problem().eclWriter().outputModule().getFlows().blockVelocity();
         const unsigned int numCells = domain.cells.size();
 
         // Fetch timestepsize used later in accumulation term.
@@ -908,6 +954,15 @@ private:
                                 darcyFlux[phaseIdx].value() / nbInfo.res_nbinfo.faceArea;
                         }
                     }
+                    else if (!blockVelocity.empty()) {
+                        if (std::ranges::binary_search(blockVelocity,
+                                                       simulator_().vanguard().cartesianIndex(globI))) {
+                            for (unsigned phaseIdx = 0; phaseIdx < numEq; ++phaseIdx) {
+                                velocityInfo_[globI][loc].velocity[phaseIdx] =
+                                    darcyFlux[phaseIdx].value() / nbInfo.res_nbinfo.faceArea;
+                            }
+                        }
+                    }
                     setResAndJacobi(res, bMat, adres);
                     residual_[globI] += res;
                     //SparseAdapter syntax:  jacobian_->addToBlock(globI, globI, bMat);
@@ -925,7 +980,7 @@ private:
             adres = 0.0;
             {
                 OPM_TIMEBLOCK_LOCAL(computeStorage, Subsystem::Assembly);
-                LocalResidual::computeStorage(adres, intQuantsIn);
+                LocalResidual::template computeStorage<Evaluation>(adres, intQuantsIn);
             }
             setResAndJacobi(res, bMat, adres);
             // Either use cached storage term, or compute it on the fly.
@@ -940,7 +995,7 @@ private:
                 // but the starting state may not be identical to the start-of-step state.
                 // Note that a full assembly must be done before local solves
                 // otherwise this will be left un-updated.
-                if (model_().newtonMethod().numIterations() == 0 && !isNlddLocalSolve) {
+                if (problem_().iterationContext().isFirstGlobalIteration()) {
                     // Need to update the storage cache.
                     if (problem_().recycleFirstIterationStorage()) {
                         // Assumes nothing have changed in the system which
@@ -950,7 +1005,7 @@ private:
                     else {
                         Dune::FieldVector<Scalar, numEq> tmp;
                         const IntensiveQuantities intQuantOld = model_().intensiveQuantities(globI, 1);
-                        LocalResidual::computeStorage(tmp, intQuantOld);
+                        LocalResidual::template computeStorage<Scalar>(tmp, intQuantOld);
                         model_().updateCachedStorage(globI, /*timeIdx=*/1, tmp);
                     }
                 }
@@ -960,7 +1015,7 @@ private:
                 OPM_TIMEBLOCK_LOCAL(computeStorage0, Subsystem::Assembly);
                 Dune::FieldVector<Scalar, numEq> tmp;
                 const IntensiveQuantities intQuantOld = model_().intensiveQuantities(globI, 1);
-                LocalResidual::computeStorage(tmp, intQuantOld);
+                LocalResidual::template computeStorage<Scalar>(tmp, intQuantOld);
                 // assume volume do not change
                 res -= tmp;
             }
@@ -1062,6 +1117,7 @@ private:
 
     struct VelocityInfo
     {
+        int faceId;
         VectorBlock velocity;
     };
     SparseTable<VelocityInfo> velocityInfo_;

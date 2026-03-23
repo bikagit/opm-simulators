@@ -42,7 +42,7 @@ public:
     using Potentials = ReservoirCoupling::Potentials<Scalar>;
     using SlaveGroupProductionData = ReservoirCoupling::SlaveGroupProductionData<Scalar>;
     using InjectionGroupTarget = ReservoirCoupling::InjectionGroupTarget<Scalar>;
-    using ProductionGroupTarget = ReservoirCoupling::ProductionGroupTarget<Scalar>;
+    using ProductionGroupConstraints = ReservoirCoupling::ProductionGroupConstraints<Scalar>;
 
     ReservoirCouplingMaster(
         const Parallel::Communication &comm,
@@ -74,7 +74,7 @@ public:
     ///
     /// @note Performance: This method uses O(1) direct vector access when possible,
     ///       falling back to O(log n) map lookup for error handling.
-    /// @see RescoupTargetCalculator::calculateAndSendTargets() for primary usage context
+    /// @see RescoupConstraintsCalculator::calculateAndSendTargets() for primary usage context
     const std::vector<std::string>& getMasterGroupNamesForSlave(std::size_t slave_idx) const;
     /// @brief Get the canonical index of the master group for a given slave name and master group name.
     /// The index is used to map slave group data sent from the slaves, like potentials to the corresponding
@@ -84,8 +84,8 @@ public:
     /// @return The canonical index of the master group for the given slave name and master group name.
     std::size_t getMasterGroupCanonicalIdx(
         const std::string &slave_name, const std::string &master_group_name) const;
-    Scalar getMasterGroupInjectionRate(const std::string &group_name, ReservoirCoupling::Phase phase, bool res_rates) const;
-    Scalar getMasterGroupProductionRate(const std::string &group_name, ReservoirCoupling::Phase phase, bool res_rates) const;
+    Scalar getMasterGroupRate(
+        const std::string &group_name, ReservoirCoupling::Phase phase, ReservoirCoupling::RateKind kind) const;
     std::map<std::string, std::string>& getMasterGroupToSlaveNameMap() {
          return this->master_group_slave_names_;
     }
@@ -114,6 +114,7 @@ public:
     std::size_t numSlaveGroups(unsigned int index);
     std::size_t numSlaves() const { return this->numSlavesStarted(); }
     std::size_t numSlavesStarted() const;
+    std::size_t numActivatedSlaves() const;
     void rebuildSlaveIdxToMasterGroupsVector();
     void receiveNextReportDateFromSlaves();
     void receiveProductionDataFromSlaves();
@@ -129,14 +130,14 @@ public:
         std::size_t slave_idx,
         const std::vector<InjectionGroupTarget>& injection_targets
     ) const;
-    void sendNumGroupTargetsToSlave(
+    void sendNumGroupConstraintsToSlave(
         std::size_t slave_idx,
         std::size_t num_injection_targets,
-        std::size_t num_production_targets
+        std::size_t num_production_constraints
     ) const;
-    void sendProductionTargetsToSlave(
+    void sendProductionConstraintsToSlave(
         std::size_t slave_idx,
-        const std::vector<ProductionGroupTarget>& production_targets
+        const std::vector<ProductionGroupConstraints>& production_constraints
     ) const;
     void setDeferredLogger(DeferredLogger *deferred_logger) {
          this->logger_.setDeferredLogger(deferred_logger);

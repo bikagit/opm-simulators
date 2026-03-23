@@ -11,16 +11,12 @@
 #                                                                         #
 ###########################################################################
 
-# Mandatory call to project
-
 cmake_minimum_required (VERSION 3.23)
-
 project(opm-simulators C CXX)
-
 
 option(SIBLING_SEARCH "Search for other modules in sibling directories?" ON)
 option(BUILD_FLOW "Build the production oriented flow simulator?" ON)
-option(BUILD_FLOW_VARIANTS "Build the variants for flow by default?" OFF)
+option(BUILD_FLOW_VARIANTS "Build the variants for flow by default?" ON)
 option(BUILD_FLOW_FLOAT_VARIANTS "Build the variants for flow using float?" OFF)
 option(BUILD_FLOW_POLY_GRID "Build flow blackoil with polyhedral grid" OFF)
 option(OPM_ENABLE_PYTHON "Enable python bindings?" OFF)
@@ -32,12 +28,866 @@ option(USE_CHOW_PATEL_ILU_GPU_PARALLEL "Try to use more parallelism on the GPU d
 option(BUILD_FLOW_ALU_GRID "Build flow blackoil with alu grid" OFF)
 option(USE_DAMARIS_LIB "Use the Damaris library for asynchronous I/O?" OFF)
 option(USE_GPU_BRIDGE "Enable the GPU bridge (GPU/AMGCL solvers)" ON)
-option(USE_TRACY_PROFILER "Enable tracy profiling" OFF)
 option(CONVERT_CUDA_TO_HIP "Convert CUDA code to HIP (to run on AMD cards)" OFF)
+option(SUPPRESS_HIPIFY_WARNINGS "Suppress warnings in hipify?" ON)
 option(USE_AMGX "Enable AMGX support?" OFF)
 option(USE_HYPRE "Use the Hypre library for linear solvers?" OFF)
 set(OPM_COMPILE_COMPONENTS "2;3;4;5;6;7" CACHE STRING "The components to compile support for")
 option(USE_OPENCL "Enable OpenCL support?" ON)
+
+# Wrapper for opm_add_target_options that also adds
+# compile definitions and target links from the library
+function(simulators_add_target_options)
+  cmake_parse_arguments(PARAM "" "TARGET" "" ${ARGN})
+  if(NOT PARAM_TARGET)
+    message(FATAL_ERROR "Function needs a TARGET parameter")
+  endif()
+
+  opm_add_target_options(TARGET ${PARAM_TARGET})
+  get_property(defs TARGET opmsimulators PROPERTY INTERFACE_COMPILE_DEFINITIONS)
+  target_compile_definitions(${PARAM_TARGET} PRIVATE ${defs})
+  get_property(libs TARGET opmsimulators PROPERTY INTERFACE_LINK_LIBRARIES)
+  target_compile_definitions(${PARAM_TARGET} PRIVATE ${defs})
+  target_link_libraries(${PARAM_TARGET} PRIVATE ${libs})
+
+  if(TARGET opmcommon)
+    add_dependencies(${PARAM_TARGET} opmcommon)
+  endif()
+
+  # We only wait for the hipification process if we are compiling HIP.
+  # That is, we need to wait for the HIP header files to be generated
+  # before the rest of the code can compile. HIP header file includes
+  # anything in gpuistl, say.
+  if (CONVERT_CUDA_TO_HIP)
+    add_dependencies(${PARAM_TARGET} hipified_headers)
+  endif()
+endfunction()
+
+macro(opm-simulators_language_hook)
+  if(CONVERT_CUDA_TO_HIP)
+    message("CUDA code will be hipified")
+    enable_language(HIP)
+  endif()
+
+  # Make sure we are using the same compiler underneath
+  # NVCC as for the rest. In the case that NVCC does not support
+  # that compiler it will error out.
+  if(NOT CMAKE_DISABLE_FIND_PACKAGE_CUDA AND NOT CONVERT_CUDA_TO_HIP)
+    include(UseCUDA)
+  endif()
+endmacro()
+
+macro(opm-simulators_prereqs_hook)
+  if(MPI_FOUND AND HDF5_FOUND AND NOT HDF5_IS_PARALLEL)
+    message(
+      WARNING
+        "When building parallel OPM flow we need a "
+        "parallel version of hdf5, but found only a serial one. "
+        "Please install a parallel hdf5 library for MPI "
+        "(e.g with apt-get install libhdf5-mpi-dev) and do a clean "
+        "rebuild (build after \"make clean\"). Continuing with "
+        "only normal restart without hdf5 file support."
+    )
+    set(HDF5_FOUND OFF)
+  endif()
+
+  target_link_libraries(opmsimulators
+    PUBLIC
+      opmcommon
+      opmgrid
+      SuiteSparse::UMFPACK
+      Boost::date_time
+  )
+
+  if(MPI_FOUND)
+    target_link_libraries(opmsimulators PUBLIC MPI::MPI_C MPI::MPI_CXX)
+  endif()
+
+  if (TARGET fmt::fmt)
+    target_link_libraries(opmsimulators PUBLIC fmt::fmt)
+  else()
+    include(DownloadFmt)
+    DownloadFmt(opmsimulators)
+  endif()
+
+  if(HDF5_FOUND)
+    target_link_libraries(opmsimulators PUBLIC HDF5::HDF5)
+    target_compile_definitions(opmsimulators PUBLIC HAVE_HDF5=1)
+  endif()
+
+  if (OPM_ENABLE_PYTHON)
+    # Be backwards compatible.
+    if(PYTHON_EXECUTABLE AND NOT Python3_EXECUTABLE)
+      set(Python3_EXECUTABLE ${PYTHON_EXECUTABLE})
+    endif()
+    find_package(Python3 REQUIRED COMPONENTS Interpreter Development.Module)
+    if(Python3_VERSION_MINOR LESS 3)
+      # Python native namespace packages requires python >= 3.3
+      message(SEND_ERROR "OPM requires python >= 3.3 but only version ${Python3_VERSION} was found")
+    endif()
+
+    find_package(pybind11 CONFIG)
+    if(NOT pybind11_FOUND)
+      include(DownloadPyBind11)
+    endif()
+  endif()
+
+  if(CONVERT_CUDA_TO_HIP)
+    find_package(hip REQUIRED)
+    find_package(hipsparse REQUIRED)
+    find_package(hipblas REQUIRED)
+    find_program(HIPIFY_PERL_COMMAND
+                 NAMES hipify-perl
+                 HINTS
+                  PATH /opt/rocm/bin
+    )
+    if(HIPIFY_PERL_COMMAND)
+      add_executable(hipify-perl IMPORTED GLOBAL)
+      set_target_properties(hipify-perl
+                            PROPERTIES IMPORTED_LOCATION ${HIPIFY_PERL_COMMAND}
+      )
+    else()
+      message(FATAL_ERROR "hipify-perl, required to convert CUDA to HIP, not found")
+    endif()
+    target_link_libraries(opmsimulators PUBLIC roc::hipblas roc::hipsparse)
+  endif()
+
+  if(USE_GPU_BRIDGE)
+    if(NOT CMAKE_DISABLE_FIND_PACKAGE_rocsparse)
+      find_package(rocalution)
+      find_package(rocblas)
+      find_package(rocsparse)
+    endif()
+    find_package(amgcl)
+    if(amgcl_FOUND)
+      target_compile_definitions(amgcl::amgcl INTERFACE HAVE_AMGCL=1)
+      target_link_libraries(opmsimulators PRIVATE amgcl::amgcl)
+    endif()
+    if(rocalution_FOUND)
+      target_compile_definitions(roc::rocalution INTERFACE HAVE_ROCALUTION=1)
+      target_link_libraries(opmsimulators PRIVATE roc::rocalution)
+    endif()
+    if(rocblas_FOUND AND rocsparse_FOUND)
+      target_compile_definitions(roc::rocblas INTERFACE HAVE_ROCBLAS=1)
+      target_compile_definitions(roc::rocsparse INTERFACE HAVE_ROCSPARSE=1)
+      target_link_libraries(opmsimulators PRIVATE roc::rocblas)
+      target_link_libraries(opmsimulators PRIVATE roc::rocsparse)
+    endif()
+  endif()
+
+  if(USE_GPU_BRIDGE AND rocsparse_FOUND AND NOT CMAKE_DISABLE_FIND_PACKAGE_CUDA)
+    message(WARNING
+      "GPU bridge: Using CUDA and ROCm at the same time is not allowed. "
+      "Since rocsparse was found, CUDA will be disabled. "
+      "Use -DCMAKE_DISABLE_FIND_PACKAGE_rocsparse=ON to instead use CUDA.")
+    set(CMAKE_DISABLE_FIND_PACKAGE_CUDA ON)
+  endif()
+
+  # Make sure we are using the same compiler underneath
+  # NVCC as for the rest. In the case that NVCC does not support
+  # that compiler it will error out.
+  if(NOT CMAKE_DISABLE_FIND_PACKAGE_CUDA AND NOT CONVERT_CUDA_TO_HIP)
+    if(CUDA_FOUND)
+      find_package(CUDAToolkit REQUIRED)
+      target_link_libraries(opmsimulators
+        PUBLIC
+          CUDA::cusparse
+          CUDA::cublas
+          CUDA::nvptxcompiler_static
+      )
+    endif()
+  endif()
+
+  # Find AMGX
+  if(USE_AMGX)
+    find_package(AMGX)
+    if(AMGX_FOUND)
+      target_link_libraries(opmsimulators PRIVATE AMGX::AMGX)
+    else()
+      message(WARNING "AMGX requested but not found. Continuing without AMGX support.")
+    endif()
+  endif()
+
+  if(USE_HYPRE AND USE_MPI)
+    find_package(HYPRE)
+    if(HYPRE_FOUND)
+      target_link_libraries(opmsimulators PUBLIC HYPRE::HYPRE)
+    else()
+      message(WARNING "Hypre requested but not found. Continuing without Hypre support.")
+    endif()
+  elseif(USE_HYPRE)
+    message(WARNING "Hypre requested but MPI not activated. Continuing without Hypre support.")
+  endif()
+
+  if(USE_OPENCL AND USE_GPU_BRIDGE)
+    find_package(OpenCL)
+
+    if(OpenCL_FOUND)
+      # the current OpenCL implementation relies on cl2.hpp, not cl.hpp
+      # make sure it is available, otherwise disable OpenCL
+      find_file(CL2_HPP CL/cl2.hpp HINTS ${OpenCL_INCLUDE_DIRS})
+      if(NOT CL2_HPP)
+        message(WARNING
+          " OpenCL was found, but this version of opm-simulators relies on CL/cl2.hpp, "
+          "which implements OpenCL 1.0, 1.1 and 1.2.\n Deactivating OpenCL"
+        )
+        set(OpenCL_FOUND OFF)
+      else()
+        target_compile_definitions(OpenCL::OpenCL INTERFACE HAVE_OPENCL=1)
+        find_file(OPENCL_HPP CL/opencl.hpp HINTS ${OpenCL_INCLUDE_DIRS})
+        if(OPENCL_HPP)
+          target_compile_definitions(OpenCL::OpenCL INTERFACE HAVE_OPENCL_HPP=1)
+        endif()
+        target_link_libraries(opmsimulators PRIVATE OpenCL::OpenCL)
+      endif()
+    elseif(USE_CHOW_PATEL_ILU)
+      message(FATAL_ERROR " CHOW_PATEL_ILU only works for openclSolver, but OpenCL was not found")
+    endif()
+    find_package(VexCL)
+    if(VexCL_FOUND)
+      # VexCL sets c++ specific flags. Remove so we don't get warnings in .c sources
+      get_target_property(compile_opts VexCL::Common INTERFACE_COMPILE_OPTIONS)
+      list(FILTER compile_opts EXCLUDE REGEX .*-Wno-catch-value.*)
+      set_property(TARGET VexCL::Common PROPERTY INTERFACE_COMPILE_OPTIONS ${compile_opts})
+      target_compile_definitions(VexCL::Common INTERFACE HAVE_VEXCL=1)
+      target_link_libraries(opmsimulators PRIVATE VexCL::Common VexCL::OpenCL)
+    endif()
+  endif()
+
+  if(TARGET dunealugrid)
+    target_link_libraries(opmsimulators PUBLIC dunealugrid)
+  endif()
+
+  if(TARGET dunefem)
+    target_link_libraries(opmsimulators PUBLIC dunefem)
+  endif()
+
+  if(USE_DAMARIS_LIB AND MPI_FOUND)
+    find_package(Damaris 1.9)
+    if (Damaris_FOUND)
+      target_link_libraries(opmsimulators PUBLIC damaris)
+    endif()
+  endif()
+
+  include(CheckAVX2)
+  check_for_avx2()
+endmacro()
+
+macro(opm-simulators_sources_hook)
+  if(OPENCL_FOUND)
+    include(opencl-source-provider)
+    target_sources(opmsimulators PRIVATE ${PROJECT_BINARY_DIR}/clSources.cpp)
+  endif()
+
+  if(QuadMath_FOUND)
+    get_target_property(qm_defs QuadMath::QuadMath INTERFACE_COMPILE_DEFINITIONS)
+    get_target_property(qm_options QuadMath::QuadMath INTERFACE_COMPILE_OPTIONS)
+    if(qm_defs)
+      list(APPEND qm_defs HAVE_QUAD=1)
+    else()
+      set(qm_defs HAVE_QUAD=1)
+    endif()
+    foreach(source opm/models/nonlinear/newtonmethodparams.cpp
+                   opm/models/utils/parametersystem.cpp
+                   opm/models/utils/simulatorutils.cpp
+    )
+      set_property(
+        SOURCE
+          ${source}
+        APPEND PROPERTY
+        COMPILE_DEFINITIONS
+          ${qm_defs}
+      )
+      set_property(
+        SOURCE
+          ${source}
+        APPEND PROPERTY
+        COMPILE_OPTIONS
+          ${qm_options}
+      )
+    endforeach()
+  endif()
+
+  if(HYPRE_FOUND)
+    list(APPEND tests_SOURCES tests/test_HyprePreconditionerCPU.cpp)
+    list(APPEND tests_SOURCES tests/gpuistl/test_HypreInterfaceCPU.cpp)
+    if(HYPRE_USING_CUDA OR HYPRE_USING_HIP)
+      list(APPEND tests_SOURCES tests/test_HyprePreconditionerGPU.cpp)
+      list(APPEND tests_SOURCES tests/gpuistl/test_HypreInterfaceGPU.cpp)
+    endif()
+  endif()
+
+  if(AMGX_FOUND)
+    list(APPEND tests_SOURCES tests/gpuistl/test_AmgxInterface.cpp)
+    list(APPEND tests_SOURCES tests/test_AmgxPreconditioner.cpp)
+  endif()
+
+  if(HAVE_AVX2_EXTENSION)
+    set_property(SOURCE ${AVX2_SOURCE_FILES} PROPERTY COMPILE_OPTIONS ${AVX2_FLAGS})
+  endif()
+
+  # Boost 1.66 used on RHEL8 cannot be built as c++-20
+  if(Boost_VERSION VERSION_LESS 1.67)
+    set_source_files_properties(
+      opm/simulators/linalg/PropertyTree.cpp
+      opm/simulators/utils/SetupPartitioningParams.cpp
+      PROPERTIES
+      COMPILE_OPTIONS
+        -std=c++17
+    )
+    if(amgcl_FOUND AND USE_GPU_BRIDGE)
+      set_source_files_properties(
+        opm/simulators/linalg/gpubridge/amgclSolverBackend.cpp
+        opm/simulators/linalg/gpubridge/GpuBridge.cpp
+        PROPERTIES
+        COMPILE_OPTIONS
+          -std=c++17
+      )
+    endif()
+  endif()
+
+  if(CUDA_FOUND)
+    # cuda warns when constxpr functions are used in kernels.
+    # since the entire stl is constexpr ..., we enable relaxed flag
+    set_source_files_properties(
+      tests/gpuistl/test_blackoilfluidstategpu.cu
+      tests/gpuistl/test_gpu_ad.cu
+      tests/gpuistl/test_gpu_linear_two_phase_material.cu
+      tests/gpuistl/test_gpuPvt.cu
+      tests/gpuistl/test_gpuBlackOilFluidSystem.cu
+      tests/gpuistl/test_GpuSparseMatrix.cu
+      tests/gpuistl/test_GpuSparseTable.cu
+      tests/gpuistl/test_MiniMatrix.cu
+      tests/gpuistl/test_MiniVector.cu
+      PROPERTIES
+      COMPILE_OPTIONS
+        --expt-relaxed-constexpr
+    )
+
+    # Certain structures in OPM requires the -fpermissive flag to compile with nvcc,
+    # this enables this for the specific files
+    set_source_files_properties(
+      tests/gpuistl/test_primary_variables_gpu.cu
+      PROPERTIES
+      COMPILE_OPTIONS
+        "-fpermissive;-Xcompiler=-fpermissive;--expt-relaxed-constexpr"
+    )
+  endif()
+endmacro()
+
+macro(opm-simulators_config_hook)
+  if(BUILD_FLOW_FLOAT_VARIANTS)
+    target_compile_definitions(opmsimulators
+      PRIVATE
+        FLOW_INSTANTIATE_FLOAT=1
+    )
+  endif()
+
+  # The parameter system can leverage std::from_chars() for
+  # floating-point types if available.  Detect support for this
+  # feature.
+  try_compile(
+    have_float_from_chars
+    ${CMAKE_BINARY_DIR}
+    ${PROJECT_SOURCE_DIR}/cmake/test/testFloatFromChars.cpp
+    CXX_STANDARD 17
+  )
+
+  if(have_float_from_chars)
+    set_property(
+      SOURCE
+        opm/models/utils/parametersystem.cpp
+      APPEND PROPERTY
+      COMPILE_DEFINITIONS
+        HAVE_FLOATING_POINT_FROM_CHARS=1
+    )
+  endif()
+
+  if (Damaris_FOUND AND MPI_FOUND AND USE_DAMARIS_LIB)
+    target_compile_definitions(opmsimulators PUBLIC HAVE_DAMARIS=1)
+  endif()
+
+  if(CONVERT_CUDA_TO_HIP)
+    target_compile_definitions(opmsimulators
+      PUBLIC
+        HAVE_CUDA=1
+        USE_HIP=1
+    )
+  endif()
+
+  if(CUDA_FOUND)
+    target_compile_definitions(opmsimulators PUBLIC HAVE_CUDA=1)
+  endif()
+
+  if(USE_GPU_BRIDGE)
+    target_compile_definitions(opmsimulators PUBLIC COMPILE_GPU_BRIDGE=1)
+  endif()
+
+  if(OpenCL_FOUND)
+    if( USE_CHOW_PATEL_ILU)
+      target_compile_definitions(opmsimulators PRIVATE CHOW_PATEL=1)
+    elseif(USE_CHOW_PATEL_ILU_GPU)
+      target_compile_definitions(opmsimulators PRIVATE CHOW_PATEL_GPU=1)
+      if(USE_CHOW_PATEL_ILU_GPU_PARALLEL)
+        target_compile_definitions(opmsimulators PRIVATE CHOW_PATEL_GPU_PARALLEL=1)
+      endif()
+    endif()
+  endif()
+endmacro()
+
+macro(opm-simulators_tests_hook)
+  include(${CMAKE_CURRENT_SOURCE_DIR}/modelTests.cmake)
+
+  # Look for the opm-tests repository; if found the variable
+  # HAVE_OPM_TESTS will be set to true.
+  include(Findopm-tests)
+
+  if (HAVE_OPM_TESTS)
+    include(${CMAKE_CURRENT_SOURCE_DIR}/compareECLFiles.cmake)
+  endif()
+
+  if(MPI_FOUND)
+    include(${CMAKE_CURRENT_SOURCE_DIR}/parallelUnitTests.cmake)
+  endif()
+
+  if(OPM_ENABLE_PYTHON)
+    include(${CMAKE_CURRENT_SOURCE_DIR}/pythonIntegrationTests.cmake)
+  endif()
+
+  if(CUDA_FOUND OR hip_FOUND)
+    # CUISTL
+    set(gpu_label "gpu_cuda")
+    if(CONVERT_CUDA_TO_HIP)
+      set(gpu_label "gpu_hip")
+    endif()
+
+    foreach(test
+                 AmgxInterface
+                 AmgxPreconditioner
+                 blackoilfluidstategpu
+                 conditional_storage
+                 cublas_handle
+                 cublas_safe_call
+                 cuda_check_last_error
+                 cusparse_handle
+                 cuSparse_matrix_operations
+                 cusparse_safe_call
+                 cusparseSolver
+                 cuVector_operations
+                 deviceBlockOperations
+                 gpu_ad
+                 gpu_linear_two_phase_material
+                 gpu_resources
+                 gpu_safe_call
+                 gpu_smart_pointers
+                 gpuBlackOilFluidSystem
+                 GpuBuffer
+                 GpuDILU
+                 GpuJac
+                 GpuOwnerOverlapCopy
+                 GpuPressureTransferPolicy
+                 gpuPvt
+                 GpuSeqILU0
+                 GpuSparseMatrix
+                 GpuSparseTable
+                 GpuVector
+                 GpuView
+                 HypreInterfaceGPU
+                 HyprePreconditionerGPU
+                 is_gpu_pointer
+                 MiniMatrix
+                 MiniVector
+                 preconditioner_factory_gpu
+                 primary_variables_gpu
+                 solver_adapter
+                 throw_macros_on_gpu
+           )
+      if(TEST ${test})
+        set_tests_properties(${test}
+          PROPERTIES
+          LABELS
+            ${gpu_label}
+        )
+      endif()
+    endforeach()
+  endif()
+
+  if(USE_GPU_BRIDGE)
+    if(OpenCL_FOUND)
+      set_tests_properties(
+        openclSolver
+        solvetransposed3x3
+        csrToCscOffsetMap
+        PROPERTIES
+        LABELS
+          gpu_opencl
+      )
+    endif()
+
+    if(rocalution_FOUND)
+      set_tests_properties(rocalutionSolver PROPERTIES LABELS gpu_rocm)
+      target_link_libraries(test_rocalutionSolver PRIVATE roc::rocalution)
+    endif()
+
+    if(rocsparse_FOUND AND rocblas_FOUND)
+      set_tests_properties(rocsparseSolver PROPERTIES LABELS gpu_rocm)
+      target_link_libraries(test_rocsparseSolver PRIVATE roc::rocsparse roc::rocblas)
+    endif()
+  endif()
+
+  add_custom_target(extra_test ${CMAKE_CTEST_COMMAND} -C ExtraTests)
+
+  if(HAVE_OPM_TESTS)
+    if(OPM_ENABLE_PYTHON)
+      if(${CMAKE_BINARY_DIR} STREQUAL ${PROJECT_BINARY_DIR})
+        set(sim_dir ${CMAKE_BINARY_DIR})
+      else()
+        set(sim_dir ${CMAKE_BINARY_DIR}/opm-simulators)
+      endif()
+      add_custom_target(failure_report
+                        USES_TERMINAL
+                        COMMAND ${CMAKE_COMMAND} -E env "PYTHONPATH=${opm-common_DIR}/python"
+                        ${PROJECT_SOURCE_DIR}/tests/make_failure_report.sh
+                        ${OPM_TESTS_ROOT} ${CMAKE_BINARY_DIR} ${sim_dir})
+    endif()
+  endif()
+
+  if(BUILD_FLOW)
+    add_test(
+      NAME
+        flow__version
+      COMMAND
+        $<TARGET_FILE:flow> --version
+    )
+    set_tests_properties(flow__version
+      PROPERTIES
+      PASS_REGULAR_EXPRESSION
+        ${${project}_LABEL}
+    )
+  endif()
+endmacro()
+
+macro(opm-simulators_targets_hook)
+  # this test is identical to the simulation of the lens problem that
+  # uses the element centered finite volume discretization in
+  # conjunction with automatic differentiation
+  # (lens_immiscible_ecfv_ad). The only difference is that it uses
+  # multiple compile units in order to ensure that eWoms code can be
+  # used within libraries that use the same type tag within multiple
+  # compile units.
+  opm_add_test(lens_immiscible_ecfv_ad_mcu
+    ONLY_COMPILE
+    SOURCES
+     examples/lens_immiscible_ecfv_ad_cu1.cpp
+     examples/lens_immiscible_ecfv_ad_cu2.cpp
+     examples/lens_immiscible_ecfv_ad_main.cpp
+    LIBRARIES
+      opmsimulators
+      opmcommon
+  )
+
+  opm_add_test(test_tuning_trgmbe
+    ONLY_COMPILE
+    SOURCES
+      tests/test_tuning_TRGMBE.cpp
+    LIBRARIES
+      Boost::unit_test_framework
+  )
+
+  opm_add_test(test_tuning_tsinit_nextstep
+    ONLY_COMPILE
+    SOURCES
+      tests/test_tuning_TSINIT_NEXTSTEP.cpp
+     LIBRARIES
+      Boost::unit_test_framework opmcommon
+  )
+
+  if(QuadMath_FOUND)
+    foreach(tapp co2injection_flash_ni_ecfv
+                 co2injection_flash_ni_vcfv
+                 co2injection_flash_ecfv
+                 co2injection_flash_vcfv)
+      opm_add_test(${tapp}_quad
+        ONLY_COMPILE
+        LIBRARIES
+          opmsimulators
+          opmcommon
+        EXE_NAME
+          ${tapp}_quad
+        SOURCES
+          examples/${tapp}.cpp
+      )
+      target_link_libraries(${tapp}_quad PRIVATE QuadMath::QuadMath)
+      target_compile_definitions(${tapp}_quad PRIVATE HAVE_QUAD=1)
+    endforeach()
+  endif()
+
+  if(CUDA_FOUND)
+    foreach(tgt
+        test_gpu_safe_call
+        test_cuda_check_last_error
+        test_GpuVector
+        test_is_gpu_pointer)
+      target_link_libraries(${tgt} PRIVATE CUDA::cudart)
+    endforeach()
+  endif()
+
+  if(OpenCL_FOUND)
+    target_link_libraries(test_solvetransposed3x3 PRIVATE OpenCL::OpenCL)
+    target_link_libraries(test_csrToCscOffsetMap PRIVATE OpenCL::OpenCL)
+  endif()
+
+  opm_add_library(
+    TARGET
+      moduleVersion
+    TYPE
+      OBJECT
+    SOURCES
+      opm/simulators/utils/moduleVersion.cpp
+  )
+
+  # Strictly we only depend on the update-version target,
+  # but this is not exposed in a super-build.
+  add_dependencies(moduleVersion opmsimulators)
+
+  opm_add_library(
+    TARGET
+      MainDispatchDynamic
+    TYPE
+      OBJECT
+    SOURCES
+      opm/simulators/flow/MainDispatchDynamic.cpp
+  )
+  simulators_add_target_options(TARGET MainDispatchDynamic)
+
+  target_sources(test_outputdir PRIVATE $<TARGET_OBJECTS:moduleVersion>)
+  target_sources(test_equil PRIVATE $<TARGET_OBJECTS:moduleVersion>)
+  target_sources(test_group_higher_constraints PRIVATE $<TARGET_OBJECTS:moduleVersion>)
+  target_sources(test_RestartSerialization PRIVATE $<TARGET_OBJECTS:moduleVersion>)
+  target_sources(test_glift1 PRIVATE $<TARGET_OBJECTS:moduleVersion>)
+  if(MPI_FOUND)
+    target_sources(test_chopstep PRIVATE $<TARGET_OBJECTS:moduleVersion>)
+  endif()
+
+  set(FLOW_MODELS
+    blackoil
+    blackoil_legacyassembly
+    blackoil_nohyst
+    blackoil_temp
+    biofilm
+    brine
+    brine_energy
+    brine_precsalt_vapwat
+    brine_saltprecipitation
+    energy
+    extbo
+    foam
+    gasoil
+    gasoildiffuse
+    gasoil_energy
+    gaswater
+    gaswater_brine
+    gaswater_dissolution
+    gaswater_dissolution_diffuse
+    gaswater_energy
+    gaswater_saltprec_energy
+    gaswater_saltprec_vapwat
+    gaswater_solvent
+    micp
+    oilwater
+    oilwater_brine
+    oilwater_polymer
+    oilwater_polymer_injectivity
+    onephase
+    onephase_energy
+    polymer
+    solvent
+    solvent_foam
+  )
+
+  foreach(OBJ ${COMMON_MODELS} ${FLOW_MODELS} ${FLOW_VARIANT_MODELS})
+    opm_add_library(
+      TARGET
+        flow_lib${OBJ}
+      TYPE
+        OBJECT
+      SOURCES
+        flow/flow_${OBJ}.cpp
+    )
+    simulators_add_target_options(TARGET flow_lib${OBJ})
+    list(APPEND FLOW_TGTS $<TARGET_OBJECTS:flow_lib${OBJ}>)
+    list(APPEND FLOWMODELS_PREFIXED flow_${OBJ})
+
+    opm_add_test(flow_${OBJ}
+      ONLY_COMPILE
+      SOURCES
+        flow/flow_${OBJ}_main.cpp
+        $<TARGET_OBJECTS:moduleVersion>
+        $<TARGET_OBJECTS:flow_lib${OBJ}>
+      EXE_NAME
+        flow_${OBJ}
+      DEPENDS
+        opmsimulators
+      LIBRARIES
+        opmsimulators
+    )
+  endforeach()
+
+  opm_add_test(flow
+    ONLY_COMPILE
+    ALWAYS_ENABLE
+    DEPENDS
+      opmsimulators
+    LIBRARIES
+      opmsimulators
+    SOURCES
+      flow/flow.cpp
+      ${FLOW_TGTS}
+      $<TARGET_OBJECTS:moduleVersion>
+      $<TARGET_OBJECTS:MainDispatchDynamic>
+  )
+
+  opm_add_test(flow_distribute_z
+    ONLY_COMPILE
+    ALWAYS_ENABLE
+    DEPENDS
+      opmsimulators
+    LIBRARIES
+      opmsimulators
+    SOURCES
+      flow/flow_distribute_z.cpp
+      ${FLOW_TGTS}
+      $<TARGET_OBJECTS:moduleVersion>
+      $<TARGET_OBJECTS:MainDispatchDynamic>
+  )
+
+  if(OPM_ENABLE_PYTHON)
+    set_target_properties(
+      flow_libblackoil
+      moduleVersion
+      MainDispatchDynamic
+      PROPERTIES
+      POSITION_INDEPENDENT_CODE
+        ON
+    )
+    add_subdirectory(python/simulators)
+  endif()
+
+  # We now specify the files we actually want to compile
+
+  set(FLOWEXP_COMPONENTS_SOURCES)
+  foreach(component IN LISTS OPM_COMPILE_COMPONENTS)
+    list(APPEND FLOWEXP_COMPONENTS_SOURCES flowexperimental/comp/flowexp_comp${component}.cpp)
+    list(APPEND FLOWEXP_COMPONENTS_SOURCES flowexperimental/comp/flowexp_comp${component}_2p.cpp)
+  endforeach()
+
+  # Make a string we can use in the code
+  # this will be used in a template argument pack.
+  string(REPLACE ";" "," OPM_COMPILE_COMPONENTS_TEMPLATE_LIST "${OPM_COMPILE_COMPONENTS}")
+
+  opm_add_test(flowexp_comp
+    ONLY_COMPILE
+    ALWAYS_ENABLE
+    DEPENDS
+      opmsimulators
+    LIBRARIES
+      opmsimulators
+    SOURCES
+      flowexperimental/comp/flowexp_comp.cpp
+      ${FLOWEXP_COMPONENTS_SOURCES}
+      $<TARGET_OBJECTS:moduleVersion>
+  )
+  target_compile_definitions(flowexp_comp
+    PRIVATE
+      OPM_COMPILE_COMPONENTS_TEMPLATE_LIST=${OPM_COMPILE_COMPONENTS_TEMPLATE_LIST}
+  )
+
+  if(BUILD_FLOW_FLOAT_VARIANTS)
+    opm_add_test(flow_blackoil_float
+      ONLY_COMPILE
+      ALWAYS_ENABLE
+      DEPENDS
+        opmsimulators
+      LIBRARIES
+        opmsimulators
+      SOURCES
+        flow/flow_blackoil_float_main.cpp
+        $<TARGET_OBJECTS:moduleVersion>
+    )
+  endif()
+
+  opm_add_test(flowexp_blackoil
+    ONLY_COMPILE
+    ALWAYS_ENABLE
+    DEPENDS
+      opmsimulators
+    LIBRARIES
+      opmsimulators
+    SOURCES
+      flowexperimental/flowexp_blackoil.cpp
+      $<TARGET_OBJECTS:moduleVersion>
+  )
+
+  if(dune-alugrid_FOUND AND BUILD_FLOW_ALU_GRID)
+    opm_add_test(flow_blackoil_alugrid
+      ONLY_COMPILE
+      ALWAYS_ENABLE
+      DEPENDS
+        opmsimulators
+      LIBRARIES
+        opmsimulators
+      SOURCES
+        flow/flow_blackoil_alugrid.cpp
+        $<TARGET_OBJECTS:moduleVersion>
+    )
+  endif()
+
+  if(BUILD_FLOW_POLY_GRID)
+    opm_add_test(flow_blackoil_polyhedralgrid
+      ONLY_COMPILE
+      ALWAYS_ENABLE
+      DEPENDS
+        opmsimulators
+      LIBRARIES
+        opmsimulators
+      SOURCES
+        flow/flow_blackoil_polyhedralgrid.cpp
+        $<TARGET_OBJECTS:moduleVersion>
+    )
+  endif()
+
+  if(NOT BUILD_FLOW_VARIANTS)
+    foreach(target flowexp_blackoil
+                   flowexp_comp
+                   flow_blackoil_alugrid
+                   flow_blackoil_float
+                   flow_blackoil_polyhedralgrid
+                   ${FLOWMODELS_PREFIXED})
+      if(TARGET ${target})
+        set_target_properties(${target}
+          PROPERTIES
+          EXCLUDE_FROM_ALL ON
+        )
+      endif()
+    endforeach()
+  endif()
+endmacro()
+
+macro(opm-simulators_install_hook)
+  install(
+    DIRECTORY
+      doc/man1
+    DESTINATION
+      ${CMAKE_INSTALL_MANDIR}
+    FILES_MATCHING PATTERN
+      "*.1"
+  )
+  if (BUILD_FLOW)
+    install(TARGETS flow DESTINATION bin)
+    include(OpmBashCompletion)
+    opm_add_bash_completion(flow)
+  endif()
+endmacro()
 
 # Ensure OPM_COMPILE_COMPONENTS is a list of at least one element
 if(OPM_COMPILE_COMPONENTS STREQUAL "")
@@ -53,79 +903,9 @@ foreach(component IN LISTS OPM_COMPILE_COMPONENTS)
 endforeach()
 # Check for duplicates in OPM_COMPILE_COMPONENTS
 list(REMOVE_DUPLICATES OPM_COMPILE_COMPONENTS)
-# Make a string we can use in the code
-# this will be used in a template argument pack.
-string(REPLACE ";" "," OPM_COMPILE_COMPONENTS_TEMPLATE_LIST "${OPM_COMPILE_COMPONENTS}")
 
-
-# HIP requires cmake version 3.21
-if (CONVERT_CUDA_TO_HIP AND CMAKE_VERSION VERSION_GREATER_EQUAL "3.21")
-  enable_language(HIP)
-  message("CUDA code will be hipified")
-  set(HAVE_CUDA 1) # we still need this defined so that the preprocessor does not remove the code
-  set(CUDA_FOUND ON)
-  set(USE_HIP 1)
-  find_package(hip REQUIRED)
-  find_package(hipsparse REQUIRED)
-  find_package(hipblas REQUIRED)
-  link_libraries(roc::hipblas roc::hipsparse)
-  find_program(HIPIFY_PERL_COMMAND
-               NAMES hipify-perl
-               HINTS
-                PATH /opt/rocm/bin
-  )
-  if(HIPIFY_PERL_COMMAND)
-    add_executable(hipify-perl IMPORTED GLOBAL)
-    set_target_properties(hipify-perl
-                          PROPERTIES IMPORTED_LOCATION ${HIPIFY_PERL_COMMAND}
-    )
-  else()
-    message(FATAL_ERROR "hipify-perl required to convert CUDA to HIP not found")
-  endif()
-elseif(CONVERT_CUDA_TO_HIP)
-  message("To generate HIP code for AMD GPUs run CMake with version >= 3.21")
-endif()
-
-# The following was copied from CMakeLists.txt in opm-common.
-# TODO: factor out the common parts in opm-common and opm-simulator as a cmake module
-if (OPM_ENABLE_PYTHON)
-  # We need to be compatible with older CMake versions
-  # that do not offer FindPython3
-  # e.g. Ubuntu LTS 18.04 uses cmake 3.10
-  if(${CMAKE_VERSION} VERSION_LESS "3.12.0")
-    find_package(PythonInterp REQUIRED)
-    if(PYTHON_VERSION_MAJOR LESS 3)
-      message(SEND_ERROR "OPM requires version 3 of Python but only version ${PYTHON_VERSION_STRING} was found")
-    endif()
-    set(Python3_EXECUTABLE ${PYTHON_EXECUTABLE})
-    set(Python3_LIBRARIES ${PYTHON_LIBRARIES})
-    set(Python3_VERSION "${PYTHON_VERSION_STRING}")
-    set(Python3_VERSION_MINOR ${PYTHON_VERSION_MINOR})
-  else()
-    # Be backwards compatible.
-    if(PYTHON_EXECUTABLE AND NOT Python3_EXECUTABLE)
-      set(Python3_EXECUTABLE ${PYTHON_EXECUTABLE})
-    endif()
-    if(${CMAKE_VERSION} VERSION_LESS "3.18.0")
-      find_package(Python3 REQUIRED COMPONENTS Interpreter Development)
-    else()
-      find_package(Python3 REQUIRED COMPONENTS Interpreter Development.Module Development.Embed)
-    endif()
-  endif()
-  if(Python3_VERSION_MINOR LESS 3)
-    # Python native namespace packages requires python >= 3.3
-    message(SEND_ERROR "OPM requires python >= 3.3 but only version ${Python3_VERSION} was found")
-  endif()
-
-  find_package(pybind11 CONFIG)
-
-  if(NOT pybind11_FOUND)
-    include(DownloadPyBind11)
-  endif()
-
-  # Compatibility settings for PythonInterp and PythonLibs
-  # used e.g. in FindCwrap, pybind11
-  set(PYTHON_EXECUTABLE ${Python3_EXECUTABLE})
+if(CONVERT_CUDA_TO_HIP)
+  set(USE_GPU_BRIDGE OFF)
 endif()
 
 if(SIBLING_SEARCH AND NOT opm-common_DIR)
@@ -137,15 +917,19 @@ if(SIBLING_SEARCH AND NOT opm-common_DIR)
   get_filename_component(_modules_dir ${_parent_full_dir} DIRECTORY)
   if(IS_DIRECTORY ${_modules_dir}/opm-common/${_leaf_dir_name})
     set(opm-common_DIR ${_modules_dir}/opm-common/${_leaf_dir_name})
+    set(opm-grid_DIR ${_modules_dir}/opm-grid/${_leaf_dir_name})
   else()
     string(REPLACE ${PROJECT_NAME} opm-common _opm_common_leaf ${_leaf_dir_name})
     if(NOT _leaf_dir_name STREQUAL _opm_common_leaf
         AND IS_DIRECTORY ${_parent_full_dir}/${_opm_common_leaf})
       # We are using build directories named <prefix><module-name><postfix>
       set(opm-common_DIR ${_parent_full_dir}/${_opm_common_leaf})
+      string(REPLACE ${PROJECT_NAME} opm-grid _opm_grid_leaf ${_leaf_dir_name})
+      set(opm-grid_DIR ${_parent_full_dir}/${_opm_grid_leaf})
     elseif(IS_DIRECTORY ${_parent_full_dir}/opm-common)
       # All modules are in a common build dir
       set(opm-common_DIR "${_parent_full_dir}/opm-common")
+      set(opm-grid_DIR "${_parent_full_dir}/opm-grid")
     endif()
   endif()
 endif()
@@ -156,711 +940,10 @@ endif()
 
 find_package(opm-common REQUIRED)
 
-include(OpmInit)
-OpmSetPolicies()
-
-if(USE_MPI)
-  set(HDF5_PREFER_PARALLEL TRUE)
-endif()
-
-if(USE_GPU_BRIDGE)
-  set(COMPILE_GPU_BRIDGE 1)
-endif()
-
 # project information is in dune.module. Read this file and set variables.
 # we cannot generate dune.module since it is read by dunecontrol before
 # the build starts, so it makes sense to keep the data there then.
 include (OpmInit)
 
-# Look for the opm-tests repository; if found the variable
-# HAVE_OPM_TESTS will be set to true.
-include(Findopm-tests)
-
-# list of prerequisites for this particular project; this is in a
-# separate file (in cmake/Modules sub-directory) because it is shared
-# with the find module
-include ("${project}-prereqs")
-
-# Make sure we are using the same compiler underneath
-# NVCC as for the rest. In the case that NVCC does not support
-# that compiler it will error out. Unfortunately this will only
-# work for CMake >= 3.8. We found no way to make FindCUDA.cmake error
-# out. It seems to ignore CMAKE_NVCC_FLAGS and CMAKE. Additionally
-# our way of specifying cuda source files never worked for CMake
-# version < 3.8. Hence we deactivate cuda for these versions.
-# We use "CMAKE_VERSION VERSION_GREATER 3.7.9" instead of
-# CMAKE_VERSION VERSION_GREATER_EQUAL 3.8, because of backwards
-# compatibility to cmake 3.6 and lower.
-if(NOT CMAKE_DISABLE_FIND_PACKAGE_CUDA AND
-    CMAKE_VERSION VERSION_GREATER 3.7.9)
-  if(CMAKE_BUILD_TYPE)
-    set(_flags_suffix "_${CMAKE_BUILD_TYPE}")
-  endif()
-  if(NOT DEFINED ENV{CUDAHOSTCXX} AND NOT DEFINED CMAKE_CUDA_HOST_COMPILER AND
-      (NOT CMAKE_CUDA_FLAGS${_flags_suffix} OR NOT CMAKE_CUDA_FLAGS${_flags_suffix} MATCHES ".*-ccbin .*"))
-    message(STATUS "Setting CUDA host compiler CMAKE_CUDA_HOST_COMPILER to ${CMAKE_CXX_COMPILER} to "
-      "prevent incompatibilities. Note that this might report that there "
-      "is not CUDA compiler if your system's CUDA compiler does not support "
-      "${CMAKE_CXX_COMPILER}.")
-    # check_language does not seem to care about ${CMAKE_CUDA_FLAGS} or $(CUDA_NVCC_FLAGS}.
-    # Hence we set CMAKE_CUDA_HOST_COMPILER to our C++ compiler.
-    # In check_language(CUDA) we will get an error if we in addition put
-    # "-ccbin ${CMAKE_CXX_COMPILER}" into CMAKE_CUDA_FLAGS. It results
-    # in "${NVCC} -ccbin=${CMAKE_CXX_COMPILER}   -ccbin ${CMAKE_CXX_COMPILER}"
-    # which causes nvcc to abort
-    set(CMAKE_CUDA_HOST_COMPILER ${CMAKE_CXX_COMPILER})
-    set(ENV{CUDAHOSTCXX} ${CMAKE_CUDA_HOST_COMPILER}) # The only thing honored by check_language(CUDA)!
-  endif()
-  include(CheckLanguage)
-  check_language(CUDA)
-  if(CMAKE_CUDA_COMPILER)
-    # OPTIONAL is ignored. Hence the magic above to check whether enabling CUDA works
-    enable_language(CUDA OPTIONAL)
-    # While the documentation says that it is deprecated, FindCUDA seems the
-    # only easy way to determine the cublas and cusparse libraries.
-    # Hence we call it unconditionally
-    # The WellContributions kernel uses __shfl_down_sync, which was introduced in CUDA 9.0
-    find_package(CUDA)
-    set(CUDA_FOUND ON)
-  endif()
-  if(CUDA_FOUND AND CUDA_VERSION VERSION_LESS "9.0")
-    set(CUDA_FOUND OFF)
-    message(WARNING "Deactivating CUDA as we require version 9.0 or newer."
-      " Found only CUDA version ${CUDA_VERSION}.")
-  endif()
-endif()
-
-find_package(CUDAToolkit)
-if(CUDA_FOUND)
-  set(HAVE_CUDA 1)
-  if(NOT USE_HIP) # no need to include CUDA files if we use rocm stack
-    include_directories(${CUDA_INCLUDE_DIRS})
-    include_directories(${CUDAToolkit_INCLUDE_DIRS})
-  endif()
-endif()
-
-if (USE_OPENCL)
-  find_package(OpenCL)
-
-  if(OpenCL_FOUND)
-    # the current OpenCL implementation relies on cl2.hpp, not cl.hpp
-    # make sure it is available, otherwise disable OpenCL
-    find_file(CL2_HPP CL/cl2.hpp HINTS ${OpenCL_INCLUDE_DIRS})
-    if(CL2_HPP)
-      set(HAVE_OPENCL 1)
-      include_directories(${OpenCL_INCLUDE_DIRS})
-      find_file(OPENCL_HPP CL/opencl.hpp HINTS ${OpenCL_INCLUDE_DIRS})
-      if(OPENCL_HPP)
-        set(HAVE_OPENCL_HPP 1)
-      endif()
-    else()
-      message(WARNING " OpenCL was found, but this version of opm-simulators relies on CL/cl2.hpp, which implements OpenCL 1.0, 1.1 and 1.2.\n Deactivating OpenCL")
-      set(OpenCL_FOUND OFF)
-      set(OPENCL_FOUND OFF)
-    endif()
-    if(USE_CHOW_PATEL_ILU)
-      add_compile_options(-DCHOW_PATEL=1)
-      if(USE_CHOW_PATEL_ILU_GPU)
-        add_compile_options(-DCHOW_PATEL_GPU=1)
-        if(USE_CHOW_PATEL_ILU_GPU_PARALLEL)
-          add_compile_options(-DCHOW_PATEL_GPU_PARALLEL=1)
-        else()
-          add_compile_options(-DCHOW_PATEL_GPU_PARALLEL=0)
-        endif()
-      else()
-        add_compile_options(-DCHOW_PATEL_GPU=0)
-        add_compile_options(-DCHOW_PATEL_GPU_PARALLEL=0)
-      endif()
-    endif()
-  else()
-    if(USE_CHOW_PATEL_ILU)
-      message(FATAL_ERROR " CHOW_PATEL_ILU only works for openclSolver, but OpenCL was not found")
-    endif()
-  endif()
-endif()
-
-find_package(amgcl)
-if(amgcl_FOUND)
-  set(HAVE_AMGCL 1)
-  # Linking to target angcl::amgcl drags in OpenMP and -fopenmp as a compile
-  # flag. With that nvcc fails as it does not that flag.
-  # Hence we set AMGCL_INCLUDE_DIRS.
-  get_property(AMGCL_INCLUDE_DIRS TARGET amgcl::amgcl PROPERTY INTERFACE_INCLUDE_DIRECTORIES)
-  include_directories(SYSTEM ${AMGCL_INCLUDE_DIRS})
-endif()
-
-if(OpenCL_FOUND)
-  find_package(VexCL)
-  if(VexCL_FOUND)
-    set(HAVE_VEXCL 1)
-    # generator expressions in vexcl do not seem to work and therefore
-    # we cannot use the imported target. Hence we exract the needed info
-    # from the targets
-    get_property(VEXCL_INCLUDE_DIRS TARGET VexCL::Common PROPERTY INTERFACE_INCLUDE_DIRECTORIES)
-    get_property(VEXCL_LINK_LIBRARIES TARGET VexCL::Common PROPERTY INTERFACE_LINK_LIBRARIES)
-    get_property(VEXCL_COMPILE_DEFINITIONS TARGET VexCL::OpenCL PROPERTY INTERFACE_COMPILE_DEFINITIONS)
-    set(VEXCL_LINK_LIBRARIES "${VEXCL_LINK_LIBRARIES};OpenCL::OpenCL")
-    add_library(OPM::VexCL::OpenCL INTERFACE IMPORTED)
-    set_target_properties(OPM::VexCL::OpenCL PROPERTIES
-      INTERFACE_COMPILE_DEFINITIONS "${VEXCL_COMPILE_DEFINITIONS}"
-      INTERFACE_LINK_LIBRARIES "${VEXCL_LINK_LIBRARIES}")
-    target_include_directories(OPM::VexCL::OpenCL SYSTEM INTERFACE "${VEXCL_INCLUDE_DIRS}")
-  endif()
-endif()
-
-if(USE_HYPRE AND USE_MPI)
-  find_package(HYPRE)
-  if(HYPRE_FOUND)
-    set(HAVE_HYPRE 1)
-    list(APPEND opm-simulators_LIBRARIES HYPRE::HYPRE)
-  else()
-    message(WARNING "Hypre requested but not found. Continuing without Hypre support.")
-    set(USE_HYPRE OFF)
-  endif()
-elseif(USE_HYPRE)
-  message(WARNING "Hypre requested but MPI not activated. Continuing without Hypre support.")
-  set(USE_HYPRE OFF)
-  set(HYPRE_FOUND OFF)
-endif()
-
-# Find AMGX
-if(USE_AMGX)
-  find_package(AMGX)
-  if(AMGX_FOUND)
-    set(HAVE_AMGX 1)
-    list(APPEND opm-simulators_LIBRARIES AMGX::AMGX)
-  else()
-    message(WARNING "AMGX requested but not found. Continuing without AMGX support.")
-    set(USE_AMGX OFF)
-  endif()
-endif()
-
-macro(${project}_config_hook)
-  opm_need_version_of ("dune-common")
-  opm_need_version_of ("dune-istl")
-  if(dune-fem_FOUND)
-      opm_need_version_of ("dune-fem")
-  endif()
-
-  if(NOT fmt_FOUND)
-    include(DownloadFmt)
-  endif()
-  if(USE_TRACY_PROFILER AND Tracy_FOUND)
-    set(USE_TRACY 1)
-    list(APPEND opm-simulators_LIBRARIES Tracy::TracyClient)
-  else()
-    set(USE_TRACY)
-  endif()
-  include_directories(${EXTRA_INCLUDES})
-
-  include(UseDamaris)
-
-  if(BUILD_FLOW_FLOAT_VARIANTS)
-    set(FLOW_INSTANTIATE_FLOAT 1)
-  endif()
-
-  # The parameter system can leverage std::from_chars() for
-  # floating-point types if available.  Detect support for this
-  # feature.
-  try_compile(
-    have_float_from_chars
-    ${CMAKE_BINARY_DIR}
-    ${PROJECT_SOURCE_DIR}/cmake/test/testFloatFromChars.cpp
-    CXX_STANDARD 17
-  )
-
-  unset(HAVE_FLOATING_POINT_FROM_CHARS)
-  if(have_float_from_chars)
-    set(HAVE_FLOATING_POINT_FROM_CHARS 1)
-  endif()
-endmacro()
-
-macro(${project}_sources_hook)
-  if(OPENCL_FOUND)
-    include(opencl-source-provider)
-    list(APPEND opm-simulators_SOURCES ${PROJECT_BINARY_DIR}/clSources.cpp)
-  endif()
-  if(QuadMath_FOUND)
-    get_target_property(qm_defs QuadMath::QuadMath INTERFACE_COMPILE_DEFINITIONS)
-    get_target_property(qm_options QuadMath::QuadMath INTERFACE_COMPILE_OPTIONS)
-    if(qm_defs)
-      list(APPEND qm_defs HAVE_QUAD=1)
-    else()
-      set(qm_defs HAVE_QUAD=1)
-    endif()
-    set_source_files_properties(opm/models/nonlinear/newtonmethodparams.cpp
-                                opm/models/utils/parametersystem.cpp
-                                opm/models/utils/simulatorutils.cpp
-                                PROPERTIES COMPILE_DEFINITIONS "${qm_defs}"
-                                COMPILE_OPTIONS "${qm_options}")
-  endif()
-endmacro()
-
-macro(${project}_files_hook)
-  if(hip_FOUND)
-    get_filename_component(CXX_COMPILER ${CMAKE_CXX_COMPILER} NAME)
-    if(hip_VERSION VERSION_LESS "5.3")
-      if(ROCALUTION_FOUND AND NOT CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
-        message(WARNING " Cannot use hipcc/clang for rocalution with rocm < 5.3\n Disabling rocalutionSolver")
-        unset(ROCALUTION_FOUND)
-        unset(HAVE_ROCALUTION)
-      endif()
-    endif()
-    if(rocsparse_FOUND AND rocblas_FOUND)
-      set(HAVE_ROCSPARSE 1)
-    else()
-      unset(HAVE_ROCSPARSE)
-    endif()
-    if(ROCALUTION_FOUND)
-      set(HAVE_ROCALUTION 1)
-    endif()
-  endif()
-  if(MPI_FOUND AND HDF5_FOUND AND NOT HDF5_IS_PARALLEL)
-    message(WARNING "When building parallel OPM flow we need a "
-      "parallel version of hdf5, but found only a serial one. "
-      "Please install a parallel hdf5 library for MPI "
-      "(e.g with apt-get install libhdf5-mpi-dev) and do a clean "
-      "rebuild (build after \"make clean\"). Continuing with "
-      "only normal restart without hdf5 file support.")
-    set(HDF5_FOUND OFF)
-    unset(HAVE_HDF5)
-  endif()
-  if(HAVE_ROCSPARSE AND HAVE_CUDA AND USE_GPU_BRIDGE) # unsure if this is the correct way to change this
-    message(WARNING "WARNING! Using CUDA and ROCm at the same time is not allowed. Please choose only one of them by setting CMAKE_DISABLE_FIND_PACKAGE_<rocsparse|CUDA>=<ON|OFF>. Disabling CUDA...\n")
-    set(CUDA_FOUND OFF)
-    unset(HAVE_CUDA)
-  endif()
-  # read the list of components from this file (in the project directory);
-  # it should set various lists with the names of the files to include
-  # include needs to be here to make reset HDF5_FOUND available in
-  # (CMakeLists_files.cmake and because we need the created lists during
-  # then inclusion of OpmLibMain
-  include (CMakeLists_files.cmake)
-endmacro()
-
-macro(${project}_tests_hook)
-  if(HYPRE_FOUND)
-    list(APPEND tests_SOURCES tests/test_HyprePreconditionerCPU.cpp)
-    list(APPEND tests_SOURCES tests/gpuistl/test_HypreInterfaceCPU.cpp)
-    if(HYPRE_USING_CUDA OR HYPRE_USING_HIP)
-      list(APPEND tests_SOURCES tests/test_HyprePreconditionerGPU.cpp)
-      list(APPEND tests_SOURCES tests/gpuistl/test_HypreInterfaceGPU.cpp)
-    endif()
-  endif()
-  if(AMGX_FOUND)
-    list(APPEND tests_SOURCES tests/gpuistl/test_AmgxInterface.cpp)
-    list(APPEND tests_SOURCES tests/test_AmgxPreconditioner.cpp)
-  endif()
-endmacro()
-
 # all setup common to the OPM library modules is done here
 include (OpmLibMain)
-
-opm_add_test(test_tuning_trgmbe
-              SOURCES
-                tests/test_tuning_TRGMBE.cpp
-              LIBRARIES
-                Boost::unit_test_framework
-              ONLY_COMPILE)
-
-opm_add_test(test_tuning_tsinit_nextstep
-              SOURCES
-                tests/test_tuning_TSINIT_NEXTSTEP.cpp
-              LIBRARIES
-                Boost::unit_test_framework opmcommon
-              ONLY_COMPILE)
-
-# this test is identical to the simulation of the lens problem that
-# uses the element centered finite volume discretization in
-# conjunction with automatic differentiation
-# (lens_immiscible_ecfv_ad). The only difference is that it uses
-# multiple compile units in order to ensure that eWoms code can be
-# used within libraries that use the same type tag within multiple
-# compile units.
-opm_add_test(lens_immiscible_ecfv_ad_mcu
-             SOURCES
-              examples/lens_immiscible_ecfv_ad_cu1.cpp
-              examples/lens_immiscible_ecfv_ad_cu2.cpp
-              examples/lens_immiscible_ecfv_ad_main.cpp
-             LIBRARIES
-              opmsimulators opmcommon
-             ONLY_COMPILE)
-
-if(QuadMath_FOUND)
-  foreach(tapp co2injection_flash_ni_ecfv
-               co2injection_flash_ni_vcfv
-               co2injection_flash_ecfv
-               co2injection_flash_vcfv)
-    opm_add_test(${tapp}_quad
-                 LIBRARIES opmsimulators opmcommon
-                 EXE_NAME ${tapp}_quad
-                 SOURCES
-                 examples/${tapp}.cpp
-                 ONLY_COMPILE)
-    target_link_libraries(${tapp}_quad PRIVATE QuadMath::QuadMath)
-    target_compile_definitions(${tapp}_quad PRIVATE HAVE_QUAD=1)
-  endforeach()
-endif()
-
-target_sources(test_outputdir PRIVATE $<TARGET_OBJECTS:moduleVersion>)
-target_sources(test_equil PRIVATE $<TARGET_OBJECTS:moduleVersion>)
-target_sources(test_group_higher_constraints PRIVATE $<TARGET_OBJECTS:moduleVersion>)
-target_sources(test_RestartSerialization PRIVATE $<TARGET_OBJECTS:moduleVersion>)
-target_sources(test_glift1 PRIVATE $<TARGET_OBJECTS:moduleVersion>)
-if(MPI_FOUND)
-  target_sources(test_chopstep PRIVATE $<TARGET_OBJECTS:moduleVersion>)
-endif()
-
-include (${CMAKE_CURRENT_SOURCE_DIR}/modelTests.cmake)
-
-if (HAVE_OPM_TESTS)
-  include (${CMAKE_CURRENT_SOURCE_DIR}/compareECLFiles.cmake)
-
-  if(OPM_ENABLE_PYTHON)
-    if(${CMAKE_BINARY_DIR} STREQUAL ${PROJECT_BINARY_DIR})
-      set(sim_dir ${CMAKE_BINARY_DIR})
-    else()
-      set(sim_dir ${CMAKE_BINARY_DIR}/opm-simulators)
-    endif()
-    add_custom_target(failure_report
-                      USES_TERMINAL
-                      COMMAND ${CMAKE_COMMAND} -E env "PYTHONPATH=${opm-common_DIR}/python"
-                      ${PROJECT_SOURCE_DIR}/tests/make_failure_report.sh
-                      ${OPM_TESTS_ROOT} ${CMAKE_BINARY_DIR} ${sim_dir})
-  endif()
-endif()
-
-if(MPI_FOUND)
-  include (${CMAKE_CURRENT_SOURCE_DIR}/parallelUnitTests.cmake)
-endif()
-
-if(OPM_ENABLE_PYTHON)
-  include (${CMAKE_CURRENT_SOURCE_DIR}/pythonIntegrationTests.cmake)
-endif()
-
-include(OpmBashCompletion)
-
-if (NOT BUILD_FLOW)
-  set(FLOW_DEFAULT_ENABLE_IF "FALSE")
-else()
-  set(FLOW_DEFAULT_ENABLE_IF "TRUE")
-endif()
-
-if (NOT BUILD_FLOW_VARIANTS)
-  set(FLOW_VARIANTS_DEFAULT_ENABLE_IF "FALSE")
-else()
-  set(FLOW_VARIANTS_DEFAULT_ENABLE_IF "TRUE")
-endif()
-
-if (NOT BUILD_FLOW_POLY_GRID)
-  set(FLOW_POLY_ONLY_DEFAULT_ENABLE_IF "FALSE")
-else()
-  set(FLOW_POLY_ONLY_DEFAULT_ENABLE_IF "TRUE")
-endif()
-
-add_library(moduleVersion OBJECT opm/simulators/utils/moduleVersion.cpp)
-set_property(TARGET moduleVersion PROPERTY POSITION_INDEPENDENT_CODE ON)
-opm_add_target_options(TARGET moduleVersion)
-
-add_library(MainDispatchDynamic OBJECT opm/simulators/flow/MainDispatchDynamic.cpp)
-opm_add_target_options(TARGET MainDispatchDynamic)
-set_property(TARGET MainDispatchDynamic PROPERTY POSITION_INDEPENDENT_CODE ON)
-
-# We only wait for the hipification process if we are compiling HIP.
-# That is, we need to wait for the HIP header files to be generated
-# before the rest of the code can compile. HIP header file includes
-# anything in gpuistl, say.
-if (CONVERT_CUDA_TO_HIP)
-  add_dependencies(MainDispatchDynamic hipified_headers)
-endif()
-
-if(TARGET fmt::fmt)
-  target_link_libraries(MainDispatchDynamic PRIVATE fmt::fmt)
-endif()
-
-if(TARGET opmcommon)
-  add_dependencies(MainDispatchDynamic opmcommon)
-endif()
-
-if(USE_TRACY_PROFILER AND Tracy_FOUND)
-  target_link_libraries(MainDispatchDynamic PRIVATE Tracy::TracyClient)
-endif()
-
-# Strictly we only depend on the update-version target,
-# but this is not exposed in a super-build.
-add_dependencies(moduleVersion opmsimulators)
-
-set(FLOW_MODELS blackoil blackoil_temp brine energy extbo foam gasoil gaswater
-                oilwater oilwater_brine gaswater_brine oilwater_polymer
-                oilwater_polymer_injectivity micp polymer solvent solvent_foam
-                gasoil_energy brine_saltprecipitation
-                gaswater_saltprec_vapwat gaswater_saltprec_energy brine_precsalt_vapwat
-                blackoil_legacyassembly gasoildiffuse gaswater_dissolution
-                gaswater_dissolution_diffuse gaswater_energy gaswater_solvent biofilm
-                blackoil_nohyst)
-set(FLOW_VARIANT_MODELS brine_energy onephase onephase_energy)
-
-set(FLOW_TGTS)
-foreach(OBJ ${COMMON_MODELS} ${FLOW_MODELS} ${FLOW_VARIANT_MODELS})
-  add_library(flow_lib${OBJ} OBJECT flow/flow_${OBJ}.cpp)
-  opm_add_target_options(TARGET flow_lib${OBJ})
-  list(APPEND FLOW_TGTS $<TARGET_OBJECTS:flow_lib${OBJ}>)
-  if(TARGET fmt::fmt)
-    target_link_libraries(flow_lib${OBJ} PRIVATE fmt::fmt)
-  endif()
-  if(TARGET opmcommon)
-      add_dependencies(flow_lib${OBJ} opmcommon)
-  endif()
-  if(USE_TRACY_PROFILER AND Tracy_FOUND)
-    target_link_libraries(flow_lib${OBJ} PRIVATE Tracy::TracyClient)
-  endif()
-
-  # We only wait for the hipification process if we are compiling HIP.
-  # That is, we need to wait for the HIP header files to be generated
-  # before the rest of the code can compile. HIP header file includes
-  # anything in gpuistl, say.
-  if(CONVERT_CUDA_TO_HIP)
-    add_dependencies(flow_lib${OBJ} hipified_headers)
-  endif()
-
-  opm_add_test(flow_${OBJ}
-               ONLY_COMPILE
-               SOURCES
-               flow/flow_${OBJ}_main.cpp
-               $<TARGET_OBJECTS:moduleVersion>
-               $<TARGET_OBJECTS:flow_lib${OBJ}>
-               EXE_NAME flow_${OBJ}
-               DEPENDS opmsimulators
-               LIBRARIES opmsimulators)
-endforeach()
-set_property(TARGET flow_libblackoil PROPERTY POSITION_INDEPENDENT_CODE ON)
-
-foreach(OBJ ${FLOW_VARIANT_MODELS})
-  set_property(TARGET flow_lib${OBJ} PROPERTY EXCLUDE_FROM_ALL ${FLOW_VARIANTS_DEFAULT_ENABLE_IF})
-endforeach()
-
-opm_add_test(flow
-  ONLY_COMPILE
-  ALWAYS_ENABLE
-  DEFAULT_ENABLE_IF ${FLOW_DEFAULT_ENABLE_IF}
-  DEPENDS opmsimulators
-  LIBRARIES opmsimulators
-  SOURCES
-  flow/flow.cpp
-  ${FLOW_TGTS}
-  $<TARGET_OBJECTS:moduleVersion>
-  $<TARGET_OBJECTS:MainDispatchDynamic>
-  )
-
-opm_add_test(flow_blackoil_polyhedralgrid
-  ONLY_COMPILE
-  ALWAYS_ENABLE
-  DEFAULT_ENABLE_IF ${FLOW_POLY_ONLY_DEFAULT_ENABLE_IF}
-  DEPENDS opmsimulators
-  LIBRARIES opmsimulators
-  SOURCES
-  flow/flow_blackoil_polyhedralgrid.cpp
-  $<TARGET_OBJECTS:moduleVersion>)
-
-opm_add_test(flow_distribute_z
-  ONLY_COMPILE
-  ALWAYS_ENABLE
-  DEFAULT_ENABLE_IF ${FLOW_DEFAULT_ENABLE_IF}
-  DEPENDS opmsimulators
-  LIBRARIES opmsimulators
-  SOURCES
-  flow/flow_distribute_z.cpp
-  ${FLOW_TGTS}
-  $<TARGET_OBJECTS:moduleVersion>
-  $<TARGET_OBJECTS:MainDispatchDynamic>
-  )
-
-opm_add_test(flowexp_blackoil
-  ONLY_COMPILE
-  ALWAYS_ENABLE
-  DEPENDS opmsimulators
-  LIBRARIES opmsimulators
-  SOURCES
-  flowexperimental/flowexp_blackoil.cpp
-  $<TARGET_OBJECTS:moduleVersion>
-)
-
-# We now specify the files we actually want to compile
-set(FLOWEXP_COMPONENTS_SOURCES)
-foreach(component IN LISTS OPM_COMPILE_COMPONENTS)
-  list(APPEND FLOWEXP_COMPONENTS_SOURCES flowexperimental/comp/flowexp_comp${component}.cpp)
-  list(APPEND FLOWEXP_COMPONENTS_SOURCES flowexperimental/comp/flowexp_comp${component}_2p.cpp)
-endforeach()
-
-opm_add_test(flowexp_comp
-  ONLY_COMPILE
-  ALWAYS_ENABLE
-  DEPENDS opmsimulators
-  LIBRARIES opmsimulators
-  SOURCES
-  flowexperimental/comp/flowexp_comp.cpp
-  ${FLOWEXP_COMPONENTS_SOURCES}
-  $<TARGET_OBJECTS:moduleVersion>
-)
-
-if(dune-alugrid_FOUND)
-  if (NOT BUILD_FLOW_ALU_GRID)
-    set(FLOW_ALUGRID_ONLY_DEFAULT_ENABLE_IF "FALSE")
-  else()
-    set(FLOW_ALUGRID_ONLY_DEFAULT_ENABLE_IF "TRUE")
-  endif()
-
-  opm_add_test(flow_blackoil_alugrid
-    ONLY_COMPILE
-    ALWAYS_ENABLE
-    DEFAULT_ENABLE_IF ${FLOW_ALUGRID_ONLY_DEFAULT_ENABLE_IF}
-    DEPENDS opmsimulators
-    LIBRARIES opmsimulators
-    SOURCES
-    flow/flow_blackoil_alugrid.cpp
-    $<TARGET_OBJECTS:moduleVersion>)
-endif()
-
-if (BUILD_FLOW)
-  install(TARGETS flow DESTINATION bin)
-  opm_add_bash_completion(flow)
-
-  add_test(NAME flow__version
-    COMMAND flow --version)
-  set_tests_properties(flow__version PROPERTIES
-    PASS_REGULAR_EXPRESSION "${${project}_LABEL}")
-endif()
-
-if(BUILD_FLOW_FLOAT_VARIANTS)
-  opm_add_test(flow_blackoil_float
-    ONLY_COMPILE
-    ALWAYS_ENABLE
-    DEFAULT_ENABLE_IF ${FLOW_DEFAULT_ENABLE_IF}
-    DEPENDS opmsimulators
-    LIBRARIES opmsimulators
-    SOURCES
-    flow/flow_blackoil_float_main.cpp
-    $<TARGET_OBJECTS:moduleVersion>)
-endif()
-
-if (OPM_ENABLE_PYTHON)
-  add_subdirectory(python/simulators)
-endif()
-
-add_custom_target(extra_test ${CMAKE_CTEST_COMMAND} -C ExtraTests)
-
-# must activate avx2 flags and C11 for mixed precision.
-if(HAVE_AVX2_EXTENSION)
-  # Trying to set the standard using `set(CMAKE_C_STANDARD 11)` had no effect, still used -std=c99
-  # Hence we are requesting C17. (-std=c99 -D_ISOC11_SOURCE also seems to work)
-  set_property(SOURCE ${AVX2_SOURCE_FILES} PROPERTY COMPILE_FLAGS "${AVX2_FLAGS}" APPEND_STRING)
-  set_property(TARGET opmsimulators PROPERTY C_STANDARD 17)
-endif()
-
-# must link libraries after target 'opmsimulators' has been defined
-if(CUDA_FOUND)
-  if (NOT USE_HIP)
-    target_link_libraries(opmsimulators
-      PUBLIC
-      ${CUDA_cusparse_LIBRARY}
-      ${CUDA_cublas_LIBRARY}
-      ${CUDA_nvptxcompiler_static_LIBRARY}
-    )
-
-    foreach(tgt test_gpu_safe_call test_cuda_check_last_error test_GpuVector test_is_gpu_pointer)
-      target_link_libraries(${tgt} PRIVATE CUDA::cudart)
-    endforeach()
-  endif()
-  if(USE_GPU_BRIDGE)
-    set_tests_properties(cusparseSolver PROPERTIES LABELS gpu_cuda)
-  endif()
-
-  # CUISTL
-  set(gpu_label "gpu_cuda")
-  if(USE_HIP)
-    set(gpu_label "gpu_hip")
-  endif()
-
-  set_tests_properties(cusparse_safe_call
-                       cublas_safe_call
-                       gpu_safe_call
-                       cuda_check_last_error
-                       cublas_handle
-                       GpuJac
-                       GpuDILU
-                       cusparse_handle
-                       cuSparse_matrix_operations
-                       cuVector_operations
-                       GpuVector
-                       GpuSparseMatrix
-                       GpuSeqILU0
-                       solver_adapter
-                       GpuBuffer
-                       GpuView
-                       gpu_ad
-                       gpu_linear_two_phase_material
-                       gpuPvt
-                       gpu_resources
-                       gpu_smart_pointers
-                       is_gpu_pointer
-                       throw_macros_on_gpu
-                       preconditioner_factory_gpu
-                       gpuBlackOilFluidSystem
-                       blackoilfluidstategpu
-                       conditional_storage
-                       GpuPressureTransferPolicy
-                       deviceBlockOperations
-                       primary_variables_gpu
-                       MiniVector
-                       MiniMatrix
-                       GpuSparseTable
-                       PROPERTIES LABELS ${gpu_label})
-  if(MPI_FOUND)
-    set_tests_properties(GpuOwnerOverlapCopy PROPERTIES LABELS ${gpu_label})
-  endif()
-endif()
-
-if(HYPRE_FOUND)
-  if (HYPRE_USING_CUDA)
-    set_tests_properties(HyprePreconditionerGPU PROPERTIES LABELS gpu_cuda)
-    set_tests_properties(HypreInterfaceGPU PROPERTIES LABELS gpu_cuda)
-  elseif (HYPRE_USING_HIP)
-    set_tests_properties(HyprePreconditionerGPU PROPERTIES LABELS gpu_hip)
-    set_tests_properties(HypreInterfaceGPU PROPERTIES LABELS gpu_hip)
-  endif()
-endif()
-
-if(AMGX_FOUND)
-  set_tests_properties(AmgxInterface PROPERTIES LABELS gpu_cuda)
-  set_tests_properties(AmgxPreconditioner PROPERTIES LABELS gpu_cuda)
-endif()
-
-if(USE_GPU_BRIDGE)
-  if(OpenCL_FOUND)
-    target_link_libraries( opmsimulators PUBLIC ${OpenCL_LIBRARIES} )
-    set_tests_properties(openclSolver solvetransposed3x3 csrToCscOffsetMap
-                         PROPERTIES LABELS gpu_opencl)
-  endif()
-
-  if(ROCALUTION_FOUND)
-    target_include_directories(opmsimulators PUBLIC ${rocalution_INCLUDE_DIR}/rocalution)
-    set_tests_properties(rocalutionSolver PROPERTIES LABELS gpu_rocm)
-  endif()
-
-  if(rocsparse_FOUND AND rocblas_FOUND)
-    target_link_libraries( opmsimulators PUBLIC roc::rocsparse )
-    target_link_libraries( opmsimulators PUBLIC roc::rocblas )
-    set_tests_properties(rocsparseSolver PROPERTIES LABELS gpu_rocm)
-  endif()
-
-  if(VexCL_FOUND)
-    target_link_libraries( opmsimulators PUBLIC OPM::VexCL::OpenCL )
-  endif()
-endif()
-
-if(USE_DAMARIS_LIB AND Damaris_FOUND)
-  target_link_libraries(opmsimulators PUBLIC damaris)
-endif()
-
-install(DIRECTORY doc/man1 DESTINATION ${CMAKE_INSTALL_MANDIR}
-  FILES_MATCHING PATTERN "*.1")

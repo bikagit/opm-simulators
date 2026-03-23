@@ -45,6 +45,7 @@
 #include <algorithm>
 #include <cassert>
 #include <cstddef>
+#include <numbers>
 #include <utility>
 
 #include <fmt/format.h>
@@ -212,12 +213,14 @@ namespace Opm
         }
 
         const int episodeIdx = simulator.episodeIndex();
-        const int iterationIdx = simulator.model().newtonMethod().numIterations();
+        const auto& iterCtx = simulator.problem().iterationContext();
         const int nupcol = schedule[episodeIdx].nupcol();
-        const bool oscillating = std::count(this->well_control_log_.begin(), this->well_control_log_.end(), from) >= this->param_.max_number_of_well_switches_;
+        const bool oscillating =
+            std::ranges::count(this->well_control_log_, from) >= this->param_.max_number_of_well_switches_;
         if (oscillating && !is_grup) { // we would like to avoid ending up as GRUP
             // only output first time
-            const bool output = std::count(this->well_control_log_.begin(), this->well_control_log_.end(), from) == this->param_.max_number_of_well_switches_;
+            const bool output =
+                std::ranges::count(this->well_control_log_, from) == this->param_.max_number_of_well_switches_;
             if (output) {
                 const auto msg = fmt::format("    The control mode for well {} is oscillating. \n"
                     "We don't allow for more than {} switches after NUPCOL iterations. (NUPCOL = {}) \n"
@@ -253,6 +256,9 @@ namespace Opm
             ss << "    Switching control mode for well " << this->name()
                << " from " << from
                << " to " <<  to;
+            if (iterCtx.inLocalSolve()) {
+               ss << " (NLDD domain solve)";
+            }
             if (cc.size() > 1) {
                ss << " on rank " << cc.rank();
             }
@@ -260,9 +266,13 @@ namespace Opm
 
             // We always store the current control as it is used for output
             // and only after iteration >= nupcol
-            // we log all switches to check if the well controls oscillates
-            if (iterationIdx >= nupcol || this->well_control_log_.empty()) {
-                this->well_control_log_.push_back(from);
+            // we log all switches to check if the well controls oscillates.
+            // Skip logging during NLDD local solves to avoid exhausting the
+            // global oscillation budget with provisional domain-level switches.
+            if (!iterCtx.inLocalSolve()) {
+                if (!iterCtx.withinNupcol(nupcol) || this->well_control_log_.empty()) {
+                    this->well_control_log_.push_back(from);
+                }
             }
             updateWellStateWithTarget(simulator, groupStateHelper, well_state);
             updatePrimaryVariables(groupStateHelper);
@@ -295,7 +305,8 @@ namespace Opm
         } else {
             from = WellProducerCMode2String(ws.production_cmode);
         }
-        const bool oscillating = std::count(this->well_control_log_.begin(), this->well_control_log_.end(), from) >= this->param_.max_number_of_well_switches_;
+        const bool oscillating =
+            std::ranges::count(this->well_control_log_, from) >= this->param_.max_number_of_well_switches_;
 
         if (oscillating || this->wellUnderZeroRateTarget(groupStateHelper) || !(well_state.well(this->index_of_well_).status == WellStatus::OPEN)) {
            return false;
@@ -569,13 +580,13 @@ namespace Opm
                 const auto msg = fmt::format("    Well {} switched from {} to {} during local solve", this->name(), from, to);
                 deferred_logger.debug(msg);
                 const int episodeIdx = simulator.episodeIndex();
-                const int iterationIdx = simulator.model().newtonMethod().numIterations();
+                const auto& iterCtx = simulator.problem().iterationContext();
                 const auto& schedule = simulator.vanguard().schedule();
                 const int nupcol = schedule[episodeIdx].nupcol();
                 // We always store the current control as it is used for output
                 // and only after iteration >= nupcol
                 // we log all switches to check if the well controls oscillates
-                if (iterationIdx >= nupcol || this->well_control_log_.empty()) {
+                if (!iterCtx.withinNupcol(nupcol) || this->well_control_log_.empty()) {
                     this->well_control_log_.push_back(from);
                 }
             }
@@ -993,8 +1004,8 @@ namespace Opm
             checkWellOperability(simulator, well_state, groupStateHelper);
 
         // only use inner well iterations for the first newton iterations.
-        const int iteration_idx = simulator.model().newtonMethod().numIterations();
-        if (iteration_idx < this->param_.max_niter_inner_well_iter_) {
+        const auto& iterCtx = simulator.problem().iterationContext();
+        if (iterCtx.shouldRunInnerWellIterations(this->param_.max_niter_inner_well_iter_)) {
             const auto& ws = well_state.well(this->indexOfWell());
             const bool nonzero_rate_original =
                 std::any_of(ws.surface_rates.begin(),
@@ -1010,14 +1021,19 @@ namespace Opm
                                                     "and the well is therefore kept stopped.",
                                                      this->name(), number_of_well_reopenings_);
                     deferred_logger.debug(msg);
+                    changed_to_stopped_this_step_ = old_well_operable;
+                } else {
+                    changed_to_stopped_this_step_ = false;
                 }
                 this->stopWell();
-                changed_to_stopped_this_step_ = true;
                 bool converged_zero_rate = this->solveWellWithZeroRate(
                     simulator, dt, groupStateHelper, well_state
                 );
                 if (this->param_.shut_unsolvable_wells_ && !converged_zero_rate ) {
                     this->operability_status_.solvable = false;
+                } else {
+                    this->operability_status_.can_obtain_bhp_with_thp_limit = false;
+                    this->operability_status_.obey_thp_limit_under_bhp_limit = false;
                 }
                 // we increse the number of reopenings to avoid output in the next iteration
                 number_of_well_reopenings_++;
@@ -1086,13 +1102,15 @@ namespace Opm
                 }
             }
             if (old_well_operable) {
-                deferred_logger.debug(" well " + this->name() + " gets STOPPED during iteration ");
+                const std::string ctx = iterCtx.inLocalSolve() ? " (NLDD domain solve)" : "";
+                deferred_logger.debug(" well " + this->name() + " gets STOPPED during iteration" + ctx);
                 changed_to_stopped_this_step_ = true;
             }
         } else if (well_state.isOpen(this->name())) {
             this->openWell();
             if (!old_well_operable) {
-                deferred_logger.debug(" well " + this->name() + " gets REVIVED during iteration ");
+                const std::string ctx = iterCtx.inLocalSolve() ? " (NLDD domain solve)" : "";
+                deferred_logger.debug(" well " + this->name() + " gets REVIVED during iteration" + ctx);
                 this->changed_to_open_this_step_ = true;
             }
         }
@@ -1809,7 +1827,7 @@ namespace Opm
             // Remember of we evaluated the rates at (approx.) 1 bar or not.
             rates_evaluated_at_1bar = (bhp_limit < 1.1 * unit::barsa);
             // Check that no rates are positive.
-            if (std::any_of(well_q_s.begin(), well_q_s.end(), [](Scalar q) { return q > 0.0; })) {
+            if (std::ranges::any_of(well_q_s, [](Scalar q) { return q > 0.0; })) {
                 // Did we evaluate at 1 bar? If not, then we can try again at 1 bar.
                 if (!rates_evaluated_at_1bar) {
                     this->computeWellRatesWithBhp(simulator, 1.0 * unit::barsa, well_q_s, deferred_logger);
@@ -1896,7 +1914,7 @@ namespace Opm
         // If more than one solution, pick the one corresponding to lowest absolute rate (smallest skin).
         const auto& connection = this->well_ecl_.getConnections()[ws.perf_data.ecl_index[perf]];
         const Scalar Kh = connection.Kh();
-        const Scalar scaling = 3.141592653589 * Kh * connection.wpimult();
+        const Scalar scaling = std::numbers::pi * Kh * connection.wpimult();
         const unsigned gas_comp_idx = FluidSystem::canonicalToActiveCompIdx(FluidSystem::gasCompIdx);
 
         const Scalar connection_pressure = ws.perf_data.pressure[perf];
@@ -2119,9 +2137,16 @@ namespace Opm
                 mob[activeCompIdx] = extendEval(relativePerms[phaseIdx] / intQuants.fluidState().viscosity(phaseIdx));
             }
 
-            // this may not work if viscosity and relperms has been modified?
             if constexpr (has_solvent) {
-                OPM_DEFLOG_THROW(std::runtime_error, "individual mobility for wells does not work in combination with solvent", deferred_logger);
+                const auto Fsolgas = intQuants.solventSaturation() / (intQuants.solventSaturation() + intQuants.fluidState().saturation(FluidSystem::gasPhaseIdx));
+                using SolventModule = BlackOilSolventModule<TypeTag>;
+                if (Fsolgas > SolventModule::cutOff) { // same cutoff as in the solvent model to avoid division by zero
+                    const unsigned activeGasCompIdx = FluidSystem::canonicalToActiveCompIdx(FluidSystem::solventComponentIndex(FluidSystem::gasPhaseIdx));
+                    const auto& ssfnKrg = SolventModule::ssfnKrg(satid);
+                    const auto& ssfnKrs = SolventModule::ssfnKrs(satid);
+                    mob[activeGasCompIdx] *= extendEval(ssfnKrg.eval(1-Fsolgas, /*extrapolate=*/true));
+                    mob[Indices::contiSolventEqIdx] = extendEval(ssfnKrs.eval(Fsolgas, /*extrapolate=*/true) * relativePerms[activeGasCompIdx] / intQuants.solventViscosity());
+                }
             }
         }
 
@@ -2130,9 +2155,10 @@ namespace Opm
             const auto& connections = this->well_ecl_.getConnections();
             const auto& connection = connections[perf_ecl_index];
             if (connection.filterCakeActive()) {
-                std::transform(mob.begin(), mob.end(), mob.begin(),
-                               [mult = this->inj_fc_multiplier_[local_perf_index] ](const auto val)
-                               { return val * mult; });
+                std::ranges::transform(mob, mob.begin(),
+                                       [mult = this->inj_fc_multiplier_[local_perf_index]]
+                                       (const auto val)
+                                       { return val * mult; });
             }
         }
     }
@@ -2285,12 +2311,13 @@ namespace Opm
         // Instantiate group info object (without initialization) since it is needed in GasLiftSingleWell
         auto& comm = simulator.vanguard().grid().comm();
         ecl_well_map.try_emplace(this->name(),  &(this->wellEcl()), this->indexOfWell());
+        const auto& iterCtx = simulator.problem().iterationContext();
         GasLiftGroupInfo<Scalar, IndexTraits> group_info {
                 ecl_well_map,
                 simulator.vanguard().schedule(),
                 simulator.vanguard().summaryState(),
                 simulator.episodeIndex(),
-                simulator.model().newtonMethod().numIterations(),
+                iterCtx,
                 deferred_logger,
                 well_state,
                 group_state,

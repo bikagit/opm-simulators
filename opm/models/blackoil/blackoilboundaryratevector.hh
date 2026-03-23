@@ -126,7 +126,7 @@ public:
                                                                      insideIntQuants.fluidState());
             }
             else if (pBoundary > pInside) {
-                using RhsEval = std::conditional_t<std::is_same_v<typename FluidState::Scalar, Evaluation>,
+                using RhsEval = std::conditional_t<std::is_same_v<typename FluidState::ValueType, Evaluation>,
                                                    Evaluation, Scalar>;
                 // influx
                 LocalResidual::template evalPhaseFluxes_<RhsEval>(tmp,
@@ -225,8 +225,8 @@ public:
 
         // we only allow fluxes in the direction opposite to the outer
         // unit normal
-        std::for_each(this->begin(), this->end(),
-                      [](auto& val) { val = std::min(Scalar(0), val); });
+        std::ranges::for_each(*this,
+                              [](auto& val) { val = std::min(Scalar(0), val); });
     }
 
     /*!
@@ -242,8 +242,8 @@ public:
 
         // we only allow fluxes in the same direction as the outer
         // unit normal
-        std::for_each(this->begin(), this->end(),
-                      [](auto& val) { val = std::max(Scalar(0), val); });
+        std::ranges::for_each(*this,
+                              [](auto& val) { val = std::max(Scalar(0), val); });
     }
 
     /*!

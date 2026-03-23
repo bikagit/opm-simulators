@@ -141,10 +141,9 @@ struct Extractor
                                                },
                                                [](const PhaseEntry& v)
                                                {
-                                                   return std::any_of(v.data->begin(),
-                                                                      v.data->end(),
-                                                                      [](const auto& ve)
-                                                                      { return !ve.empty(); });
+                                                   return std::ranges::any_of(*v.data,
+                                                                              [](const auto& ve)
+                                                                              { return !ve.empty(); });
                                                }
                                            }, e.data);
                      });
@@ -158,7 +157,7 @@ struct Extractor
     static void process(const Context& ectx,
                         const std::vector<Entry>& extractors)
     {
-        std::for_each(extractors.begin(), extractors.end(),
+        std::ranges::for_each(extractors,
                       [&ectx](const auto& entry)
                       {
                           std::visit(VisitorOverloadSet{
@@ -170,7 +169,7 @@ struct Extractor
                               },
                               [&ectx](const PhaseEntry& v)
                               {
-                                  std::for_each(v.data->begin(), v.data->end(),
+                                  std::ranges::for_each(*v.data,
                                                 [phaseIdx = 0, &ectx, &v](auto& array) mutable
                                                 {
                                                     if (!array.empty()) {
@@ -269,17 +268,15 @@ struct BlockExtractor
 
         ExecMap extractors;
 
-        std::for_each(
-            blockData.begin(),
-            blockData.end(),
+        std::ranges::for_each(
+            blockData,
             [&handlers, &extractors](auto& bd_info)
             {
                 unsigned phase{};
                 const auto& [key, cell] = bd_info.first;
                 const auto& handler_info =
-                    std::find_if(
-                        handlers.begin(),
-                        handlers.end(),
+                    std::ranges::find_if(
+                        handlers,
                         [&kw_name = bd_info.first.first, &phase](const auto& handler)
                         {
                            // Extract list of keyword names from handler
@@ -320,7 +317,7 @@ struct BlockExtractor
                                         }, handler);
 
                             const auto found_handler =
-                                std::find(gen_handlers.begin(), gen_handlers.end(), kw_name);
+                                std::ranges::find(gen_handlers, kw_name);
                             if (found_handler != gen_handlers.end()) {
                                 phase = std::distance(gen_handlers.begin(), found_handler) % numPhases;
                             }
@@ -367,9 +364,9 @@ struct BlockExtractor
     static void process(const std::vector<Exec>& blockExtractors,
                         const Context& ectx)
     {
-        std::for_each(blockExtractors.begin(), blockExtractors.end(),
-                      [&ectx](auto& bdata)
-                      { *bdata.data = bdata.extract(ectx); });
+        std::ranges::for_each(blockExtractors,
+                             [&ectx](auto& bdata)
+                             { *bdata.data = bdata.extract(ectx); });
     }
 };
 

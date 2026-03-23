@@ -145,7 +145,6 @@ struct Indices<TypeTag, TTag::BlackOilModel>
                                                     getPropValue<TypeTag, Properties::EnableExtbo>(),
                                                     getPropValue<TypeTag, Properties::EnablePolymer>(),
                                                     getPropValue<TypeTag, Properties::EnergyModuleType>() == EnergyModules::FullyImplicitThermal,
-                                                    getPropValue<TypeTag, Properties::EnergyModuleType>() == EnergyModules::SequentialImplicitThermal,
                                                     getPropValue<TypeTag, Properties::EnableFoam>(),
                                                     getPropValue<TypeTag, Properties::EnableBrine>(),
                                                     /*PVOffset=*/0,
@@ -219,6 +218,10 @@ struct EnableDispersion<TypeTag, TTag::BlackOilModel>
 
 template<class TypeTag>
 struct EnableConvectiveMixing<TypeTag, TTag::BlackOilModel>
+{ static constexpr bool value = false; };
+
+template<class TypeTag>
+struct RunAssemblyOnGpu<TypeTag, TTag::BlackOilModel>
 { static constexpr bool value = false; };
 
 //! by default, scale the energy equation by the inverse of the energy required to heat

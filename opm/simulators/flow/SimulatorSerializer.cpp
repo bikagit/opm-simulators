@@ -198,37 +198,35 @@ void SimulatorSerializer::checkSerializedCmdLine(const std::string& current,
     {
         std::vector<std::string> output;
         output.reserve(input.size());
-        std::copy_if(input.begin(), input.end(), std::back_inserter(output),
-                     [](const std::string& line)
-                     {
-                        return line.compare(0, 11, "EclDeckFile") != 0 &&
-                               line.compare(0, 9, "OutputDir") != 0 &&
-                               line.compare(0, 8, "LoadFile") != 0 &&
-                               line.compare(0, 8, "SaveFile") != 0 &&
-                               line.compare(0, 8, "LoadStep") != 0 &&
-                               line.compare(0, 8, "SaveStep") != 0;
-                     });
+        std::ranges::copy_if(input, std::back_inserter(output),
+                             [](const std::string& line)
+                             {
+                                 return line.compare(0, 11, "EclDeckFile") != 0 &&
+                                        line.compare(0, 9, "OutputDir") != 0 &&
+                                        line.compare(0, 8, "LoadFile") != 0 &&
+                                        line.compare(0, 8, "SaveFile") != 0 &&
+                                        line.compare(0, 8, "LoadStep") != 0 &&
+                                        line.compare(0, 8, "SaveStep") != 0;
+                             });
         return output;
     };
 
     auto curr_strings = split_string(current, '\n');
     auto stored_strings = split_string(stored, '\n');
-    std::sort(curr_strings.begin(), curr_strings.end());
-    std::sort(stored_strings.begin(), stored_strings.end());
+    std::ranges::sort(curr_strings);
+    std::ranges::sort(stored_strings);
     curr_strings = filter_strings(curr_strings);
     stored_strings = filter_strings(stored_strings);
 
     std::vector<std::string> difference;
-    std::set_symmetric_difference(stored_strings.begin(), stored_strings.end(),
-                                  curr_strings.begin(), curr_strings.end(),
-                                  std::back_inserter(difference));
+    std::ranges::set_symmetric_difference(stored_strings, curr_strings,
+                                          std::back_inserter(difference));
 
     if (!difference.empty()) {
         std::vector<std::string> only_stored, only_curr;
         for (std::size_t i = 0; i < difference.size(); ) {
-            auto stored_it = std::find(stored_strings.begin(),
-                                       stored_strings.end(), difference[i]);
-            auto pos = difference[i].find_first_of('=');
+            const auto stored_it = std::ranges::find(stored_strings, difference[i]);
+            const auto pos = difference[i].find_first_of('=');
             if (i < difference.size() - 1 &&
                 difference[i].compare(0, pos, difference[i+1], 0, pos) == 0) {
                 if (stored_it == stored_strings.end()) {

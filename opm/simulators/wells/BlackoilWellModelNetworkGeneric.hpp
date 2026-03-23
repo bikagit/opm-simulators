@@ -27,6 +27,7 @@
 
 #include <opm/output/data/Groups.hpp>
 
+#include <opm/simulators/flow/NewtonIterationContext.hpp>
 #include <opm/simulators/utils/ParallelCommunication.hpp>
 
 #include <map>
@@ -79,8 +80,13 @@ public:
     /// (TODO: Consider if adding network change events would be helpful.)
     bool needPreStepRebalance(const int report_step) const;
 
+    /// Checks if we shall perform a network re-balance.
+    /// This is typically controlled by the NETBALAN keyword.
     bool shouldBalance(const int reportStepIndex,
-                       const int iterationIdx) const;
+                       const NewtonIterationContext& iterCtx) const;
+    /// Checks if we will perform a network re-balance on the next Newton iteration.
+    bool willBalanceOnNextIteration(const int reportStepIndex,
+                                    const NewtonIterationContext& iterCtx) const;
 
     Scalar updatePressures(const int reportStepIdx,
                            const Scalar damping_factor,

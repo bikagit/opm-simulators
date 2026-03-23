@@ -746,8 +746,11 @@ namespace Opm
             auto& ws = well_state.well(this->index_of_well_);
             this->segments_.copyPhaseDensities(ws.segments);
         }
-
-        Base::calculateReservoirRates(simulator.vanguard().eclState().runspec().co2Storage(), well_state.well(this->index_of_well_));
+        // For injectors in a co2 storage case or a thermal case
+        // we convert to reservoir rates using the well bhp and temperature
+        const bool isThermal = simulator.vanguard().eclState().getSimulationConfig().isThermal();
+        const bool co2store = simulator.vanguard().eclState().runspec().co2Storage();
+        Base::calculateReservoirRates( (isThermal || co2store), well_state.well(this->index_of_well_));
     }
 
 
@@ -1302,8 +1305,8 @@ namespace Opm
         // TODO: not handling solvent related here for now
 
         // initialize all the values to be zero to begin with
-        std::fill(this->ipr_a_.begin(), this->ipr_a_.end(), 0.);
-        std::fill(this->ipr_b_.begin(), this->ipr_b_.end(), 0.);
+        std::ranges::fill(this->ipr_a_, 0.0);
+        std::ranges::fill(this->ipr_b_, 0.0);
 
         const int nseg = this->numberOfSegments();
         std::vector<Scalar> seg_dp(nseg, 0.0);
@@ -1431,8 +1434,8 @@ namespace Opm
             */
         }
 
-        std::fill(ws.implicit_ipr_a.begin(), ws.implicit_ipr_a.end(), 0.);
-        std::fill(ws.implicit_ipr_b.begin(), ws.implicit_ipr_b.end(), 0.);
+        std::ranges::fill(ws.implicit_ipr_a, 0.0);
+        std::ranges::fill(ws.implicit_ipr_b, 0.0);
         //WellState well_state_copy = well_state;
         auto inj_controls = Well::InjectionControls(0);
         auto prod_controls = Well::ProductionControls(0);
@@ -2324,7 +2327,7 @@ namespace Opm
         std::vector<Scalar> retval(num_seg * num_eq);
         for (int ii = 0; ii < num_seg; ++ii) {
             const auto& pv = this->primary_variables_.value(ii);
-            std::copy(pv.begin(), pv.end(), retval.begin() + ii * num_eq);
+            std::ranges::copy(pv, retval.begin() + ii * num_eq);
         }
         return retval;
     }
@@ -2342,7 +2345,7 @@ namespace Opm
         std::array<Scalar, num_eq> tmp;
         for (int ii = 0; ii < num_seg; ++ii) {
             const auto start = it + ii * num_eq;
-            std::copy(start, start + num_eq, tmp.begin());
+            std::copy_n(start, num_eq, tmp.begin());
             this->primary_variables_.setValue(ii, tmp);
         }
         return num_seg * num_eq;

@@ -30,9 +30,9 @@
 macro (ADD_CUDA_OR_HIP_FILE LIST DIR FILE)
   set (cuda_file_path "${PROJECT_SOURCE_DIR}/${DIR}/gpuistl/${FILE}")
 
-  if(CUDA_FOUND AND NOT CONVERT_CUDA_TO_HIP)
+  if(CUDA_FOUND)
     list (APPEND ${LIST} "${DIR}/gpuistl/${FILE}")
-  else()
+  elseif(CONVERT_CUDA_TO_HIP)
     # we must hipify the code
     # and include the correct path which is in the build/binary dir
     string(REPLACE ".cu" ".hip" HIP_SOURCE_FILE ${FILE})
@@ -48,6 +48,7 @@ macro (ADD_CUDA_OR_HIP_FILE LIST DIR FILE)
           ${cuda_file_path}
           ${hip_file_path}
           $<TARGET_FILE:hipify-perl>
+          ${SUPPRESS_HIPIFY_WARNINGS}
         DEPENDS
           ${cuda_file_path}
         COMMENT
@@ -137,6 +138,7 @@ list (APPEND MAIN_SOURCE_FILES
   opm/simulators/flow/FlowProblemParameters.cpp
   opm/simulators/flow/FlowsContainer.cpp
   opm/simulators/flow/FlowUtils.cpp
+  opm/simulators/flow/GeochemistryContainer.cpp
   opm/simulators/flow/GenericCpGridVanguard.cpp
   opm/simulators/flow/GenericOutputBlackoilModule.cpp
   opm/simulators/flow/GenericTemperatureModel.cpp
@@ -199,7 +201,6 @@ list (APPEND MAIN_SOURCE_FILES
   opm/simulators/utils/ComponentName.cpp
   opm/simulators/utils/DeferredLogger.cpp
   opm/simulators/utils/FullySupportedFlowKeywords.cpp
-  opm/simulators/utils/InstantiationIndicesMacros.hpp
   opm/simulators/utils/ParallelFileMerger.cpp
   opm/simulators/utils/ParallelRestart.cpp
   opm/simulators/utils/PartiallySupportedFlowKeywords.cpp
@@ -209,7 +210,16 @@ list (APPEND MAIN_SOURCE_FILES
   opm/simulators/utils/compressPartition.cpp
   opm/simulators/utils/gatherDeferredLogger.cpp
   opm/simulators/utils/readDeck.cpp
+  opm/simulators/utils/satfunc/GasPhaseConsistencyChecks.cpp
+  opm/simulators/utils/satfunc/OilPhaseConsistencyChecks.cpp
+  opm/simulators/utils/satfunc/PhaseCheckBase.cpp
   opm/simulators/utils/satfunc/RelpermDiagnostics.cpp
+  opm/simulators/utils/satfunc/SatfuncConsistencyCheckManager.cpp
+  opm/simulators/utils/satfunc/SatfuncConsistencyChecks.cpp
+  opm/simulators/utils/satfunc/ScaledSatfuncCheckPoint.cpp
+  opm/simulators/utils/satfunc/ThreePointHorizontalConsistencyChecks.cpp
+  opm/simulators/utils/satfunc/UnscaledSatfuncCheckPoint.cpp
+  opm/simulators/utils/satfunc/WaterPhaseConsistencyChecks.cpp
   opm/simulators/wells/ALQState.cpp
   opm/simulators/wells/BlackoilWellModelConstraints.cpp
   opm/simulators/wells/BlackoilWellModelGasLift.cpp
@@ -270,7 +280,11 @@ list (APPEND MAIN_SOURCE_FILES
   opm/simulators/wells/WellState.cpp
   opm/simulators/wells/WellTest.cpp
   opm/simulators/wells/WGState.cpp
-  )
+)
+
+list(APPEND PRIVATE_HEADER_FILES
+  opm/simulators/utils/InstantiationIndicesMacros.hpp
+)
 
 if (HAVE_AVX2_EXTENSION)
   set (AVX2_SOURCE_FILES
@@ -279,20 +293,6 @@ if (HAVE_AVX2_EXTENSION)
     opm/simulators/linalg/mixed/bslv.c)
   list (APPEND MAIN_SOURCE_FILES
     ${AVX2_SOURCE_FILES})
-endif()
-
-if (HAVE_ECL_INPUT)
-  list (APPEND MAIN_SOURCE_FILES
-    opm/simulators/utils/satfunc/GasPhaseConsistencyChecks.cpp
-    opm/simulators/utils/satfunc/OilPhaseConsistencyChecks.cpp
-    opm/simulators/utils/satfunc/PhaseCheckBase.cpp
-    opm/simulators/utils/satfunc/SatfuncConsistencyCheckManager.cpp
-    opm/simulators/utils/satfunc/SatfuncConsistencyChecks.cpp
-    opm/simulators/utils/satfunc/ScaledSatfuncCheckPoint.cpp
-    opm/simulators/utils/satfunc/ThreePointHorizontalConsistencyChecks.cpp
-    opm/simulators/utils/satfunc/UnscaledSatfuncCheckPoint.cpp
-    opm/simulators/utils/satfunc/WaterPhaseConsistencyChecks.cpp
-  )
 endif()
 
 if (Damaris_FOUND AND MPI_FOUND AND USE_DAMARIS_LIB)
@@ -308,8 +308,8 @@ if (Damaris_FOUND AND MPI_FOUND AND USE_DAMARIS_LIB)
 endif()
 
 # add these files if we should compile the hip code
-if (HAVE_CUDA)
-  list(APPEND MAIN_SOURCE_FILES opm/simulators/linalg/gpuistl/device_management.hpp) # should not be hipified to make main independant of library
+if(CUDA_FOUND OR hip_FOUND)
+  list(APPEND PUBLIC_HEADER_FILES opm/simulators/linalg/gpuistl/device_management.hpp) # should not be hipified to make main independent of library
   ADD_CUDA_OR_HIP_FILE(MAIN_SOURCE_FILES opm/simulators/linalg device_management.cpp)
   ADD_CUDA_OR_HIP_FILE(MAIN_SOURCE_FILES opm/simulators/linalg detail/CuBlasHandle.cpp)
   ADD_CUDA_OR_HIP_FILE(MAIN_SOURCE_FILES opm/simulators/linalg detail/gpusparse_matrix_operations.cu)
@@ -431,7 +431,7 @@ if(USE_GPU_BRIDGE)
     list (APPEND MAIN_SOURCE_FILES opm/simulators/linalg/gpubridge/opencl/openclSolverBackend.cpp)
     list (APPEND MAIN_SOURCE_FILES opm/simulators/linalg/gpubridge/opencl/openclWellContributions.cpp)
   endif()
-  if(ROCALUTION_FOUND)
+  if(rocalution_FOUND)
     list (APPEND MAIN_SOURCE_FILES opm/simulators/linalg/gpubridge/rocm/rocalutionSolverBackend.cpp)
   endif()
   if(rocsparse_FOUND AND rocblas_FOUND)
@@ -485,6 +485,7 @@ list (APPEND TEST_SOURCE_FILES
   tests/test_equil.cpp
   tests/test_extractMatrix.cpp
   tests/test_flexiblesolver.cpp
+  tests/test_GasSatfuncConsistencyChecks.cpp
   tests/test_gconsump.cpp
   tests/test_glift1.cpp
   tests/test_graphcoloring.cpp
@@ -495,7 +496,9 @@ list (APPEND TEST_SOURCE_FILES
   tests/test_LogOutputHelper.cpp
   tests/test_milu.cpp
   tests/test_multmatrixtransposed.cpp
+  tests/test_nonnc.cpp
   tests/test_norne_pvt.cpp
+  tests/test_OilSatfuncConsistencyChecks.cpp
   tests/test_outputdir.cpp
   tests/test_parametersystem.cpp
   tests/test_parallel_wbp_sourcevalues.cpp
@@ -510,32 +513,26 @@ list (APPEND TEST_SOURCE_FILES
   tests/test_rftcontainer.cpp
   tests/test_RunningStatistics.cpp
   tests/test_rstconv.cpp
+  tests/test_SatfuncCheckPoint.cpp
+  tests/test_SatfuncConsistencyChecks.cpp
+  tests/test_SatfuncConsistencyChecks_parallel.cpp
+  tests/test_SatfuncConsistencyCheckManager.cpp
   tests/test_stoppedwells.cpp
+  tests/test_ThreePointHorizontalSatfuncConsistencyChecks.cpp
   tests/test_timer.cpp
   tests/test_vfpproperties.cpp
+  tests/test_WaterSatfuncConsistencyChecks.cpp
   tests/test_wellmodel.cpp
   tests/test_wellprodindexcalculator.cpp
   tests/test_wellstate.cpp
-  )
-
-if (HAVE_ECL_INPUT)
-  list(APPEND TEST_SOURCE_FILES
-    tests/test_nonnc.cpp
-    tests/test_GasSatfuncConsistencyChecks.cpp
-    tests/test_OilSatfuncConsistencyChecks.cpp
-    tests/test_SatfuncCheckPoint.cpp
-    tests/test_SatfuncConsistencyCheckManager.cpp
-    tests/test_SatfuncConsistencyChecks.cpp
-    tests/test_SatfuncConsistencyChecks_parallel.cpp
-    tests/test_ThreePointHorizontalSatfuncConsistencyChecks.cpp
-    tests/test_WaterSatfuncConsistencyChecks.cpp
-  )
-endif()
+)
 
 if(MPI_FOUND)
-  list(APPEND TEST_SOURCE_FILES tests/test_ghostlastmatrixadapter.cpp
-                                tests/test_parallelistlinformation.cpp
-                                tests/test_ParallelSerialization.cpp)
+  list(APPEND TEST_SOURCE_FILES
+    tests/test_ghostlastmatrixadapter.cpp
+    tests/test_parallelistlinformation.cpp
+    tests/test_ParallelSerialization.cpp
+  )
 endif()
 
 if(CUDA_FOUND)
@@ -544,7 +541,7 @@ if(CUDA_FOUND)
   endif()
 endif()
 
-if (HAVE_CUDA)
+if(CUDA_FOUND OR hip_FOUND)
   ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_converttofloatadapter.cpp)
   ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_cublas_handle.cpp)
   ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_cublas_safe_call.cpp)
@@ -580,37 +577,13 @@ if (HAVE_CUDA)
   ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_primaryvarswithdifferentvector.cpp)
   ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_primary_variables_gpu.cu)
   ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_MiniMatrix.cu)
-  ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_MiniVector.cu)
+  # Boost < 1.75 + nvcc = trouble in this test
+  if(Boost_VERSION VERSION_GREATER 1.74)
+    ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_MiniVector.cu)
+  endif()
 
   if(MPI_FOUND)
     ADD_CUDA_OR_HIP_FILE(TEST_SOURCE_FILES tests test_GpuOwnerOverlapCopy.cpp)
-  endif()
-
-  # for loop providing the flag --expt-relaxed-constexpr to fix some cuda issues with constexpr
-  if(NOT CONVERT_CUDA_TO_HIP)
-    set(CU_FILES_NEEDING_RELAXED_CONSTEXPR
-      tests/gpuistl/test_gpu_ad.cu
-      tests/gpuistl/test_gpu_linear_two_phase_material.cu
-      tests/gpuistl/test_gpuPvt.cu
-      tests/gpuistl/test_gpuBlackOilFluidSystem.cu
-      tests/gpuistl/test_GpuSparseMatrix.cu
-      tests/gpuistl/test_GpuSparseTable.cu
-      tests/gpuistl/test_blackoilfluidstategpu.cu
-    )
-
-    foreach(file ${CU_FILES_NEEDING_RELAXED_CONSTEXPR})
-        set_source_files_properties(${file} PROPERTIES COMPILE_FLAGS "--expt-relaxed-constexpr")
-    endforeach()
-
-    set(CU_FILES_NEEDING_FPERMISSIVE
-      tests/gpuistl/test_primary_variables_gpu.cu
-    )
-
-    foreach(file ${CU_FILES_NEEDING_FPERMISSIVE})
-      # Certain structures in OPM requires the -fpermissive flag to compile with nvcc,
-      # this enables this for the specific files
-      set_source_files_properties(${file} PROPERTIES COMPILE_FLAGS "-fpermissive --expt-relaxed-constexpr -Xcompiler=-fpermissive")
-    endforeach()
   endif()
 endif()
 
@@ -620,7 +593,7 @@ if(USE_GPU_BRIDGE)
     list(APPEND TEST_SOURCE_FILES tests/test_solvetransposed3x3.cpp)
   list(APPEND TEST_SOURCE_FILES tests/test_csrToCscOffsetMap.cpp)
   endif()
-  if(ROCALUTION_FOUND)
+  if(rocalution_FOUND)
     list(APPEND TEST_SOURCE_FILES tests/test_rocalutionSolver.cpp)
   endif()
   if(rocsparse_FOUND AND rocblas_FOUND)
@@ -674,11 +647,13 @@ list (APPEND TEST_DATA_FILES
   tests/rhs3.txt
   tests/matr33rep.txt
   tests/rhs3rep.txt
-  tests/options_flexiblesolver.json
+  tests/options_flexiblesolver_1x1.json
+  tests/options_flexiblesolver_3x3.json
   tests/options_flexiblesolver_simple.json
   tests/GCONSUMP.DATA
   tests/GCONSUMP_COMPLEX.DATA
   tests/GROUP_HIGHER_CONSTRAINTS.DATA
+  tests/GROUP_HIGHER_CONSTRAINTS_NETWORK.DATA
   tests/GLIFT1.DATA
   tests/RC-01_MAST_PRED.DATA
   tests/include/flowl_b_vfp.ecl
@@ -747,6 +722,7 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/models/blackoil/blackoillocalresidualtpfa.hh
   opm/models/blackoil/blackoilmeanings.hh
   opm/models/blackoil/blackoilmodel.hh
+  opm/models/blackoil/blackoilmoduleparams.hh
   opm/models/blackoil/blackoilnewtonmethod.hpp
   opm/models/blackoil/blackoilnewtonmethodparams.hpp
   opm/models/blackoil/blackoilonephaseindices.hh
@@ -982,6 +958,7 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/simulators/flow/FlowUtils.hpp
   opm/simulators/flow/FlowsData.hpp
   opm/simulators/flow/FlowThresholdPressure.hpp
+  opm/simulators/flow/GeochemistryContainer.hpp
   opm/simulators/flow/GenericCpGridVanguard.hpp
   opm/simulators/flow/GenericOutputBlackoilModule.hpp
   opm/simulators/flow/GenericTemperatureModel.hpp
@@ -999,6 +976,7 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/simulators/flow/MechContainer.hpp
   opm/simulators/flow/MixingRateControls.hpp
   opm/simulators/flow/NewTranFluxModule.hpp
+  opm/simulators/flow/NewtonIterationContext.hpp
   opm/simulators/flow/NlddReporting.hpp
   opm/simulators/flow/NonlinearSolver.hpp
   opm/simulators/flow/OutputBlackoilModule.hpp
@@ -1030,6 +1008,7 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/simulators/flow/equil/EquilibrationHelpers_impl.hpp
   opm/simulators/flow/equil/InitStateEquil.hpp
   opm/simulators/flow/equil/InitStateEquil_impl.hpp
+  opm/simulators/flow/rescoup/ReservoirCouplingEnabled.hpp
   opm/simulators/wells/SegmentState.hpp
   opm/simulators/wells/WellContainer.hpp
   opm/simulators/aquifers/AquiferAnalytical.hpp
@@ -1145,7 +1124,17 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/simulators/utils/ParallelCommunication.hpp
   opm/simulators/utils/ParallelSerialization.hpp
   opm/simulators/utils/readDeck.hpp
+  opm/simulators/utils/satfunc/GasPhaseConsistencyChecks.hpp
+  opm/simulators/utils/satfunc/OilPhaseConsistencyChecks.hpp
+  opm/simulators/utils/satfunc/PhaseCheckBase.hpp
   opm/simulators/utils/satfunc/RelpermDiagnostics.hpp
+  opm/simulators/utils/satfunc/SatfuncCheckPointInterface.hpp
+  opm/simulators/utils/satfunc/SatfuncConsistencyCheckManager.hpp
+  opm/simulators/utils/satfunc/SatfuncConsistencyChecks.hpp
+  opm/simulators/utils/satfunc/ScaledSatfuncCheckPoint.hpp
+  opm/simulators/utils/satfunc/ThreePointHorizontalConsistencyChecks.hpp
+  opm/simulators/utils/satfunc/UnscaledSatfuncCheckPoint.hpp
+  opm/simulators/utils/satfunc/WaterPhaseConsistencyChecks.hpp
   opm/simulators/wells/ALQState.hpp
   opm/simulators/wells/BlackoilWellModel.hpp
   opm/simulators/wells/BlackoilWellModel_impl.hpp
@@ -1230,9 +1219,15 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/simulators/wells/WellTest.hpp
   opm/simulators/wells/WellTracerRate.hpp
   opm/simulators/wells/WGState.hpp
+  opm/simulators/wells/rescoup/RescoupProxy.hpp
 )
 if (USE_GPU_BRIDGE)
   list (APPEND PUBLIC_HEADER_FILES
+    opm/simulators/linalg/ISTLSolverGpuBridge.hpp
+    opm/simulators/linalg/gpubridge/MultisegmentWellContribution.hpp
+    opm/simulators/linalg/gpubridge/WellContributions.hpp
+  )
+  list(APPEND PRIVATE_HEADER_FILES
     opm/simulators/linalg/gpubridge/amgclSolverBackend.hpp
     opm/simulators/linalg/gpubridge/GpuBridge.hpp
     opm/simulators/linalg/gpubridge/GpuResult.hpp
@@ -1255,7 +1250,6 @@ if (USE_GPU_BRIDGE)
     opm/simulators/linalg/gpubridge/opencl/openclSolverBackend.hpp
     opm/simulators/linalg/gpubridge/opencl/openclWellContributions.hpp
     opm/simulators/linalg/gpubridge/Matrix.hpp
-    opm/simulators/linalg/gpubridge/MultisegmentWellContribution.hpp
     opm/simulators/linalg/gpubridge/rocm/hipKernels.hpp
     opm/simulators/linalg/gpubridge/rocm/rocalutionSolverBackend.hpp
     opm/simulators/linalg/gpubridge/rocm/rocsparseBILU0.hpp
@@ -1264,23 +1258,6 @@ if (USE_GPU_BRIDGE)
     opm/simulators/linalg/gpubridge/rocm/rocsparseSolverBackend.hpp
     opm/simulators/linalg/gpubridge/rocm/rocsparseWellContributions.hpp
     opm/simulators/linalg/gpubridge/rocm/rocsparseMatrix.hpp
-    opm/simulators/linalg/gpubridge/WellContributions.hpp
-    opm/simulators/linalg/ISTLSolverGpuBridge.hpp
-  )
-endif()
-
-if (HAVE_ECL_INPUT)
-  list (APPEND PUBLIC_HEADER_FILES
-    opm/simulators/utils/satfunc/GasPhaseConsistencyChecks.hpp
-    opm/simulators/utils/satfunc/OilPhaseConsistencyChecks.hpp
-    opm/simulators/utils/satfunc/PhaseCheckBase.hpp
-    opm/simulators/utils/satfunc/SatfuncCheckPointInterface.hpp
-    opm/simulators/utils/satfunc/SatfuncConsistencyCheckManager.hpp
-    opm/simulators/utils/satfunc/SatfuncConsistencyChecks.hpp
-    opm/simulators/utils/satfunc/ScaledSatfuncCheckPoint.hpp
-    opm/simulators/utils/satfunc/ThreePointHorizontalConsistencyChecks.hpp
-    opm/simulators/utils/satfunc/UnscaledSatfuncCheckPoint.hpp
-    opm/simulators/utils/satfunc/WaterPhaseConsistencyChecks.hpp
   )
 endif()
 
@@ -1385,15 +1362,14 @@ if(MPI_FOUND)
     opm/simulators/flow/rescoup/ReservoirCouplingSlaveReportStep.cpp
     opm/simulators/flow/rescoup/ReservoirCouplingSpawnSlaves.cpp
     opm/simulators/flow/rescoup/ReservoirCouplingTimeStepper.cpp
-    opm/simulators/wells/GroupTargetCalculator.cpp
-    opm/simulators/wells/rescoup/RescoupReceiveGroupTargets.cpp
+    opm/simulators/wells/GroupConstraintCalculator.cpp
+    opm/simulators/wells/rescoup/RescoupReceiveGroupConstraints.cpp
     opm/simulators/wells/rescoup/RescoupReceiveSlaveGroupData.cpp
     opm/simulators/wells/rescoup/RescoupSendSlaveGroupData.cpp
-    opm/simulators/wells/rescoup/RescoupTargetCalculator.cpp
+    opm/simulators/wells/rescoup/RescoupConstraintsCalculator.cpp
   )
   list (APPEND PUBLIC_HEADER_FILES
     opm/simulators/flow/rescoup/ReservoirCoupling.hpp
-    opm/simulators/flow/rescoup/ReservoirCouplingEnabled.hpp
     opm/simulators/flow/rescoup/ReservoirCouplingErrorMacros.hpp
     opm/simulators/flow/rescoup/ReservoirCouplingMpiTraits.hpp
     opm/simulators/flow/rescoup/ReservoirCouplingMaster.hpp
@@ -1402,12 +1378,11 @@ if(MPI_FOUND)
     opm/simulators/flow/rescoup/ReservoirCouplingSlaveReportStep.hpp
     opm/simulators/flow/rescoup/ReservoirCouplingSpawnSlaves.hpp
     opm/simulators/flow/rescoup/ReservoirCouplingTimeStepper.hpp
-    opm/simulators/wells/GroupTargetCalculator.hpp
-    opm/simulators/wells/rescoup/RescoupProxy.hpp
+    opm/simulators/wells/GroupConstraintCalculator.hpp
     opm/simulators/wells/rescoup/RescoupReceiveSlaveGroupData.hpp
-    opm/simulators/wells/rescoup/RescoupReceiveGroupTargets.hpp
+    opm/simulators/wells/rescoup/RescoupReceiveGroupConstraints.hpp
     opm/simulators/wells/rescoup/RescoupSendSlaveGroupData.hpp
-    opm/simulators/wells/rescoup/RescoupTargetCalculator.hpp
+    opm/simulators/wells/rescoup/RescoupConstraintsCalculator.hpp
     )
   list (APPEND TEST_SOURCE_FILES
     tests/rescoup/test_chopstep.cpp
@@ -1425,6 +1400,6 @@ if(AMGX_FOUND)
   )
 endif()
 
-if (CONVERT_CUDA_TO_HIP)
+if(CONVERT_CUDA_TO_HIP)
   add_custom_target(hipified_headers  DEPENDS ${PUBLIC_HEADER_FILES_HIPIFIED})
 endif()

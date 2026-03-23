@@ -41,7 +41,7 @@ GasLiftGroupInfo(GLiftEclWells& ecl_wells,
                  const Schedule& schedule,
                  const SummaryState& summary_state,
                  const int report_step_idx,
-                 const int iteration_idx,
+                 const NewtonIterationContext& iterCtx,
                  DeferredLogger& deferred_logger,
                  WellState<Scalar, IndexTraits>& well_state,
                  const GroupState<Scalar>& group_state,
@@ -52,7 +52,7 @@ GasLiftGroupInfo(GLiftEclWells& ecl_wells,
     , schedule_{schedule}
     , summary_state_{summary_state}
     , report_step_idx_{report_step_idx}
-    , iteration_idx_{iteration_idx}
+    , iterCtx_{iterCtx}
     , phase_usage_{well_state.phaseUsageInfo()}
     , glo_{schedule_.glo(report_step_idx_)}
 {}
@@ -426,25 +426,27 @@ checkNewtonIterationIdxOk_(const std::string& well_name)
 {
     if (this->glo_.all_newton()) {
         const int nupcol = this->schedule_[this->report_step_idx_].nupcol();
+        const bool optimize = this->iterCtx_.withinNupcol(nupcol);
         if (this->debug) {
             const std::string msg = fmt::format(
                 "LIFTOPT item4 == YES, it = {}, nupcol = {} -->  GLIFT optimize = {}",
-                this->iteration_idx_,
+                this->iterCtx_.iteration(),
                 nupcol,
-                ((this->iteration_idx_ < nupcol) ? "TRUE" : "FALSE"));
+                (optimize ? "TRUE" : "FALSE"));
             displayDebugMessage_(msg, well_name);
         }
-        return this->iteration_idx_ < nupcol;
+        return optimize;
     }
     else {
+        const bool optimize = this->iterCtx_.iteration() == 1;
         if (this->debug) {
             const std::string msg = fmt::format(
                     "LIFTOPT item4 == NO, it = {} --> GLIFT optimize = {}",
-                    this->iteration_idx_,
-                    ((this->iteration_idx_ == 1) ? "TRUE" : "FALSE"));
+                    this->iterCtx_.iteration(),
+                    (optimize ? "TRUE" : "FALSE"));
             displayDebugMessage_(msg, well_name);
         }
-        return this->iteration_idx_ == 1;
+        return optimize;
     }
 }
 
@@ -731,9 +733,8 @@ initializeWell2GroupMapRecursive_(const Group& group,
 {
     Scalar gfac = group.getGroupEfficiencyFactor();
     cur_efficiency = gfac * cur_efficiency;
-    std::transform(group_efficiency.begin(), group_efficiency.end(),
-                   group_efficiency.begin(),
-                   [gfac](const auto& item) { return item * gfac; });
+    std::ranges::transform(group_efficiency, group_efficiency.begin(),
+                           [gfac](const auto& item) { return item * gfac; });
     if (this->group_rate_map_.count(group.name()) == 1) {
         // extract the subset of groups that has limits or targets that can affect
         //   gas lift optimization.

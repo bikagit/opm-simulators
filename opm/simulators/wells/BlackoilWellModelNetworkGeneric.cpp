@@ -105,7 +105,7 @@ needPreStepRebalance(const int report_step) const
 
 template<typename Scalar, typename IndexTraits>
 bool BlackoilWellModelNetworkGeneric<Scalar, IndexTraits>::
-shouldBalance(const int reportStepIdx, const int iterationIdx) const
+shouldBalance(const int reportStepIdx, const NewtonIterationContext& iterCtx) const
 {
     // if network is not active, we do not need to balance the network
     const auto& network = well_model_.schedule()[reportStepIdx].network();
@@ -115,15 +115,35 @@ shouldBalance(const int reportStepIdx, const int iterationIdx) const
 
     const auto& balance = well_model_.schedule()[reportStepIdx].network_balance();
     if (balance.mode() == Network::Balance::CalcMode::TimeStepStart) {
-        return iterationIdx == 0;
+        return iterCtx.isFirstGlobalIteration();
     } else if (balance.mode() == Network::Balance::CalcMode::NUPCOL) {
         const int nupcol = well_model_.schedule()[reportStepIdx].nupcol();
-        return iterationIdx < nupcol;
+        return iterCtx.withinNupcol(nupcol);
     } else {
         // We do not support any other rebalancing modes,
         // i.e. TimeInterval based rebalancing is not available.
         // This should be warned about elsewhere, so we choose to
         // avoid spamming with a warning here.
+        return false;
+    }
+}
+
+template<typename Scalar, typename IndexTraits>
+bool BlackoilWellModelNetworkGeneric<Scalar, IndexTraits>::
+willBalanceOnNextIteration(const int reportStepIdx, const NewtonIterationContext& iterCtx) const
+{
+    // if network is not active, we do not need to balance the network
+    const auto& schedule_state = well_model_.schedule()[reportStepIdx];
+    if (!schedule_state.network().active()) {
+        return false;
+    }
+
+    if (schedule_state.network_balance().mode() == Network::Balance::CalcMode::NUPCOL) {
+        const int nupcol = schedule_state.nupcol();
+        return iterCtx.withinNupcol(nupcol - 1); // Note the -1 here!
+    } else {
+        // Any other rebalancing mode will only rebalance
+        // at the start of the timestep.
         return false;
     }
 }
@@ -412,8 +432,7 @@ computePressures(const Network::ExtNetwork& network,
                     // convention that production rates are negative, so we must
                     // take a copy and flip signs.
                     auto rates = node_inflows[node];
-                    std::transform(
-                        rates.begin(), rates.end(), rates.begin(), [](const auto r) { return -r; });
+                    std::ranges::transform(rates, rates.begin(), [](const auto r) { return -r; });
                     assert(rates.size() == 3);
                     // NB! ALQ in extended network is never implicitly the gas lift rate (GRAT), i.e., the
                     //     gas lift rates only enters the network pressure calculations through the rates

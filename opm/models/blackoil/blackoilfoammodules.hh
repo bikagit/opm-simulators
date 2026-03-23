@@ -31,6 +31,7 @@
 #include <dune/common/fvector.hh>
 
 #include <opm/common/OpmLog/OpmLog.hpp>
+#include <opm/common/utility/gpuDecorators.hpp>
 
 #include <opm/input/eclipse/EclipseState/Phase.hpp>
 
@@ -42,6 +43,7 @@
 
 #include <cassert>
 #include <istream>
+#include <numbers>
 #include <ostream>
 #include <stdexcept>
 #include <string>
@@ -160,10 +162,12 @@ public:
     }
 
     // must be called after water storage is computed
-    template <class LhsEval>
-    static void addStorage(Dune::FieldVector<LhsEval, numEq>& storage,
-                           const IntensiveQuantities& intQuants)
+    template <class StorageType>
+    OPM_HOST_DEVICE static void addStorage(StorageType& storage,
+                                           const IntensiveQuantities& intQuants)
     {
+        using LhsEval = typename StorageType::value_type;
+
         if constexpr (enableFoam) {
             const auto& fs = intQuants.fluidState();
 
@@ -440,7 +444,7 @@ public:
             const Evaluation F1 = pow(C_surf / fm_surf, ep_surf);
             const Evaluation F2 = pow((fm_oil - S_o) / (fm_oil - fl_oil), ep_oil);
             const Evaluation F3 = pow(fm_cap / Ca, ep_cap);
-            const Evaluation F7 = 0.5 + atan(ep_dry * (S_w - fm_dry)) / M_PI;
+            const Evaluation F7 = 0.5 + atan(ep_dry * (S_w - fm_dry)) / std::numbers::pi_v<Scalar>;
 
             mobilityReductionFactor = 1. / (1. + fm_mob * F1 * F2 * F3 * F7);
         } else {

@@ -39,7 +39,8 @@
 #include <opm/material/fluidsystems/blackoilpvt/ConstantCompressibilityOilPvt.hpp>
 #include <opm/material/fluidsystems/blackoilpvt/ConstantCompressibilityWaterPvt.hpp>
 
-#include <opm/models/blackoil/blackoillocalresidualtpfa.hh>
+#include <opm/models/blackoil/blackoilconvectivemixingmodule.hh>
+#include <opm/models/blackoil/blackoilmoduleparams.hh>
 
 #include <opm/output/eclipse/EclipseIO.hpp>
 
@@ -138,6 +139,7 @@ private:
     enum { enableDissolvedGas = Indices::compositionSwitchIdx >= 0 };
     enum { enableVapwat = getPropValue<TypeTag, Properties::EnableVapwat>() };
     enum { enableDisgasInWater = getPropValue<TypeTag, Properties::EnableDisgasInWater>() };
+    enum { enableGeochemistry = getPropValue<TypeTag, Properties::EnableGeochemistry>() };
 
     using SolventModule = BlackOilSolventModule<TypeTag>;
     using PolymerModule = BlackOilPolymerModule<TypeTag>;
@@ -148,7 +150,7 @@ private:
     using DispersionModule = BlackOilDispersionModule<TypeTag, enableDispersion>;
     using DiffusionModule = BlackOilDiffusionModule<TypeTag, enableDiffusion>;
     using ConvectiveMixingModule = BlackOilConvectiveMixingModule<TypeTag, enableConvectiveMixing>;
-    using ModuleParams = typename BlackOilLocalResidualTPFA<TypeTag>::ModuleParams;
+    using ModuleParams = BlackoilModuleParams<ConvectiveMixingModuleParam<Scalar>>;
     using HybridNewton = BlackOilHybridNewton<TypeTag>;
 
     using InitialFluidState = typename EquilInitializer<TypeTag>::ScalarFluidState;
@@ -228,6 +230,14 @@ public:
         // create the ECL writer
         eclWriter_ = std::make_unique<EclWriterType>(simulator);
         enableEclOutput_ = Parameters::Get<Parameters::EnableEclOutput>();
+
+        // Safeguard against geochemistry since it exsist in a separate module with a separate problem class
+        if constexpr (!enableGeochemistry) {
+            if (vanguard.eclState().runspec().geochem().enabled()) {
+                throw std::runtime_error("GEOCHEM keyword in the deck but geochemistry module "
+                                         "disabled at compile time!");
+            }
+        }
 
 #if HAVE_DAMARIS
         // create Damaris writer
@@ -370,8 +380,8 @@ public:
                                   {
                                       std::array<int,dim> coords;
                                       simulator.vanguard().cartesianCoordinate(idx, coords);
-                                      std::transform(coords.begin(), coords.end(), coords.begin(),
-                                                     [](const auto c) { return c + 1; });
+                                      std::ranges::transform(coords, coords.begin(),
+                                                             [](const auto c) { return c + 1; });
                                       return coords;
                                   });
 
@@ -856,7 +866,7 @@ public:
 
                     const auto& rho = FluidSystem::density(fluidState, phaseIdx, pvtRegionIdx);
                     fluidState.setDensity(phaseIdx, rho);
-                    if constexpr (energyModuleType == EnergyModules::SequentialImplicitThermal || energyModuleType == EnergyModules::FullyImplicitThermal) {
+                    if constexpr (energyModuleType == EnergyModules::FullyImplicitThermal) {
                         const auto& h = FluidSystem::enthalpy(fluidState, phaseIdx, pvtRegionIdx);
                         fluidState.setEnthalpy(phaseIdx, h);
                     }

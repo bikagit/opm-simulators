@@ -100,27 +100,25 @@ getMasterGroupCanonicalIdx(
 template <class Scalar>
 Scalar
 ReservoirCouplingMaster<Scalar>::
-getMasterGroupInjectionRate(const std::string &group_name, ReservoirCoupling::Phase phase, bool res_rates) const
+getMasterGroupRate(
+    const std::string &group_name, ReservoirCoupling::Phase phase, ReservoirCoupling::RateKind kind
+) const
 {
-    if (res_rates) {
-        return this->report_step_data_->getMasterGroupInjectionReservoirRate(group_name, phase);
-    }
-    else {
+    using RateKind = ReservoirCoupling::RateKind;
+    switch (kind) {
+    case RateKind::InjectionSurface:
         return this->report_step_data_->getMasterGroupInjectionSurfaceRate(group_name, phase);
-    }
-}
-
-template <class Scalar>
-Scalar
-ReservoirCouplingMaster<Scalar>::
-getMasterGroupProductionRate(const std::string &group_name, ReservoirCoupling::Phase phase, bool res_rates) const
-{
-    if (res_rates) {
+    case RateKind::InjectionReservoir:
+        return this->report_step_data_->getMasterGroupInjectionReservoirRate(group_name, phase);
+    case RateKind::ProductionSurface:
+        return this->report_step_data_->getMasterGroupProductionSurfaceRate(group_name, phase);
+    case RateKind::ProductionNetworkSurface:
+        return this->report_step_data_->getMasterGroupNetworkProductionSurfaceRate(group_name, phase);
+    case RateKind::ProductionReservoir:
         return this->report_step_data_->getMasterGroupProductionReservoirRate(group_name, phase);
     }
-    else {
-        return this->report_step_data_->getMasterGroupProductionSurfaceRate(group_name, phase);
-    }
+    // Should be unreachable, but silences compiler warnings about missing return
+    RCOUP_LOG_THROW(std::logic_error, "Unknown RateKind");
 }
 
 template <class Scalar>
@@ -137,7 +135,7 @@ int
 ReservoirCouplingMaster<Scalar>::
 getSlaveIdx(const std::string &slave_name) const
 {
-    auto it = std::find(this->slave_names_.begin(), this->slave_names_.end(), slave_name);
+    const auto it = std::ranges::find(this->slave_names_, slave_name);
     if (it != this->slave_names_.end()) {
         return std::distance(this->slave_names_.begin(), it);
     }
@@ -162,7 +160,7 @@ initStartOfReportStep(int report_step_idx)
 {
     assert(this->report_step_data_);
     this->report_step_data_->setReportStepIdx(report_step_idx);
-    this->logger_.info("Initializing start of report step");
+    this->logger_.debug("Initializing start of report step");
 }
 
 template <class Scalar>
@@ -294,6 +292,20 @@ numSlavesStarted() const
 }
 
 template <class Scalar>
+std::size_t
+ReservoirCouplingMaster<Scalar>::
+numActivatedSlaves() const
+{
+    std::size_t count = 0;
+    for (std::size_t i = 0; i < this->slave_activation_status_.size(); ++i) {
+        if (this->slave_activation_status_[i] != 0) {
+            ++count;
+        }
+    }
+    return count;
+}
+
+template <class Scalar>
 void
 ReservoirCouplingMaster<Scalar>::
 receiveNextReportDateFromSlaves()
@@ -396,22 +408,22 @@ sendInjectionTargetsToSlave(std::size_t slave_idx,
 template <class Scalar>
 void
 ReservoirCouplingMaster<Scalar>::
-sendNumGroupTargetsToSlave(std::size_t slave_idx,
+sendNumGroupConstraintsToSlave(std::size_t slave_idx,
                            std::size_t num_injection_targets,
-                           std::size_t num_production_targets) const
+                           std::size_t num_production_constraints) const
 {
     assert(this->report_step_data_);
-    this->report_step_data_->sendNumGroupTargetsToSlave(slave_idx, num_injection_targets, num_production_targets);
+    this->report_step_data_->sendNumGroupConstraintsToSlave(slave_idx, num_injection_targets, num_production_constraints);
 }
 
 template <class Scalar>
 void
 ReservoirCouplingMaster<Scalar>::
-sendProductionTargetsToSlave(std::size_t slave_idx,
-                             const std::vector<ProductionGroupTarget>& production_targets) const
+sendProductionConstraintsToSlave(std::size_t slave_idx,
+                             const std::vector<ProductionGroupConstraints>& production_constraints) const
 {
     assert(this->report_step_data_);
-    this->report_step_data_->sendProductionTargetsToSlave(slave_idx, production_targets);
+    this->report_step_data_->sendProductionConstraintsToSlave(slave_idx, production_constraints);
 }
 
 template <class Scalar>

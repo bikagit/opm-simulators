@@ -81,6 +81,7 @@ class EquilInitializer
     enum { enableSaltPrecipitation = getPropValue<TypeTag, Properties::EnableSaltPrecipitation>() };
     enum { enableDisgasInWater = getPropValue<TypeTag, Properties::EnableDisgasInWater>() };
     enum { enableDissolvedGas = Indices::compositionSwitchIdx >= 0 };
+    enum { enableSolvent = getPropValue<TypeTag, Properties::EnableSolvent>() };
     static constexpr EnergyModules energyModuleType = getPropValue<TypeTag, Properties::EnergyModuleType>();
 
 public:
@@ -88,13 +89,14 @@ public:
     // internal energy!
     using ScalarFluidState = BlackOilFluidState<Scalar,
                                                 FluidSystem,
-                                                energyModuleType == EnergyModules::ConstantTemperature,
-                                                (energyModuleType == EnergyModules::FullyImplicitThermal || energyModuleType == EnergyModules::SequentialImplicitThermal),
+                                                energyModuleType != EnergyModules::NoTemperature,
+                                                energyModuleType == EnergyModules::FullyImplicitThermal,
                                                 enableDissolution,
                                                 enableVapwat,
                                                 enableBrine,
                                                 enableSaltPrecipitation,
                                                 enableDisgasInWater,
+                                                enableSolvent,
                                                 Indices::numPhases>;
 
 
@@ -173,7 +175,7 @@ public:
                 const auto& rho = FluidSystem::density(fluidState, phaseIdx, regionIdx);
                 fluidState.setDensity(phaseIdx, rho);
 
-                if constexpr (energyModuleType == EnergyModules::FullyImplicitThermal || energyModuleType == EnergyModules::SequentialImplicitThermal) {
+                if constexpr (energyModuleType == EnergyModules::FullyImplicitThermal) {
                     const auto& h = FluidSystem::enthalpy(fluidState, phaseIdx, regionIdx);
                     fluidState.setEnthalpy(phaseIdx, h);
                 }

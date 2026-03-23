@@ -194,7 +194,7 @@ void writePartitions(
     }
 
     const auto nDigit = 1 + static_cast<int>(std::floor(std::log10(comm.size())));
-    auto partition_fname = odir / fmt::format("{1:0>{0}}", nDigit, rank);
+    auto partition_fname = odir / fmt::format(fmt::runtime("{1:0>{0}}"), nDigit, rank);
     std::ofstream pfile { partition_fname };
 
     auto cell_index = 0;
@@ -232,8 +232,9 @@ void printDomainDistributionSummary(
     const int owned_cells = partition_vector.size();
 
     // Count overlap cells using grid view iteration
-    int overlap_cells = std::count_if(elements(gridView).begin(), elements(gridView).end(),
-                                      [](const auto& cell) { return cell.partitionType() == Dune::OverlapEntity; });
+    int overlap_cells = std::ranges::count_if(elements(gridView),
+                                              [](const auto& cell)
+                                              { return cell.partitionType() == Dune::OverlapEntity; });
 
     // Store data for summary output
     local_reports_accumulated.success.num_wells = num_wells;

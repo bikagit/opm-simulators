@@ -63,7 +63,7 @@ public:
     using SlaveGroupProductionData = ReservoirCoupling::SlaveGroupProductionData<Scalar>;
     using SlaveGroupInjectionData = ReservoirCoupling::SlaveGroupInjectionData<Scalar>;
     using InjectionGroupTarget = ReservoirCoupling::InjectionGroupTarget<Scalar>;
-    using ProductionGroupTarget = ReservoirCoupling::ProductionGroupTarget<Scalar>;
+    using ProductionGroupConstraints = ReservoirCoupling::ProductionGroupConstraints<Scalar>;
 
     /// @brief Construct a report step manager for the master process
     /// @param master Reference to the parent ReservoirCouplingMaster object
@@ -117,6 +117,18 @@ public:
     /// @param phase ReservoirCoupling::Phase enum (Oil, Gas, or Water)
     /// @return Production surface rate for the specified phase
     Scalar getMasterGroupProductionSurfaceRate(const std::string &group_name, ReservoirCoupling::Phase phase) const;
+
+    /// @brief Get the network production surface rate for a master group
+    ///
+    /// This returns the production rate computed with network=true, meaning efficiency
+    /// factors are 1.0 for groups/wells where GEFAC/WEFAC item 3 = "NO". This is used
+    /// for network leaf node rate calculations.
+    ///
+    /// @param group_name Name of the master group
+    /// @param phase ReservoirCoupling::Phase enum (Oil, Gas, or Water)
+    /// @return Network production surface rate for the specified phase
+    Scalar getMasterGroupNetworkProductionSurfaceRate(
+        const std::string &group_name, ReservoirCoupling::Phase phase) const;
 
     /// @brief Get the production reservoir rate for a master group
     ///
@@ -183,11 +195,11 @@ public:
     void sendInjectionTargetsToSlave(
         std::size_t slave_idx, const std::vector<InjectionGroupTarget>& injection_targets
     ) const;
-    void sendNumGroupTargetsToSlave(
-        std::size_t slave_idx, std::size_t num_injection_targets, std::size_t num_production_targets
+    void sendNumGroupConstraintsToSlave(
+        std::size_t slave_idx, std::size_t num_injection_targets, std::size_t num_production_constraints
     ) const;
-    void sendProductionTargetsToSlave(
-        std::size_t slave_idx, const std::vector<ProductionGroupTarget>& production_targets
+    void sendProductionConstraintsToSlave(
+        std::size_t slave_idx, const std::vector<ProductionGroupConstraints>& production_constraints
     ) const;
 
     /// @brief Set whether this is the first substep within a "sync" timestep.
@@ -215,11 +227,10 @@ private:
     /// @brief Get a rate for a master group (helper for the public rate getters)
     /// @param group_name Name of the master group
     /// @param phase ReservoirCoupling::Phase enum (Oil, Gas, or Water)
-    /// @param reservoir_rates If true, return reservoir rates; if false, return surface rates
-    /// @param is_injection If true, return injection rates; if false, return production rates
+    /// @param kind Selects which kind of rate to retrieve (injection/production, surface/reservoir/network)
     /// @return The requested rate for the specified phase
     Scalar getMasterGroupRate_(const std::string &group_name, ReservoirCoupling::Phase phase,
-                               bool reservoir_rates, bool is_injection) const;
+                               ReservoirCoupling::RateKind kind) const;
 
     /// Reference to the parent ReservoirCouplingMaster object
     ReservoirCouplingMaster<Scalar> &master_;

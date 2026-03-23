@@ -62,7 +62,7 @@ Scalar
 ReservoirCouplingMasterReportStep<Scalar>::
 getMasterGroupInjectionSurfaceRate(const std::string &group_name, ReservoirCoupling::Phase phase) const
 {
-    return this->getMasterGroupRate_(group_name, phase, /*reservoir_rates=*/false, /*is_injection=*/true);
+    return this->getMasterGroupRate_(group_name, phase, ReservoirCoupling::RateKind::InjectionSurface);
 }
 
 template <class Scalar>
@@ -70,7 +70,7 @@ Scalar
 ReservoirCouplingMasterReportStep<Scalar>::
 getMasterGroupInjectionReservoirRate(const std::string &group_name, ReservoirCoupling::Phase phase) const
 {
-    return this->getMasterGroupRate_(group_name, phase, /*reservoir_rates=*/true, /*is_injection=*/true);
+    return this->getMasterGroupRate_(group_name, phase, ReservoirCoupling::RateKind::InjectionReservoir);
 }
 
 template <class Scalar>
@@ -78,7 +78,17 @@ Scalar
 ReservoirCouplingMasterReportStep<Scalar>::
 getMasterGroupProductionSurfaceRate(const std::string &group_name, ReservoirCoupling::Phase phase) const
 {
-    return this->getMasterGroupRate_(group_name, phase, /*reservoir_rates=*/false, /*is_injection=*/false);
+    return this->getMasterGroupRate_(group_name, phase, ReservoirCoupling::RateKind::ProductionSurface);
+}
+
+template <class Scalar>
+Scalar
+ReservoirCouplingMasterReportStep<Scalar>::
+getMasterGroupNetworkProductionSurfaceRate(
+    const std::string &group_name, ReservoirCoupling::Phase phase
+) const
+{
+    return this->getMasterGroupRate_(group_name, phase, ReservoirCoupling::RateKind::ProductionNetworkSurface);
 }
 
 template <class Scalar>
@@ -86,7 +96,7 @@ Scalar
 ReservoirCouplingMasterReportStep<Scalar>::
 getMasterGroupProductionReservoirRate(const std::string &group_name, ReservoirCoupling::Phase phase) const
 {
-    return this->getMasterGroupRate_(group_name, phase, /*reservoir_rates=*/true, /*is_injection=*/false);
+    return this->getMasterGroupRate_(group_name, phase, ReservoirCoupling::RateKind::ProductionReservoir);
 }
 
 template <class Scalar>
@@ -117,12 +127,12 @@ ReservoirCouplingMasterReportStep<Scalar>::
 receiveInjectionDataFromSlaves()
 {
     auto num_slaves = this->numSlaves();
-    this->logger().info("Receiving injection data from slave processes");
+    this->logger().debug("Receiving injection data from slave processes");
     for (unsigned int i = 0; i < num_slaves; i++) {
         auto num_slave_groups = this->numSlaveGroups(i);
         if (num_slave_groups == 0) {
             // History mode: no slave groups defined, skip data exchange
-            this->logger().info(fmt::format(
+            this->logger().debug(fmt::format(
                 "Slave {} has no slave groups (history mode), skipping injection data exchange",
                 this->slaveName(i)
             ));
@@ -142,19 +152,16 @@ receiveInjectionDataFromSlaves()
                     this->getSlaveComm(i),
                     MPI_STATUS_IGNORE
                 );
-                this->logger().info(
-                    fmt::format(
-                        "Received injection data for {} groups from slave process with name: {}. "
-                        "Number of slave groups: {}", num_slave_groups, this->slaveName(i), num_slave_groups
-                    )
-                );
+                this->logger().debug(fmt::format(
+                    "Received injection data for {} groups from {}",
+                    num_slave_groups, this->slaveName(i)
+                ));
             }
             else {
-                this->logger().info(fmt::format(
-                    "Slave {} has not activated yet, skipping receiving injection data from slave",
-                        this->slaveName(i)
-                    )
-                );
+                this->logger().debug(fmt::format(
+                    "Slave {} has not activated yet, skipping injection data",
+                    this->slaveName(i)
+                ));
                 injection_data.assign(num_slave_groups, SlaveGroupInjectionData{}); // Set to zero injection data
             }
         }
@@ -173,12 +180,12 @@ ReservoirCouplingMasterReportStep<Scalar>::
 receiveProductionDataFromSlaves()
 {
     auto num_slaves = this->numSlaves();
-    this->logger().info("Receiving production data from slave processes");
+    this->logger().debug("Receiving production data from slave processes");
     for (unsigned int i = 0; i < num_slaves; i++) {
         auto num_slave_groups = this->numSlaveGroups(i);
         if (num_slave_groups == 0) {
             // History mode: no slave groups defined, skip data exchange
-            this->logger().info(fmt::format(
+            this->logger().debug(fmt::format(
                 "Slave {} has no slave groups (history mode), skipping production data exchange",
                 this->slaveName(i)
             ));
@@ -198,19 +205,16 @@ receiveProductionDataFromSlaves()
                     this->getSlaveComm(i),
                     MPI_STATUS_IGNORE
                 );
-                this->logger().info(
-                    fmt::format(
-                        "Received production data for {} groups from slave process with name: {}. "
-                        "Number of slave groups: {}", num_slave_groups, this->slaveName(i), num_slave_groups
-                    )
-                );
+                this->logger().debug(fmt::format(
+                    "Received production data for {} groups from {}",
+                    num_slave_groups, this->slaveName(i)
+                ));
             }
             else {
-                this->logger().info(fmt::format(
-                    "Slave {} has not activated yet, skipping receiving production data from slave",
-                        this->slaveName(i)
-                    )
-                );
+                this->logger().debug(fmt::format(
+                    "Slave {} has not activated yet, skipping production data",
+                    this->slaveName(i)
+                ));
                 production_data.assign(num_slave_groups, SlaveGroupProductionData{}); // Set to zero production data
             }
         }
@@ -243,8 +247,8 @@ sendInjectionTargetsToSlave(std::size_t slave_idx,
             /*tag=*/static_cast<int>(MessageTag::InjectionGroupTargets),
             this->getSlaveComm(slave_idx)
         );
-        this->logger().info(fmt::format(
-            "Sent {} injection targets to slave process with name: {}",
+        this->logger().debug(fmt::format(
+            "Sent {} injection targets to {}",
             num_injection_targets, this->slaveName(slave_idx)
         ));
     }
@@ -254,16 +258,16 @@ sendInjectionTargetsToSlave(std::size_t slave_idx,
 template <class Scalar>
 void
 ReservoirCouplingMasterReportStep<Scalar>::
-sendNumGroupTargetsToSlave(std::size_t slave_idx,
+sendNumGroupConstraintsToSlave(std::size_t slave_idx,
                            std::size_t num_injection_targets,
-                           std::size_t num_production_targets) const
+                           std::size_t num_production_constraints) const
 {
     // Only rank 0 sends data to slaves. Other ranks in the master's MPI communicator
     // do not participate in master-slave communication (no else branch needed).
     if (this->comm().rank() == 0) {
         std::vector<std::size_t> num_targets(2);
         num_targets[0] = num_injection_targets;
-        num_targets[1] = num_production_targets;
+        num_targets[1] = num_production_constraints;
         auto MPI_SIZE_T_TYPE = Dune::MPITraits<std::size_t>::getType();
         // NOTE: See comment about error handling at the top of this file.
         MPI_Send(
@@ -271,12 +275,12 @@ sendNumGroupTargetsToSlave(std::size_t slave_idx,
             /*count=*/2,
             /*datatype=*/MPI_SIZE_T_TYPE,
             /*dest_rank=*/0,
-            /*tag=*/static_cast<int>(MessageTag::NumSlaveGroupTargets),
+            /*tag=*/static_cast<int>(MessageTag::NumSlaveGroupConstraints),
             this->getSlaveComm(slave_idx)
         );
-        this->logger().info(fmt::format(
-            "Sent number of injection targets {} and production targets {} to slave process with name: {}",
-            num_injection_targets, num_production_targets, this->slaveName(slave_idx)
+        this->logger().debug(fmt::format(
+            "Sent constraint counts (inj={}, prod={}) to {}",
+            num_injection_targets, num_production_constraints, this->slaveName(slave_idx)
         ));
     }
 }
@@ -284,26 +288,26 @@ sendNumGroupTargetsToSlave(std::size_t slave_idx,
 template <class Scalar>
 void
 ReservoirCouplingMasterReportStep<Scalar>::
-sendProductionTargetsToSlave(std::size_t slave_idx,
-                             const std::vector<ProductionGroupTarget>& production_targets) const
+sendProductionConstraintsToSlave(std::size_t slave_idx,
+                             const std::vector<ProductionGroupConstraints>& production_constraints) const
 {
     // Only rank 0 sends data to slaves. Other ranks in the master's MPI communicator
     // do not participate in master-slave communication (no else branch needed).
     if (this->comm().rank() == 0) {
-        auto num_production_targets = production_targets.size();
-        auto MPI_PRODUCTION_TARGETS_TYPE = Dune::MPITraits<ProductionGroupTarget>::getType();
+        auto num_production_constraints = production_constraints.size();
+        auto MPI_PRODUCTION_CONSTRAINTS_TYPE = Dune::MPITraits<ProductionGroupConstraints>::getType();
         // NOTE: See comment about error handling at the top of this file.
         MPI_Send(
-            production_targets.data(),
-            /*count=*/num_production_targets,
-            /*datatype=*/MPI_PRODUCTION_TARGETS_TYPE,
+            production_constraints.data(),
+            /*count=*/num_production_constraints,
+            /*datatype=*/MPI_PRODUCTION_CONSTRAINTS_TYPE,
             /*dest_rank=*/0,
-            /*tag=*/static_cast<int>(MessageTag::ProductionGroupTargets),
+            /*tag=*/static_cast<int>(MessageTag::ProductionGroupConstraints),
             this->getSlaveComm(slave_idx)
         );
-        this->logger().info(fmt::format(
-            "Sent {} production targets to slave process with name: {}",
-            num_production_targets, this->slaveName(slave_idx)
+        this->logger().debug(fmt::format(
+            "Sent {} production constraints to {}",
+            num_production_constraints, this->slaveName(slave_idx)
         ));
     }
 }
@@ -325,24 +329,26 @@ template <class Scalar>
 Scalar
 ReservoirCouplingMasterReportStep<Scalar>::
 getMasterGroupRate_(const std::string &group_name, ReservoirCoupling::Phase phase,
-                    bool reservoir_rates, bool is_injection) const
+                    ReservoirCoupling::RateKind kind) const
 {
+    using RateKind = ReservoirCoupling::RateKind;
     auto it = this->getMasterGroupToSlaveNameMap().find(group_name);
     if (it != this->getMasterGroupToSlaveNameMap().end()) {
         auto& slave_name = it->second;
         auto group_idx = this->getMasterGroupCanonicalIdx(slave_name, group_name);
-        if (is_injection) {
-            const auto& rates = reservoir_rates
-                ? this->slave_group_injection_data_.at(slave_name)[group_idx].reservoir_rates
-                : this->slave_group_injection_data_.at(slave_name)[group_idx].surface_rates;
-            return rates[phase];
+        switch (kind) {
+        case RateKind::InjectionSurface:
+            return this->slave_group_injection_data_.at(slave_name)[group_idx].surface_rates[phase];
+        case RateKind::InjectionReservoir:
+            return this->slave_group_injection_data_.at(slave_name)[group_idx].reservoir_rates[phase];
+        case RateKind::ProductionSurface:
+            return this->slave_group_production_data_.at(slave_name)[group_idx].surface_rates[phase];
+        case RateKind::ProductionNetworkSurface:
+            return this->slave_group_production_data_.at(slave_name)[group_idx].network_surface_rates[phase];
+        case RateKind::ProductionReservoir:
+            return this->slave_group_production_data_.at(slave_name)[group_idx].reservoir_rates[phase];
         }
-        else {
-            const auto& rates = reservoir_rates
-                ? this->slave_group_production_data_.at(slave_name)[group_idx].reservoir_rates
-                : this->slave_group_production_data_.at(slave_name)[group_idx].surface_rates;
-            return rates[phase];
-        }
+        RCOUP_LOG_THROW(std::logic_error, "Unknown RateKind");
     }
     else {
         RCOUP_LOG_THROW(

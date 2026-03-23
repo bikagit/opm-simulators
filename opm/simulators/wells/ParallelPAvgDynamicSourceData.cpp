@@ -122,9 +122,8 @@ void Opm::ParallelPAvgDynamicSourceData<Scalar>::defineCommunication()
 {
     // 1) Determine origins/owning ranks for all source terms.
     auto ixVec = std::vector<std::size_t>(this->locations_.size());
-    std::transform(this->locations_.begin(), this->locations_.end(),
-                   ixVec.begin(),
-                   [](const auto& location) { return location.ix; });
+    std::ranges::transform(this->locations_, ixVec.begin(),
+                           [](const auto& location) { return location.ix; });
 
     constexpr auto numItems = ParallelPAvgDynamicSourceData<Scalar>::numSpanItems();
 
@@ -136,12 +135,9 @@ void Opm::ParallelPAvgDynamicSourceData<Scalar>::defineCommunication()
     //    basic elements from each rank.  There are 'numItems' basic data
     //    elements for each source term.
     this->startPointers_.resize(allIxStart.size());
-    std::transform(allIxStart.begin(), allIxStart.end(),
-                   this->startPointers_.begin(),
-                   [](const int start)
-                   {
-                       return numItems * start;
-                   });
+    std::ranges::transform(allIxStart, this->startPointers_.begin(),
+                           [](const int start)
+                           { return numItems * start; });
 
     // -----------------------------------------------------------------------
 
@@ -161,7 +157,7 @@ void Opm::ParallelPAvgDynamicSourceData<Scalar>::defineCommunication()
     //    permutation of 0..allIndices.size()-1 and the maximum source
     //    location may exceed size()-1.  Resize the storageIndex_ according
     //    to the largest source location ID.
-    if (auto maxIxPos = std::max_element(allIndices.begin(), allIndices.end());
+    if (const auto maxIxPos = std::ranges::max_element(allIndices);
         maxIxPos != allIndices.end())
     {
         // +1 for zero-based indices.

@@ -726,14 +726,9 @@ private:
             const auto& src = aquNum;
             auto&       dst = *aq.typeData.getMutable<data::AquiferType::Numerical>();
 
-            std::transform(src.initPressure.begin(),
-                           src.initPressure.end(),
-                           dst.initPressure.begin(),
-                           dst.initPressure.begin(),
-                           [](const double p0_1, const double p0_2)
-                           {
-                               return std::max(p0_1, p0_2);
-                           });
+            std::ranges::transform(src.initPressure, dst.initPressure, dst.initPressure.begin(),
+                                   [](const double p0_1, const double p0_2)
+                                   { return std::max(p0_1, p0_2); });
         }
     }
 };
@@ -872,7 +867,7 @@ CollectDataOnIORank(const Grid& grid, const EquilGrid* equilGrid,
             sortedCartesianIdx_.push_back(cartMapper.cartesianIndex(idx));
         }
 
-        std::sort(sortedCartesianIdx_.begin(), sortedCartesianIdx_.end());
+        std::ranges::sort(sortedCartesianIdx_);
         localIdxToGlobalIdx_.resize(localGridView.size(0), -1);
 
         // the I/O rank receives from all other ranks

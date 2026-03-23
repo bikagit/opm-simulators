@@ -375,8 +375,7 @@ public:
 
         bool operator==(const BlockVectorWrapper& wrapper) const
         {
-            return std::equal(this->blockVector_.begin(), this->blockVector_.end(),
-                              wrapper.blockVector_.begin(), wrapper.blockVector_.end());
+            return std::ranges::equal(this->blockVector_, wrapper.blockVector_);
         }
 
         template<class Serializer>
@@ -460,7 +459,7 @@ public:
         // initialize the volume of the finite volumes to zero
         const std::size_t numDof = asImp_().numGridDof();
         dofTotalVolume_.resize(numDof);
-        std::fill(dofTotalVolume_.begin(), dofTotalVolume_.end(), 0.0);
+        std::ranges::fill(dofTotalVolume_, 0.0);
 
         ElementContext elemCtx(simulator_);
         gridTotalVolume_ = 0.0;
@@ -718,9 +717,7 @@ public:
         }
 
         if (storeIntensiveQuantities()) {
-            std::fill(intensiveQuantityCacheUpToDate_[timeIdx].begin(),
-                      intensiveQuantityCacheUpToDate_[timeIdx].end(),
-                      /*value=*/0);
+            std::ranges::fill(intensiveQuantityCacheUpToDate_[timeIdx], /*value=*/0);
         }
     }
 
@@ -909,9 +906,7 @@ public:
     void invalidateStorageCache(unsigned timeIdx) const
     {
         if (enableStorageCache_ && timeIdx < historySize) {
-            std::fill(storageCacheUpToDate_[timeIdx].begin(),
-                      storageCacheUpToDate_[timeIdx].end(),
-                      /*value=*/0);
+            std::ranges::fill(storageCacheUpToDate_[timeIdx], /*value=*/0);
         }
     }
 
@@ -1769,10 +1764,11 @@ public:
     void prepareOutputFields() const
     {
         const bool needFullContextUpdate =
-            std::any_of(outputModules_.begin(), outputModules_.end(),
-                        [](const auto& mod) { return mod->needExtensiveQuantities(); });
-        std::for_each(outputModules_.begin(), outputModules_.end(),
-                      [](auto& mod) { mod->allocBuffers(); });
+            std::ranges::any_of(outputModules_,
+                                [](const auto& mod)
+                                { return mod->needExtensiveQuantities(); });
+        std::ranges::for_each(outputModules_,
+                              [](auto& mod) { mod->allocBuffers(); });
 
         // iterate over grid
         ThreadedEntityIterator<GridView, /*codim=*/0> threadedElemIt(gridView());
@@ -1797,8 +1793,8 @@ public:
                     elemCtx.updatePrimaryIntensiveQuantities(/*timeIdx=*/0);
                 }
 
-                std::for_each(outputModules_.begin(), outputModules_.end(),
-                              [&elemCtx](auto& mod) { mod->processElement(elemCtx); });
+                std::ranges::for_each(outputModules_,
+                                      [&elemCtx](auto& mod) { mod->processElement(elemCtx); });
             }
         }
     }
@@ -1809,8 +1805,8 @@ public:
      */
     void appendOutputFields(BaseOutputWriter& writer) const
     {
-        std::for_each(outputModules_.begin(), outputModules_.end(),
-                      [&writer](auto& mod) { mod->commitBuffers(writer); });
+        std::ranges::for_each(outputModules_,
+                              [&writer](auto& mod) { mod->commitBuffers(writer); });
     }
 
     /*!
@@ -1907,12 +1903,9 @@ public:
 
     bool operator==(const FvBaseDiscretization& rhs) const
     {
-        return std::equal(this->solution_.begin(), this->solution_.end(),
-                          rhs.solution_.begin(), rhs.solution_.end(),
-                          [](const auto& x, const auto& y)
-                          {
-                              return *x == *y;
-                          });
+        return std::ranges::equal(this->solution_, rhs.solution_,
+                                 [](const auto& x, const auto& y)
+                                 { return *x == *y; });
     }
 
 protected:

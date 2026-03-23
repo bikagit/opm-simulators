@@ -80,7 +80,7 @@ create_preconditioner_amg(BlockedMatrix<Scalar> *mat_)
                 for (int row = 0; row < cprNb; ++row) {
                     int start = mat->rowPointers[row];
                     int end = mat->rowPointers[row + 1];
-                    auto candidate = std::find(mat->colIndices + start, mat->colIndices + end, row);
+                    const auto candidate = std::find(mat->colIndices + start, mat->colIndices + end, row);
                     assert(candidate != mat->colIndices + end);
                     diagIndices[0][row] = candidate - mat->colIndices;
                 }
@@ -275,7 +275,7 @@ analyzeAggregateMaps()
         typename DuneAmg::AggregatesMap *map = *mapIter;
 
         Rmatrices.emplace_back(level_sizes[level+1], level_sizes[level], level_sizes[level]);
-        std::fill(Rmatrices.back().nnzValues.begin(), Rmatrices.back().nnzValues.end(), 1.0);
+        std::ranges::fill(Rmatrices.back().nnzValues, 1.0);
 
         // get indices for each row of P and R
         std::vector<std::vector<unsigned> > indicesR(level_sizes[level+1]);

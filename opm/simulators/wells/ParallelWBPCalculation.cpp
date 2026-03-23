@@ -147,11 +147,9 @@ getLocalIndex(const std::vector<std::size_t>& globalIndex) const
 {
     auto localIdx = std::vector<int>(globalIndex.size());
 
-    std::transform(globalIndex.begin(), globalIndex.end(), localIdx.begin(),
-                   [this](const std::size_t globIx)
-                   {
-                       return this->localIdx_(globIx);
-                   });
+    std::ranges::transform(globalIndex, localIdx.begin(),
+                           [this](const std::size_t globIx)
+                           { return this->localIdx_(globIx); });
 
     return localIdx;
 }
@@ -350,7 +348,7 @@ defineReservoirCommunication()
     std::tie(sourceCells, std::ignore) =
         allGatherv(this->calculators_.allWBPCells(), this->reservoirSrc_.comm());
 
-    std::sort(sourceCells.begin(), sourceCells.end());
+    std::ranges::sort(sourceCells);
     auto u = std::unique(sourceCells.begin(), sourceCells.end());
 
     this->reservoirSrc_.buildStructure({sourceCells.begin(), u});

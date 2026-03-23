@@ -80,10 +80,9 @@ namespace {
         using SRegion = Opm::InterRegFlowMap::SingleRegion;
         auto regions = std::vector<SRegion>{};
         const auto fip_regions = summaryConfig.fip_regions_interreg_flow();
-        std::transform(fip_regions.begin(), fip_regions.end(),
-                       std::back_inserter(regions),
-                       [&fprops = eclState.fieldProps()](const auto& arrayName)
-                       { return SRegion{arrayName, std::cref(fprops.get_int(arrayName))}; });
+        std::ranges::transform(fip_regions, std::back_inserter(regions),
+                               [&fprops = eclState.fieldProps()](const auto& arrayName)
+                               { return SRegion{arrayName, std::cref(fprops.get_int(arrayName))}; });
 
         return regions;
     }
@@ -126,6 +125,7 @@ GenericOutputBlackoilModule(const EclipseState& eclState,
                             const SummaryState& summaryState,
                             const std::string& moduleVersion,
                             RSTConv::LocalToGlobalCellFunc globalCell,
+                            std::function<bool(const unsigned)> isInterior,
                             const Parallel::Communication& comm,
                             bool enableEnergy,
                             bool constantTemperature,
@@ -136,7 +136,8 @@ GenericOutputBlackoilModule(const EclipseState& eclState,
                             bool enableBrine,
                             bool enableSaltPrecipitation,
                             bool enableExtbo,
-                            bool enableBioeffects)
+                            bool enableBioeffects,
+                            bool enableGeochemistry)
     : eclState_(eclState)
     , schedule_(schedule)
     , summaryState_(summaryState)
@@ -155,7 +156,8 @@ GenericOutputBlackoilModule(const EclipseState& eclState,
     , enableSaltPrecipitation_(enableSaltPrecipitation)
     , enableExtbo_(enableExtbo)
     , enableBioeffects_(enableBioeffects)
-    , flowsC_(schedule, summaryConfig)
+    , enableGeochemistry_(enableGeochemistry)
+    , flowsC_(schedule, summaryConfig, isInterior)
     , rftC_(eclState_, schedule_,
             [this](const std::string& wname) { return this->isOwnedByCurrentRank(wname); },
             [this](const std::string& wname) { return this->isOnCurrentRank(wname); })
@@ -471,6 +473,9 @@ assignToSolution(data::Solution& sol)
 
     // Tracers
     this->tracerC_.outputRestart(sol, eclState_.tracer());
+
+    // Geochemistry
+    this->geochemC_.outputRestart(sol, eclState_.species(), eclState_.mineral());
 }
 
 template<class FluidSystem>
@@ -539,9 +544,9 @@ setRestart(const data::Solution& sol,
         std::pair{"TEMP",     &temperature_},
     };
 
-    std::for_each(fields.begin(), fields.end(),
-                  [&assign](const auto& p)
-                  { assign(p.first, *p.second); });
+    std::ranges::for_each(fields,
+                          [&assign](const auto& p)
+                          { assign(p.first, *p.second); });
 
     if (this->bioeffectsC_.allocated()) {
         // Biofilms for gas-water systems; MICP only for water systems
@@ -660,7 +665,7 @@ doAllocBuffers(const unsigned bufferSize,
     }
 
     const bool alloc_fields = isRestart || (schedule_.write_rst_file(reportStepNum) && !substep);
-    this->flowsC_.allocate(bufferSize, numOutputNnc, alloc_fields, rstKeywords);
+    this->flowsC_.allocate(bufferSize, summaryConfig_, numOutputNnc, alloc_fields, rstKeywords);
 
     // Field data should be allocated
     // 1) When we want to restart
@@ -831,7 +836,7 @@ doAllocBuffers(const unsigned bufferSize,
     };
 
     using PhaseArray = std::array<ScalarBuffer,numPhases>;
-    std::for_each(entries.begin(), entries.end(),
+    std::ranges::for_each(entries,
                   [&handleScalarEntry, &getName, &rstKeywords](const auto& entry)
                   {
                       std::visit(VisitorOverloadSet{
@@ -918,6 +923,11 @@ doAllocBuffers(const unsigned bufferSize,
         this->CO2H2C_.allocate(bufferSize, eclState_.runspec().co2Storage());
     }
 
+    // geochemical species output
+    if (enableGeochemistry_) {
+        this->geochemC_.allocate(bufferSize, eclState_.species(), eclState_.mineral());
+    }
+
     // tracers
     this->tracerC_.allocate(bufferSize, eclState_.tracer());
 
@@ -980,7 +990,7 @@ int GenericOutputBlackoilModule<FluidSystem>::
 regionMax(const std::vector<int>& region,
           const Parallel::Communication& comm)
 {
-    const auto max_value = region.empty() ? 0 : *std::max_element(region.begin(), region.end());
+    const auto max_value = region.empty() ? 0 : *std::ranges::max_element(region);
     return comm.max(max_value);
 }
 

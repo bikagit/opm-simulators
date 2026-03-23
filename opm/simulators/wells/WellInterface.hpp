@@ -129,13 +129,14 @@ public:
     // For the conversion between the surface volume rate and reservoir voidage rate
     using FluidState = BlackOilFluidState<Eval,
                                           FluidSystem,
-                                          energyModuleType == EnergyModules::ConstantTemperature,
-                                          (energyModuleType == EnergyModules::FullyImplicitThermal || energyModuleType == EnergyModules::SequentialImplicitThermal),
+                                          energyModuleType != EnergyModules::NoTemperature,
+                                          energyModuleType == EnergyModules::FullyImplicitThermal,
                                           Indices::compositionSwitchIdx >= 0,
                                           has_watVapor,
                                           has_brine,
                                           has_saltPrecip,
                                           has_disgas_in_water,
+                                          has_solvent,
                                           Indices::numPhases >;
     /// Constructor
     WellInterface(const Well& well,

@@ -56,7 +56,7 @@ MILU_VARIANT convertString2Milu(const std::string& milu)
 {
     // We use lower case as the internal canonical representation of solver names
     std::string milu_lower = milu;
-    std::transform(milu_lower.begin(), milu_lower.end(), milu_lower.begin(), ::tolower);
+    std::ranges::transform(milu_lower, milu_lower.begin(), ::tolower);
 
     if( 0 == milu_lower.compare("milu_1") )
     {
@@ -222,7 +222,7 @@ void milun_decomposition(const M& A, int n, MILU_VARIANT milu, M& ILU,
     {
         auto& newRow = ILU[ordering[iter.index()]];
         // reset stored generation
-        std::fill(newRow.begin(), newRow.end(), 0);
+        std::ranges::fill(newRow, 0);
 
         // copy row.
         for(auto col = iter->begin(), cend = iter->end(); col != cend; ++col)

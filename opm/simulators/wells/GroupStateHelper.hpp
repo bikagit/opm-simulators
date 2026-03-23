@@ -22,6 +22,7 @@
 #include <opm/simulators/wells/rescoup/RescoupProxy.hpp>
 
 #include <opm/common/TimingMacros.hpp>
+#include <opm/input/eclipse/Schedule/ResCoup/GrupSlav.hpp>
 #include <opm/input/eclipse/EclipseState/Grid/FieldPropsManager.hpp>
 #include <opm/input/eclipse/Schedule/Group/GPMaint.hpp>
 #include <opm/input/eclipse/Schedule/Group/GSatProd.hpp>
@@ -32,6 +33,7 @@
 #include <opm/material/fluidsystems/PhaseUsageInfo.hpp>
 #include <opm/simulators/utils/DeferredLogger.hpp>
 #include <opm/simulators/utils/gatherDeferredLogger.hpp>
+#include <opm/simulators/utils/DeferredLoggingErrorHelpers.hpp>
 #include <opm/simulators/wells/GroupState.hpp>
 #include <opm/simulators/wells/VFPProdProperties.hpp>
 #include <opm/simulators/wells/WellState.hpp>
@@ -44,6 +46,7 @@
 #include <optional>
 #include <stdexcept>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 namespace Opm
@@ -191,6 +194,8 @@ public:
         bool do_mpi_gather_{true};         // Whether to gather messages across MPI ranks
     };
 
+    using GroupTarget = typename SingleWellState<Scalar, IndexTraits>::GroupTarget;
+
     GroupStateHelper(WellState<Scalar, IndexTraits>& well_state,
                     GroupState<Scalar>& group_state,
                     const Schedule& schedule,
@@ -219,6 +224,9 @@ public:
                                                       const std::vector<Scalar>& resv_coeff,
                                                       const bool check_guide_rate) const;
 
+    std::pair<Group::ProductionCMode, Scalar>
+    checkGroupProductionConstraints(const Group& group) const;
+
     const Parallel::Communication& comm() const { return this->comm_; }
 
     /// @brief Get the deferred logger
@@ -233,8 +241,6 @@ public:
 
     std::vector<Scalar> getGroupRatesAvailableForHigherLevelControl(const Group& group, const bool is_injector) const;
 
-    Scalar getGuideRate(const std::string& name, const GuideRateModel::Target target) const;
-
     Scalar getInjectionGroupTarget(const Group& group,
                                    const Phase& injection_phase,
                                    const std::vector<Scalar>& resv_coeff) const;
@@ -246,14 +252,22 @@ public:
 
     Scalar getProductionGroupTarget(const Group& group) const;
 
+    /// Get the production target for a specific control mode (not necessarily the active one).
+    Scalar getProductionGroupTargetForMode(const Group& group,
+                                           const Group::ProductionCMode cmode) const;
+
     /// @brief Get the guide rate target mode for a production group
     /// @param group The production group
     /// @return The GuideRateModel::Target based on the group's production control mode
     GuideRateModel::Target getProductionGuideTargetMode(const Group& group) const;
 
-    GuideRate::RateVector getProductionGroupRateVector(const std::string& group_name) const;
+    std::pair<Scalar, Group::ProductionCMode>
+    getAutoChokeGroupProductionTargetRate(const Group& bottom_group,
+                                          const Group& group,
+                                          const std::vector<Scalar>& resv_coeff,
+                                          Scalar efficiencyFactor) const;
 
-    using GroupTarget = typename SingleWellState<Scalar, IndexTraits>::GroupTarget;
+    GuideRate::RateVector getProductionGroupRateVector(const std::string& group_name) const;
 
     std::optional<GroupTarget> getWellGroupTargetInjector(const std::string& name,
                                                           const std::string& parent,
@@ -301,6 +315,8 @@ public:
     bool isReservoirCouplingMasterGroup(const Group& group) const { return rescoup_.isMasterGroup(group.name()); }
 
     bool isReservoirCouplingSlave() const { return rescoup_.isSlave(); }
+
+    bool isReservoirCouplingSlaveGroup(const Group& group) const { return rescoup_.isSlaveGroup(group.name()); }
 
     constexpr int numPhases() const {
         return this->wellState().numPhases();
@@ -435,9 +451,35 @@ public:
 
     void updateNetworkLeafNodeProductionRates();
 
+    /// @brief Set production control to NONE for groups not targeting any well.
+    ///
+    /// For each group in the production controls map, checks whether any open
+    /// producer well has GRUP control with that group as its target. If not,
+    /// the group's production control is set to NONE. This is needed to get correct summary
+    /// output for GMCTP/FMCTP, see https://github.com/OPM/opm-simulators/pull/6596 for more details.
+    ///
+    /// Exceptions (groups excluded from the NONE reset):
+    /// - Groups specified for gas lift optimization (GLO)
+    /// - RC master hierarchy groups (master groups + ancestors up to FIELD),
+    ///   which actively distribute targets to slave groups
+    void updateNONEProductionGroups();
+
     void updateREINForGroups(const Group& group, bool sum_rank);
 
     void updateReservoirRatesInjectionGroups(const Group& group);
+
+#ifdef RESERVOIR_COUPLING_ENABLED
+    /// @brief Update the slave's GroupState cmodes from the master's active cmodes.
+    ///
+    /// For each slave group with a master-imposed target, sets the GroupState
+    /// production/injection control mode to match the master's cmode. This ensures
+    /// that all downstream consumers (constraint checks, guide rate fractions,
+    /// well equation assembly) evaluate the correct rate type.
+    ///
+    /// The update is skipped when the GRUPSLAV filter flag is SLAV, meaning
+    /// the slave ignores the master's control for that rate type.
+    void updateSlaveGroupCmodesFromMaster();
+#endif
 
     void updateState(WellState<Scalar, IndexTraits>& well_state, GroupState<Scalar>& group_state);
 
@@ -465,13 +507,6 @@ public:
                        const Group::ProductionCMode& offended_control) const;
 
 private:
-#ifdef RESERVOIR_COUPLING_ENABLED
-    /// @brief Convert active phase index to ReservoirCoupling::Phase enum
-    /// @param phase_pos Active phase index (0, 1, or 2 in a 3-phase model)
-    /// @return The corresponding ReservoirCoupling::Phase enum value
-    /// @note This uses the canonical phase ordering (Oil=0, Gas=1, Water=2)
-    ReservoirCoupling::Phase activePhaseIdxToRescoupPhase_(int phase_pos) const;
-#endif
 
     //! \brief Calculate group target by applying local rate adjustments and guide rate fractions through group hierarchy.
     //!
@@ -505,6 +540,22 @@ private:
                                         FractionLambda&& local_fraction_lambda,
                                         bool do_addback) const;
 
+    std::pair<Group::ProductionCMode, Scalar>
+    checkProductionRateConstraint_(const Group& group,
+                                   Group::ProductionCMode cmode,
+                                   Group::ProductionCMode currentControl,
+                                   Scalar target,
+                                   Scalar current_rate) const;
+
+    /// @brief Collect groups that provide production targets to open wells.
+    ///
+    /// Scans all wells on this rank: for each open producer with GRUP control,
+    /// adds its group_target to the set. The result is rank-local and must be
+    /// synchronized via MPI before use.
+    ///
+    /// @return Set of group names targeted by wells on this rank
+    std::unordered_set<std::string> collectTargetedProductionGroups_() const;
+
     //! \brief Compute partial efficiency factor for addback calculation.
     //!
     //! The addback in constraint checking must use the partial efficiency factor
@@ -522,6 +573,11 @@ private:
 
     GuideRate::RateVector getGuideRateVector_(const std::vector<Scalar>& rates) const;
 
+    Scalar getInjectionGroupTargetForMode_(const Group& group,
+        const Phase& injection_phase,
+        const std::vector<Scalar>& resv_coeff,
+        const Group::InjectionCMode cmode) const;
+
     //! \brief Find the local reduction level in a group chain.
     //!
     //! The local reduction level is the deepest level in the chain (starting from level 1)
@@ -533,18 +589,19 @@ private:
     //! \param injection_phase Phase for injection groups (ignored for production)
     //! \return The local reduction level (0 if no intermediate group qualifies)
     std::size_t getLocalReductionLevel_(const std::vector<std::string>& chain,
-                                        bool is_production_group,
-                                        Phase injection_phase) const;
+        bool is_production_group,
+        Phase injection_phase) const;
 
-    Scalar getReservoirCouplingMasterGroupRate_(const Group& group,
-                                                const int phase_pos,
-                                                const bool res_rates,
-                                                const bool is_injector) const;
+    Scalar getProductionConstraintTarget_(const Group& group,
+                                          Group::ProductionCMode cmode,
+                                          const Group::ProductionControls& controls) const;
+
+    Scalar getProductionGroupTargetForMode_(const Group& group, const Group::ProductionCMode cmode) const;
 
     Scalar getSatelliteRate_(const Group& group,
-        const int phase_pos,
-        const bool res_rates,
-        const bool is_injector) const;
+                             const int phase_pos,
+                             const bool res_rates,
+                             const bool is_injector) const;
 
     /// Check if a production auto choke group is underperforming its target rate.
     /// Returns true if the group's current rate is below its allocated target,
@@ -568,6 +625,23 @@ private:
 
     std::optional<GSatProd::GSatProdGroupProp::Rate> selectRateComponent_(const int phase_pos) const;
 
+    //! \brief Subtract other-phase reservoir injection rates from a base rate.
+    //!
+    //! For multi-phase injection groups under RESV or VREP control, the total
+    //! reservoir volume target must be reduced by the reservoir volumes already
+    //! injected by other phases, leaving only this phase's share.
+    //!
+    //! \param injection_phase The controlled injection phase
+    //! \param base_reservoir_rate The total reservoir rate target before subtraction
+    //! \param group_injection_reservoir_rates Per-phase reservoir injection rates
+    //! \return The base rate minus other phases' reservoir injection contributions
+    Scalar subtractOtherPhaseResvInjection_(
+        Phase injection_phase,
+        Scalar base_reservoir_rate,
+        const std::vector<Scalar>& group_injection_reservoir_rates) const;
+
+    Scalar sumProductionRateForControlMode_(const Group& group, Group::ProductionCMode cmode) const;
+
     int updateGroupControlledWellsRecursive_(const std::string& group_name,
                                              const bool is_production_group,
                                              const Phase injection_phase);
@@ -575,6 +649,52 @@ private:
     void updateGroupTargetReductionRecursive_(const Group& group,
                                               const bool is_injector,
                                               std::vector<Scalar>& group_target_reduction);
+
+    // --- Reservoir coupling private methods ---
+#ifdef RESERVOIR_COUPLING_ENABLED
+    /// @brief Convert active phase index to ReservoirCoupling::Phase enum
+    /// @param phase_pos Active phase index (0, 1, or 2 in a 3-phase model)
+    /// @return The corresponding ReservoirCoupling::Phase enum value
+    /// @note This uses the canonical phase ordering (Oil=0, Gas=1, Water=2)
+    ReservoirCoupling::Phase activePhaseIdxToRescoupPhase_(int phase_pos) const;
+
+    /// @brief Collect all groups in the RC master group hierarchy.
+    ///
+    /// Starting from each master group (identified via GRUPMAST), walks up
+    /// via group.parent() to FIELD, adding all groups along the path.
+    /// These groups actively distribute targets to slave groups and must
+    /// not have their production control reset to NONE.
+    ///
+    /// @return Set of group names in the master group hierarchy
+    std::unordered_set<std::string> collectMasterGroupHierarchy_() const;
+
+    /// @brief Get the effective production limit for a group and rate type,
+    /// combining master limit, slave-local target, and GRUPSLAV filter flag.
+    ///
+    /// If the master sent a per-rate-type limit for this group and rate type,
+    /// the filter flag determines which value to use:
+    /// - MAST: return master limit
+    /// - BOTH: return min(master limit, slave_local_target)
+    /// - SLAV: return slave_local_target
+    ///
+    /// @param gname Slave group name
+    /// @param rate_type The production rate type to check
+    /// @param slave_local_target The slave's own target from GCONPROD
+    /// @return The effective limit to apply
+    Scalar getEffectiveProductionLimit_(const std::string& gname,
+                                        Group::ProductionCMode rate_type,
+                                        Scalar slave_local_target) const;
+
+    ReservoirCoupling::GrupSlav::FilterFlag getInjectionFilterFlag_(const std::string& group_name,
+                                                                    const Phase injection_phase) const;
+
+    ReservoirCoupling::GrupSlav::FilterFlag getProductionFilterFlag_(const std::string& group_name,
+                                                                     const Group::ProductionCMode cmode) const;
+
+    Scalar getReservoirCouplingMasterGroupRate_(const Group& group,
+                                                const int phase_pos,
+                                                const ReservoirCoupling::RateKind kind) const;
+#endif  // RESERVOIR_COUPLING_ENABLED
 
     const WellState<Scalar, IndexTraits>* well_state_ {nullptr};
     GroupState<Scalar>* group_state_ {nullptr};
@@ -656,7 +776,32 @@ GroupStateHelper<Scalar, IndexTraits>::updateGpMaintTargetForGroups(const Group&
     const auto& region = gpm->region();
     if (!region)
         return;
-
+    if (this->isReservoirCouplingMasterGroup(group)) {
+        // GPMAINT is not supported for reservoir coupling master groups since master groups do not have
+        //   subordinate wells in the master reservoir, so the slaves cannot influence the master reservoir's
+        //   average pressure.
+        //   Even specifying GPMAINT on a group superior to the master group might not make sense, since if the
+        //   superior target is distributed down to the master group with guide rate fractions, adjusting
+        //   the master group's target (that is sent to the slave) could only indirectly influence the master
+        //   reservoir's average pressure by affecting the guide rate fractions distributed to actual wells
+        //   in the master reservoir.
+        OPM_DEFLOG_THROW(
+            std::runtime_error,
+            "GPMAINT is not supported for reservoir coupling master groups.",
+            this->deferredLogger()
+        );
+        return;
+    }
+    else if (this->isReservoirCouplingSlaveGroup(group)) {
+        // GPMAINT is not supported for reservoir coupling slave groups since their targets will be overridden
+        //   by the corresponding master group's target anyway.
+        OPM_DEFLOG_THROW(
+            std::runtime_error,
+            "GPMAINT is not supported for reservoir coupling slave groups.",
+            this->deferredLogger()
+        );
+        return;
+    }
     const auto [name, number] = *region;
     const Scalar error = gpm->pressure_target() - regional_values.at(name)->pressure(number);
     Scalar current_rate = 0.0;

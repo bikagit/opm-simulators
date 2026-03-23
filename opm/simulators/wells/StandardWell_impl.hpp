@@ -41,6 +41,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <functional>
+#include <numbers>
 
 #include <fmt/format.h>
 
@@ -768,7 +769,12 @@ namespace Opm
 
         const auto& summary_state = simulator.vanguard().summaryState();
         updateWellStateFromPrimaryVariables(well_state, summary_state, deferred_logger);
-        Base::calculateReservoirRates(simulator.vanguard().eclState().runspec().co2Storage(), well_state.well(this->index_of_well_));
+
+        // For injectors in a co2 storage case or a thermal case
+        // we convert to reservoir rates using the well bhp and temperature
+        const bool isThermal = simulator.vanguard().eclState().getSimulationConfig().isThermal();
+        const bool co2store = simulator.vanguard().eclState().runspec().co2Storage();
+        Base::calculateReservoirRates( (isThermal || co2store), well_state.well(this->index_of_well_));
     }
 
 
@@ -830,8 +836,8 @@ namespace Opm
         // TODO: not handling solvent related here for now
 
         // initialize all the values to be zero to begin with
-        std::fill(this->ipr_a_.begin(), this->ipr_a_.end(), 0.);
-        std::fill(this->ipr_b_.begin(), this->ipr_b_.end(), 0.);
+        std::ranges::fill(this->ipr_a_, 0.0);
+        std::ranges::fill(this->ipr_b_, 0.0);
 
         for (int perf = 0; perf < this->number_of_local_perforations_; ++perf) {
             std::vector<Scalar> mob(this->num_conservation_quantities_, 0.0);
@@ -950,8 +956,8 @@ namespace Opm
             */
         }
 
-        std::fill(ws.implicit_ipr_a.begin(), ws.implicit_ipr_a.end(), 0.);
-        std::fill(ws.implicit_ipr_b.begin(), ws.implicit_ipr_b.end(), 0.);
+        std::ranges::fill(ws.implicit_ipr_a, 0.0);
+        std::ranges::fill(ws.implicit_ipr_b, 0.0);
 
         auto inj_controls = Well::InjectionControls(0);
         auto prod_controls = Well::ProductionControls(0);
@@ -1355,8 +1361,8 @@ namespace Opm
             {
                 const auto& iq = model.intensiveQuantities(cell, /* time_idx = */ 0);
 
-                std::transform(phases.begin(), phases.end(), mob.begin(),
-                               [&iq](const int phase) { return iq.mobility(phase).value(); });
+                std::ranges::transform(phases, mob.begin(),
+                                       [&iq](const int phase) { return iq.mobility(phase).value(); });
             },
 
             // densityInCell: Reservoir condition phase densities in
@@ -1367,8 +1373,8 @@ namespace Opm
             {
                 const auto& fs = model.intensiveQuantities(cell, /* time_idx = */ 0).fluidState();
 
-                std::transform(phases.begin(), phases.end(), rho.begin(),
-                               [&fs](const int phase) { return fs.density(phase).value(); });
+                std::ranges::transform(phases, rho.begin(),
+                                       [&fs](const int phase) { return fs.density(phase).value(); });
             }
         };
 
@@ -1938,7 +1944,7 @@ namespace Opm
             computePerfRate(int_quant, mob, bhp, Tw, perf, allow_cf, cq_s,
                             perf_rates, deferred_logger);
             // TODO: make area a member
-            const Scalar area = 2 * M_PI * this->perf_rep_radius_[perf] * this->perf_length_[perf];
+            const Scalar area = 2 * std::numbers::pi_v<Scalar> * this->perf_rep_radius_[perf] * this->perf_length_[perf];
             const auto& material_law_manager = simulator.problem().materialLawManager();
             const auto& scaled_drainage_info =
                         material_law_manager->oilWaterScaledEpsInfoDrainage(cell_idx);
@@ -2136,7 +2142,7 @@ namespace Opm
         const auto& int_quants = simulator.model().intensiveQuantities(cell_idx, /*timeIdx=*/ 0);
         const auto& fs = int_quants.fluidState();
         const EvalWell b_w = this->extendEval(fs.invB(FluidSystem::waterPhaseIdx));
-        const Scalar area = M_PI * this->bore_diameters_[perf] * this->perf_length_[perf];
+        const Scalar area = std::numbers::pi_v<Scalar> * this->bore_diameters_[perf] * this->perf_length_[perf];
         const int wat_vel_index = Bhp + 1 + perf;
         const unsigned water_comp_idx = FluidSystem::canonicalToActiveCompIdx(FluidSystem::waterCompIdx);
 
@@ -2162,7 +2168,7 @@ namespace Opm
         const auto& fs = int_quants.fluidState();
         const EvalWell b_w = this->extendEval(fs.invB(FluidSystem::waterPhaseIdx));
         const EvalWell water_flux_r = water_flux_s / b_w;
-        const Scalar area = M_PI * this->bore_diameters_[perf] * this->perf_length_[perf];
+        const Scalar area = std::numbers::pi_v<Scalar> * this->bore_diameters_[perf] * this->perf_length_[perf];
         const EvalWell water_velocity = water_flux_r / area;
         const int wat_vel_index = Bhp + 1 + perf;
 
@@ -2304,7 +2310,7 @@ namespace Opm
 
         if (bhpAtLimit) {
             auto v = frates(*bhpAtLimit);
-            if (std::all_of(v.cbegin(), v.cend(), [](Scalar i){ return i <= 0; }) ) {
+            if (std::ranges::all_of(v, [](Scalar i) { return i <= 0; })) {
                 return bhpAtLimit;
             }
         }
@@ -2334,7 +2340,7 @@ namespace Opm
         if (bhpAtLimit) {
             // should we use fratesIter here since fratesIter is used in computeBhpAtThpLimitProd above?
             auto v = frates(*bhpAtLimit);
-            if (std::all_of(v.cbegin(), v.cend(), [](Scalar i){ return i <= 0; }) ) {
+            if (std::ranges::all_of(v, [](Scalar i) { return i <= 0; })) {
                 return bhpAtLimit;
             }
         }
@@ -2698,8 +2704,8 @@ namespace Opm
                 // only handles single phase injection now
                 assert(this->well_ecl_.injectorType() != InjectorType::MULTI);
                 fs.setTemperature(this->well_ecl_.inj_temperature());
-                typedef typename std::decay<decltype(fs)>::type::Scalar FsScalar;
-                typename FluidSystem::template ParameterCache<FsScalar> paramCache;
+                typedef typename std::decay<decltype(fs)>::type::ValueType FsValueType;
+                typename FluidSystem::template ParameterCache<FsValueType> paramCache;
                 const unsigned pvtRegionIdx = intQuants.pvtRegionIndex();
                 paramCache.setRegionIndex(pvtRegionIdx);
                 paramCache.updatePhase(fs, phaseIdx);

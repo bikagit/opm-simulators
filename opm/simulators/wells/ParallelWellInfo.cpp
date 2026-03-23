@@ -107,16 +107,18 @@ GlobalPerfContainerFactory(const IndexSet& local_indices,
         comm_.allgatherv(my_pairs.data(), my_pairs.size(), global_pairs.data(), sizes_.data(), displ_.data());
         // Set the the index where we receive
         int count = 0;
-        std::for_each(global_pairs.begin(), global_pairs.end(), [&count](Pair& pair){ pair.second = count++;});
+        std::ranges::for_each(global_pairs,
+                              [&count](Pair& pair) { pair.second = count++; });
         // sort the complete range to get the correct ordering
-        std::sort(global_pairs.begin(), global_pairs.end(),
-                  [](const Pair& p1, const Pair& p2){ return p1.first < p2.first; } );
+        std::ranges::sort(global_pairs,
+                          [](const Pair& p1, const Pair& p2)
+                          { return p1.first < p2.first; });
         map_received_.resize(global_pairs.size());
-        std::transform(global_pairs.begin(), global_pairs.end(), map_received_.begin(),
-                       [](const Pair& pair){ return pair.second; });
+        std::ranges::transform(global_pairs, map_received_.begin(),
+                               [](const Pair& pair){ return pair.second; });
         perf_ecl_index_.resize(global_pairs.size());
-        std::transform(global_pairs.begin(), global_pairs.end(), perf_ecl_index_.begin(),
-                       [](const Pair& pair){ return pair.first; });
+        std::ranges::transform(global_pairs, perf_ecl_index_.begin(),
+                               [](const Pair& pair){ return pair.first; });
         num_global_perfs_ = global_pairs.size();
     }
     else
@@ -247,9 +249,8 @@ copyGlobalToLocal(const std::vector<Scalar>& global,
                 local[local_index++] = global[global_index++];
         }
     }
-    else
-    {
-        std::copy(global.begin(), global.end(), local.begin());
+    else {
+        std::ranges::copy(global, local.begin());
     }
 }
 
@@ -348,11 +349,12 @@ void CommunicateAboveBelow<Scalar>::partialSumPerfValues(RAIterator begin, RAIte
         std::vector<Pair> global_pairs(displ.back());
         comm_.allgatherv(my_pairs.data(), my_pairs.size(), global_pairs.data(), sizes.data(), displ.data());
         // sort the complete range to get the correct ordering
-        std::sort(global_pairs.begin(), global_pairs.end(),
-                  [](const Pair& p1, const Pair& p2){ return p1.first < p2.first; } );
+        std::ranges::sort(global_pairs,
+                          [](const Pair& p1, const Pair& p2)
+                          { return p1.first < p2.first; });
         std::vector<Value> sums(global_pairs.size());
-        std::transform(global_pairs.begin(), global_pairs.end(), sums.begin(),
-                       [](const Pair& p) { return p.second; });
+        std::ranges::transform(global_pairs, sums.begin(),
+                               [](const Pair& p) { return p.second; });
         std::partial_sum(sums.begin(), sums.end(),sums.begin());
         // assign the values (both ranges are sorted by the ecl index)
         auto global_pair = global_pairs.begin();
@@ -410,7 +412,7 @@ communicateAbove(Scalar first_above,
         if (above.size() > 1)
         {
             // No comunication needed, just copy.
-            std::copy(current, current + (above.size() - 1), above.begin()+1);
+            std::copy_n(current, above.size() - 1, above.begin() + 1);
         }
     }
     return above;
@@ -440,7 +442,7 @@ communicateBelow(Scalar last_below,
         if (below.size() > 1)
         {
             // No comunication needed, just copy.
-            std::copy(current+1, current + below.size(), below.begin());
+            std::copy_n(current + 1, below.size() - 1, below.begin());
         }
     }
     return below;
@@ -578,8 +580,9 @@ void ParallelWellInfo<Scalar>::communicateFirstPerforation(bool hasFirst)
     int first = hasFirst;
     std::vector<int> firstVec(comm_->size());
     comm_->allgather(&first, 1, firstVec.data());
-    auto found = std::find_if(firstVec.begin(), firstVec.end(),
-                              [](int i) -> bool{ return i;});
+    const auto found =
+        std::ranges::find_if(firstVec,
+                             [](int i) -> bool { return i; });
     if (found != firstVec.end())
         rankWithFirstPerf_ = found - firstVec.begin();
 }

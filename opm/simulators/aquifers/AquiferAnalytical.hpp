@@ -69,6 +69,7 @@ public:
     enum { enableBrine = getPropValue<TypeTag, Properties::EnableBrine>() };
     enum { enableVapwat = getPropValue<TypeTag, Properties::EnableVapwat>() };
     enum { has_disgas_in_water = getPropValue<TypeTag, Properties::EnableDisgasInWater>() };
+    enum { enableSolvent = getPropValue<TypeTag, Properties::EnableSolvent>() };
 
     enum { enableSaltPrecipitation = getPropValue<TypeTag, Properties::EnableSaltPrecipitation>() };
 
@@ -78,13 +79,14 @@ public:
 
     using FluidState = BlackOilFluidState<Eval,
                                           FluidSystem,
-                                          energyModuleType == EnergyModules::ConstantTemperature,
-                                          (energyModuleType == EnergyModules::FullyImplicitThermal || energyModuleType == EnergyModules::SequentialImplicitThermal),
+                                          energyModuleType != EnergyModules::NoTemperature,
+                                          energyModuleType == EnergyModules::FullyImplicitThermal,
                                           BlackoilIndices::gasEnabled,
                                           enableVapwat,
                                           enableBrine,
                                           enableSaltPrecipitation,
                                           has_disgas_in_water,
+                                          enableSolvent,
                                           BlackoilIndices::numPhases>;
 
     // Constructor
@@ -108,13 +110,9 @@ public:
             this->alphai_.assign(this->size(), Scalar{0});
         }
         else {
-            std::transform(this->faceArea_connected_.begin(),
-                           this->faceArea_connected_.end(),
-                           this->alphai_.begin(),
-                           [tfa](const Scalar area)
-                           {
-                               return area / tfa;
-                           });
+            std::ranges::transform(this->faceArea_connected_, this->alphai_.begin(),
+                                   [tfa](const Scalar area)
+                                   { return area / tfa; });
         }
 
         this->area_fraction_ = this->totalFaceArea() / tfa;
@@ -190,8 +188,8 @@ public:
             if (this->Ta0_.has_value() && this->Qai_[idx] > 0)
             {
                 fs.setTemperature(this->Ta0_.value());
-                typedef typename std::decay<decltype(fs)>::type::Scalar FsScalar;
-                typename FluidSystem::template ParameterCache<FsScalar> paramCache;
+                typedef typename std::decay<decltype(fs)>::type::ValueType FsValueType;
+                typename FluidSystem::template ParameterCache<FsValueType> paramCache;
                 const unsigned pvtRegionIdx = intQuants.pvtRegionIndex();
                 paramCache.setRegionIndex(pvtRegionIdx);
                 paramCache.updatePhase(fs, this->phaseIdx_());

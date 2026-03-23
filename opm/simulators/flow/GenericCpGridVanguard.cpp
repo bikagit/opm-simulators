@@ -272,7 +272,7 @@ doLoadBalance_(const Dune::EdgeWeightMethod             edgeWeightsMethod,
                 }
             }
         }
-        std::sort(parallelWells.begin(), parallelWells.end());
+        std::ranges::sort(parallelWells);
 
         // Calling Schedule::filterConnections would remove any perforated
         // cells that exist only on other ranks even in the case of
@@ -599,37 +599,6 @@ void GenericCpGridVanguard<ElementMapper,GridView,Scalar>::addLgrsUpdateLeafView
     }
     grid.addLgrsUpdateLeafView(cells_per_dim_vec, startIJK_vec, endIJK_vec, lgrName_vec);
 };
-
-template<class ElementMapper, class GridView, class Scalar>
-void GenericCpGridVanguard<ElementMapper,GridView,Scalar>::
-doFilterConnections_(Schedule& schedule)
-{
-    // We only filter if we hold the global grid. Otherwise the filtering
-    // is done after load balancing as in the future the other processes
-    // will hold an empty partition for the global grid and hence filtering
-    // here would remove all well connections.
-    if (this->equilGrid_ != nullptr) {
-        ActiveGridCells activeCells(equilGrid().logicalCartesianSize(),
-                                    equilGrid().globalCell().data(),
-                                    equilGrid().size(0));
-
-        schedule.filterConnections(activeCells);
-    }
-
-#if HAVE_MPI
-    try {
-        // Broadcast another time to remove inactive peforations on
-        // slave processors.
-        eclBroadcast(FlowGenericVanguard::comm(), schedule);
-    }
-    catch (const std::exception& broadcast_error) {
-        OpmLog::error(fmt::format("Distributing properties to all processes failed\n"
-                                  "Internal error message: {}", broadcast_error.what()));
-        MPI_Finalize();
-        std::exit(EXIT_FAILURE);
-    }
-#endif  // HAVE_MPI
-}
 
 template<class ElementMapper, class GridView, class Scalar>
 const Dune::CpGrid&

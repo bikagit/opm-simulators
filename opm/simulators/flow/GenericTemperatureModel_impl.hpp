@@ -115,59 +115,21 @@ void GenericTemperatureModel<Grid,GridView,DofMapper,Stencil,FluidSystem,Scalar>
 doInit(std::size_t numGridDof)
 {
     doTemp_ = eclState_.getSimulationConfig().isTemp();
-
     temperature_.resize(numGridDof);
-    energyVector_.resize(numGridDof);
-    // allocate matrix for storing the Jacobian of the temperature residual
-    energyMatrix_ = std::make_unique<EnergyMatrix>(numGridDof, numGridDof, EnergyMatrix::random);
 
-    // find the sparsity pattern of the temperature matrix
-    using NeighborSet = std::set<unsigned>;
-    std::vector<NeighborSet> neighbors(numGridDof);
+    if (!doTemp_)
+        return;
 
-    Stencil stencil(gridView_, dofMapper_);
-    for (const auto& elem : elements(gridView_)) {
-        stencil.update(elem);
-
-        for (unsigned primaryDofIdx = 0; primaryDofIdx < stencil.numPrimaryDof(); ++primaryDofIdx) {
-            unsigned myIdx = stencil.globalSpaceIndex(primaryDofIdx);
-
-            for (unsigned dofIdx = 0; dofIdx < stencil.numDof(); ++dofIdx) {
-                unsigned neighborIdx = stencil.globalSpaceIndex(dofIdx);
-                neighbors[myIdx].insert(neighborIdx);
-            }
-        }
-    }
-
-    // allocate space for the rows of the matrix
-    for (unsigned dofIdx = 0; dofIdx < numGridDof; ++ dofIdx) {
-        energyMatrix_->setrowsize(dofIdx, neighbors[dofIdx].size());
-    }
-    energyMatrix_->endrowsizes();
-
-    // fill the rows with indices. each degree of freedom talks to
-    // all of its neighbors. (it also talks to itself since
-    // degrees of freedom are sometimes quite egocentric.)
-    for (unsigned dofIdx = 0; dofIdx < numGridDof; ++ dofIdx) {
-        typename NeighborSet::iterator nIt = neighbors[dofIdx].begin();
-        typename NeighborSet::iterator nEndIt = neighbors[dofIdx].end();
-        for (; nIt != nEndIt; ++nIt) {
-            energyMatrix_->addindex(dofIdx, *nIt);
-        }
-    }
-    energyMatrix_->endindices();
-
+    energyVector_.resize(numGridDof); 
     maxTempChange_ = Parameters::Get<Parameters::MaxTemperatureChange<Scalar>>();
 }
 
 template<class Grid, class GridView, class DofMapper, class Stencil, class FluidSystem, class Scalar>
-bool GenericTemperatureModel<Grid,GridView,DofMapper,Stencil,FluidSystem,Scalar>::
-linearSolve_(const EnergyMatrix& M, EnergyVector& x, EnergyVector& b)
+void GenericTemperatureModel<Grid,GridView,DofMapper,Stencil,FluidSystem,Scalar>::
+setupLinearSolver(const EnergyMatrix& matrix)
 {
-    x = 0.0;
     Scalar tolerance = 1e-2;
     int maxIter = 100;
-
     int verbosity = 0;
     PropertyTree prm;
     prm.put("maxiter", maxIter);
@@ -177,40 +139,41 @@ linearSolve_(const EnergyMatrix& M, EnergyVector& x, EnergyVector& b)
     prm.put("preconditioner.type", std::string("ParOverILU0"));
 
 #if HAVE_MPI
-    if(gridView_.grid().comm().size() > 1)
+    if (gridView_.grid().comm().size() > 1)
     {
         auto [energyOperator, solver] =
-            createParallelFlexibleSolver<EnergyVector>(gridView_.grid(), M, prm);
-        (void) energyOperator;
-
-        Dune::InverseOperatorResult result;
-        solver->apply(x, b, result);
-
-        // return the result of the solver
-        return result.converged;
+            createParallelFlexibleSolver<EnergyVector>(gridView_.grid(), matrix, prm);
+        op_ = std::move(energyOperator);
+        pre_ = &solver->preconditioner();
+        linear_solver_ = std::move(solver);
     }
     else
 #endif
     {
-        using EnergySolver = Dune::BiCGSTABSolver<EnergyVector>;
-        using EnergyOperator = Dune::MatrixAdapter<EnergyMatrix,EnergyVector,EnergyVector>;
-        using EnergyScalarProduct = Dune::SeqScalarProduct<EnergyVector>;
-        using EnergyPreconditioner = Dune::SeqILU< EnergyMatrix,EnergyVector,EnergyVector>;
-
-        EnergyOperator energyOperator(M);
-        EnergyScalarProduct energyScalarProduct;
-        EnergyPreconditioner energyPreconditioner(M, 0, 1); // results in ILU0
-
-        EnergySolver solver (energyOperator, energyScalarProduct,
-                                  energyPreconditioner, tolerance, maxIter,
-                                  verbosity);
-
-        Dune::InverseOperatorResult result;
-        solver.apply(x, b, result);
-
-        // return the result of the solver
-        return result.converged;
+        using SeqOperator = Dune::MatrixAdapter<EnergyMatrix, EnergyVector, EnergyVector>;
+        using SeqSolver = Dune::FlexibleSolver<SeqOperator>;
+        auto seqOp = std::make_unique<SeqOperator>(matrix);
+        auto dummyWeights = [](){ return EnergyVector(); };
+        auto seqSolver = std::make_unique<SeqSolver>(*seqOp, prm, dummyWeights, 0);
+        op_ = std::move(seqOp);
+        pre_ = &seqSolver->preconditioner();
+        linear_solver_ = std::move(seqSolver);
     }
+}
+
+template<class Grid, class GridView, class DofMapper, class Stencil, class FluidSystem, class Scalar>
+bool GenericTemperatureModel<Grid,GridView,DofMapper,Stencil,FluidSystem,Scalar>::
+linearSolve_(const EnergyMatrix& M, EnergyVector& x, EnergyVector& b)
+{
+    if (!linear_solver_) {
+        setupLinearSolver(M);
+    } else {
+        pre_->update();
+    }
+
+    Dune::InverseOperatorResult result;
+    linear_solver_->apply(x, b, result);
+    return result.converged;
 }
 
 } // namespace Opm

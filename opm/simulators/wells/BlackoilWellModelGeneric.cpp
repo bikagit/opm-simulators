@@ -157,12 +157,9 @@ template<typename Scalar, typename IndexTraits>
 bool BlackoilWellModelGeneric<Scalar, IndexTraits>::
 hasLocalWell(const std::string& wname) const
 {
-    return std::any_of(this->wells_ecl_.begin(),
-                       this->wells_ecl_.end(),
-        [&wname](const Well& well)
-    {
-        return well.name() == wname;
-    });
+    return std::ranges::any_of(this->wells_ecl_,
+                               [&wname](const Well& well)
+                               { return well.name() == wname; });
 }
 
 template<typename Scalar, typename IndexTraits>
@@ -170,12 +167,9 @@ bool
 BlackoilWellModelGeneric<Scalar, IndexTraits>::
 hasOpenLocalWell(const std::string& wname) const
 {
-    return std::any_of(well_container_generic_.begin(),
-                       well_container_generic_.end(),
-        [&wname](const auto* elem) -> bool
-    {
-        return elem->name() == wname;
-    });
+    return std::ranges::any_of(well_container_generic_,
+                               [&wname](const auto* elem) -> bool
+                               { return elem->name() == wname; });
 }
 
 template<typename Scalar, typename IndexTraits>
@@ -189,8 +183,9 @@ template<typename Scalar, typename IndexTraits>
 bool BlackoilWellModelGeneric<Scalar, IndexTraits>::
 anyMSWellOpenLocal() const
 {
-    return std::any_of(wells_ecl_.begin(), wells_ecl_.end(),
-                       [](const auto& well) { return well.isMultiSegment(); });
+    return std::ranges::any_of(wells_ecl_,
+                               [](const auto& well)
+                               { return well.isMultiSegment(); });
 }
 
 template<typename Scalar, typename IndexTraits>
@@ -198,11 +193,10 @@ const Well& BlackoilWellModelGeneric<Scalar, IndexTraits>::
 getWellEcl(const std::string& well_name) const
 {
     // finding the iterator of the well in wells_ecl
-    auto well_ecl = std::find_if(wells_ecl_.begin(),
-                                 wells_ecl_.end(),
-                                 [&well_name](const Well& elem)->bool {
-                                     return elem.name() == well_name;
-                                 });
+    const auto well_ecl =
+        std::ranges::find_if(wells_ecl_,
+                             [&well_name](const Well& elem) -> bool
+                             { return elem.name() == well_name; });
 
     assert(well_ecl != wells_ecl_.end());
 
@@ -296,17 +290,14 @@ getLocalWells(const int timeStepIdx) const
     auto w = std::vector<Well>{};
 
     auto wnames = this->schedule().wellNames(timeStepIdx);
-    wnames.erase(std::remove_if(wnames.begin(), wnames.end(),
-                                this->not_on_process_),
-                 wnames.end());
+    std::erase_if(wnames, this->not_on_process_);
 
     w.reserve(wnames.size());
 
-    std::transform(wnames.begin(), wnames.end(),
-                   std::back_inserter(w),
-                   [&st = this->schedule()[timeStepIdx]]
-                   (const std::string& wname)
-                   { return st.wells(wname); });
+    std::ranges::transform(wnames, std::back_inserter(w),
+                           [&st = this->schedule()[timeStepIdx]]
+                           (const std::string& wname)
+                           { return st.wells(wname); });
 
     return w;
 }
@@ -626,8 +617,9 @@ getGroupFipnumAndPvtreg() const
         auto regIndexPair = std::make_pair(pvtreg, firstWellIndex);
         std::vector<decltype(regIndexPair)> pairs(comm_.size());
         comm_.allgather(&regIndexPair, 1, pairs.data());
-        pvtreg = std::min_element(pairs.begin(), pairs.end(),
-                                  [](const auto& p1, const auto& p2){ return p1.second < p2.second;})
+        pvtreg = std::ranges::min_element(pairs,
+                                          [](const auto& p1, const auto& p2)
+                                          { return p1.second < p2.second; })
             ->first;
     }
     return std::make_pair(fipnum, pvtreg);
@@ -661,7 +653,7 @@ checkGroupHigherConstraints(const Group& group,
             bool group_is_oscillating = false;
             if (auto groupPos = switched_inj_groups_.find(group.name()); groupPos != switched_inj_groups_.end()) {
                 auto& ctrls = groupPos->second[static_cast<std::underlying_type_t<Phase>>(phase)];
-                const int number_of_switches = std::count(ctrls.begin(), ctrls.end(), currentControl);
+                const int number_of_switches = std::ranges::count(ctrls, currentControl);
                 group_is_oscillating = (number_of_switches >= max_number_of_group_switch);
                 if (group_is_oscillating) {
                     const bool output_first_time = (number_of_switches == max_number_of_group_switch);
@@ -720,7 +712,7 @@ checkGroupHigherConstraints(const Group& group,
         const Group::ProductionCMode currentControl = this->groupState().production_control(group.name());
         if (auto groupPos = switched_prod_groups_.find(group.name()); groupPos != switched_prod_groups_.end()) {
             auto& ctrls = groupPos->second;
-            const int number_of_switches = std::count(ctrls.begin(), ctrls.end(), currentControl);
+            const int number_of_switches = std::ranges::count(ctrls, currentControl);
             const bool group_is_oscillating = (number_of_switches >= max_number_of_group_switch);
             if (group_is_oscillating) {
                 const bool output_first_time = (number_of_switches== max_number_of_group_switch);
@@ -815,10 +807,10 @@ wellUpdateLoop(Iter first, Iter last, const int timeStepIdx, Body&& body)
                    loopBody = std::forward<Body>(body)]
                   (const auto& wname)
     {
-        auto well_iter = std::find_if(this->wells_ecl_.begin(),
-                                      this->wells_ecl_.end(),
-                                      [&wname](const auto& well)
-                                      { return well.name() == wname; });
+        const auto well_iter =
+            std::ranges::find_if(this->wells_ecl_,
+                                 [&wname](const auto& well)
+                                 { return well.name() == wname; });
 
         if (well_iter == this->wells_ecl_.end()) {
             return;
@@ -920,11 +912,10 @@ Scalar
 BlackoilWellModelGeneric<Scalar, IndexTraits>::
 wellPI(const std::string& well_name) const
 {
-    auto well_iter = std::find_if(this->wells_ecl_.begin(), this->wells_ecl_.end(),
-        [&well_name](const Well& well)
-    {
-        return well.name() == well_name;
-    });
+    const auto well_iter =
+        std::ranges::find_if(this->wells_ecl_,
+                             [&well_name](const Well& well)
+                             { return well.name() == well_name; });
 
     if (well_iter == this->wells_ecl_.end()) {
         throw std::logic_error { "Could not find well: " + well_name };
@@ -1215,7 +1206,7 @@ groupAndNetworkData(const int reportStepIdx) const
 template<typename Scalar, typename IndexTraits>
 void BlackoilWellModelGeneric<Scalar, IndexTraits>::
 updateAndCommunicateGroupData(const int reportStepIdx,
-                              const int iterationIdx,
+                              const NewtonIterationContext& iterCtx,
                               const Scalar tol_nupcol,
                               const bool update_wellgrouptarget)
 {
@@ -1224,7 +1215,7 @@ updateAndCommunicateGroupData(const int reportStepIdx,
     const int nupcol = schedule()[reportStepIdx].nupcol();
 
     // Update accumulated group consumption/import rates for current report step
-    if(iterationIdx == 0) {
+    if (iterCtx.isFirstGlobalIteration()) {
         this->groupState().update_gconsump(schedule(), reportStepIdx, this->summaryState_);
     }
 
@@ -1241,7 +1232,7 @@ updateAndCommunicateGroupData(const int reportStepIdx,
     this->wellState().updateGlobalIsGrup(comm_, well_status);
 
     GroupStateHelperType &group_state_helper = this->groupStateHelper();
-    if (iterationIdx < nupcol) {
+    if (iterCtx.withinNupcol(nupcol)) {
         OPM_TIMEBLOCK(updateNupcol);
         this->updateNupcolWGState();
     } else {
@@ -1291,7 +1282,7 @@ updateAndCommunicateGroupData(const int reportStepIdx,
                                 const std::string control_str = is_vrep? "VREP" : "REIN";
                                 const std::string msg = fmt::format("Group prodution relative change {} larger than tolerance {} "
                                                         "at iteration {}. Update {} for Group {} even if iteration is larger than {} given by NUPCOL." ,
-                                                        rel_change, tol_nupcol, iterationIdx, control_str, gr_name, nupcol);
+                                                        rel_change, tol_nupcol, iterCtx.iteration(), control_str, gr_name, nupcol);
                                 group_state_helper.deferredLogger().debug(msg);
                             }
                         }
@@ -1403,30 +1394,32 @@ forceShutWellByName(const std::string& wellname,
     // Only add the well to the closed list on the
     // process that owns it.
     int well_was_shut = 0;
-    const auto it = std::find_if(well_container_generic_.begin(),
-                                 well_container_generic_.end(),
-                                 [&wellname, &wState = this->wellState(), dont_shut_grup_wells](const auto& well)
-                                 {
-                                     if (well->name() == wellname) {
-                                         // if one well on individual control (typical thp/bhp)
-                                         // in a group struggles to converge
-                                         // it may lead to problems for the other wells in the group
-                                         // we dont want to shut all the wells in a group only the one
-                                         // creating the problems.
-                                          if (dont_shut_grup_wells) {
-                                             const auto& ws = wState.well(well->indexOfWell());
-                                             if (well->isInjector()) {
-                                                 return ws.injection_cmode != Well::InjectorCMode::GRUP;
-                                             } else {
-                                                 return ws.production_cmode != Well::ProducerCMode::GRUP;
-                                             }
+    const auto it =
+        std::ranges::find_if(well_container_generic_,
+                             [&wellname, &wState = this->wellState(), dont_shut_grup_wells]
+                             (const auto& well)
+                             {
+                                 if (well->name() == wellname) {
+                                     // if one well on individual control (typical thp/bhp)
+                                     // in a group struggles to converge
+                                     // it may lead to problems for the other wells in the group
+                                     // we dont want to shut all the wells in a group only the one
+                                     // creating the problems.
+                                     if (dont_shut_grup_wells) {
+                                         const auto& ws = wState.well(well->indexOfWell());
+                                         if (well->isInjector()) {
+                                             return ws.injection_cmode != Well::InjectorCMode::GRUP;
                                          }
-                                         return true;
+                                         else {
+                                             return ws.production_cmode != Well::ProducerCMode::GRUP;
+                                         }
                                      }
-                                     else {
-                                         return false;
-                                     }
-                                 });
+                                     return true;
+                                 }
+                                 else {
+                                     return false;
+                                 }
+                             });
     if (it != well_container_generic_.end()) {
         wellTestState().close_well(wellname, WellTestConfig::Reason::PHYSICAL, simulation_time);
         well_was_shut = 1;
@@ -1491,11 +1484,10 @@ BlackoilWellModelGeneric<Scalar, IndexTraits>::
 getGenWell(const std::string& well_name)
 {
     // finding the iterator of the well in wells_ecl
-    auto well = std::find_if(well_container_generic_.begin(),
-                             well_container_generic_.end(),
-                                [&well_name](const WellInterfaceGeneric<Scalar, IndexTraits>* elem)->bool {
-                                     return elem->name() == well_name;
-                                 });
+    const auto well =
+        std::ranges::find_if(well_container_generic_,
+                             [&well_name](const auto* elem) -> bool
+                             { return elem->name() == well_name; });
 
     assert(well != well_container_generic_.end());
 
@@ -1754,10 +1746,7 @@ getMaxWellConnections() const
     auto wellConnections = std::vector<std::vector<int>>{};
 
     auto schedule_wells = this->schedule().wellNames();
-    schedule_wells.erase(std::remove_if(schedule_wells.begin(),
-                                        schedule_wells.end(),
-                                        this->not_on_process_),
-                         schedule_wells.end());
+    std::erase_if(schedule_wells, this->not_on_process_);
 
     wellConnections.reserve(schedule_wells.size());
 
@@ -1785,8 +1774,7 @@ getMaxWellConnections() const
         }
 
         // also include wells with no perforations in case
-        std::sort(compressed_well_perforations.begin(),
-                  compressed_well_perforations.end());
+        std::ranges::sort(compressed_well_perforations);
     }
 
     return wellConnections;
@@ -1797,9 +1785,9 @@ int BlackoilWellModelGeneric<Scalar, IndexTraits>::numLocalWellsEnd() const
 {
     const auto& wnames = schedule().back().well_order().names();
 
-    return std::count_if(wnames.begin(), wnames.end(),
-                         [this](const std::string& wname)
-                         { return ! this->not_on_process_(wname); });
+    return std::ranges::count_if(wnames,
+                                 [this](const std::string& wname)
+                                 { return ! this->not_on_process_(wname); });
 }
 
 template<typename Scalar, typename IndexTraits>
@@ -1952,80 +1940,6 @@ operator==(const BlackoilWellModelGeneric& rhs) const
         && this->switched_inj_groups_ == rhs.switched_inj_groups_
         && this->closed_offending_wells_ == rhs.closed_offending_wells_
         && this->gen_gaslift_ == rhs.gen_gaslift_;
-}
-
-template <typename Scalar, typename IndexTraits>
-void
-BlackoilWellModelGeneric<Scalar, IndexTraits>::
-updateNONEProductionGroups(const GasLiftOpt& glo, DeferredLogger& deferred_logger)
-{
-    auto& group_state = this->groupState();
-    const auto& prod_group_controls = group_state.get_production_controls();
-    if (prod_group_controls.empty()) {
-        return;
-    }
-
-    const auto& well_state = this->wellState();
-    // numbers of the group production controls, including NONE mode
-    const std::size_t num_gpc = prod_group_controls.size();
-    // collect groups that currently provide production targets to any well on this rank
-    std::unordered_set<std::string> targeted_production_groups;
-    targeted_production_groups.reserve(num_gpc);
-
-    for (std::size_t w = 0; w < well_state.size(); ++w) {
-        const auto& ws = well_state.well(w);
-        if (ws.producer && ws.production_cmode == WellProducerCMode::GRUP && ws.status == Well::Status::OPEN) {
-            const auto& group_target = ws.group_target;
-            if (group_target.has_value()) {
-                targeted_production_groups.insert(group_target->group_name);
-            } else {
-                const std::string msg = fmt::format("Well {} is on GRUP control but has no group target assigned.", ws.name);
-                OPM_DEFLOG_THROW(std::runtime_error, msg, deferred_logger);
-            }
-        }
-    }
-
-    // parallel communication to synchronize production groups used on all processes
-    // all the group names in prod_group_controls
-    std::vector<std::string> gnames;
-    gnames.reserve(num_gpc);
-    // the group control is enforcing constraints for at least one well on this rank
-    // then it will be globally communicated across all the processes
-    std::vector<int> production_control_used;
-    production_control_used.reserve(num_gpc);
-
-    for (const auto& kv : prod_group_controls) {
-        const auto& name = kv.first;
-        gnames.emplace_back(name);
-        const bool is_used = targeted_production_groups.find(name) != targeted_production_groups.end();
-        production_control_used.emplace_back(is_used ? 1 : 0);
-    }
-
-    // parallel communication to synchronize production groups used on all processes
-    if (comm_.size() > 1) {
-        comm_.sum(production_control_used.data(), static_cast<int>(num_gpc));
-    }
-
-    for (std::size_t i = 0; i < num_gpc;   ++i) {
-        if (production_control_used[i] > 0) {
-            continue;
-        }
-        const auto& gname = gnames[i];
-        if (group_state.production_control(gname) != Group::ProductionCMode::NONE) {
-            // If the production group is specified for gas lift optimization,
-            // the current gas lift optimization implementation relies on the control
-            // mode is not NONE or FLD. As a result, we can not set it to NONE here.
-            // More systematic development might be needed in the future in this area.
-            if (glo.active() && glo.has_group(gname)) {
-                continue;
-            }
-            if (comm_.rank() == 0) {
-                const std::string msg = fmt::format("Production group {} has no constraints active, setting control mode to NONE", gname);
-                deferred_logger.info(msg);
-            }
-            group_state.production_control(gname, Group::ProductionCMode::NONE);
-        }
-    }
 }
 
 

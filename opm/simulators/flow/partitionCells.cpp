@@ -252,9 +252,9 @@ void ZoltanPartitioner::connectNeighbors(std::vector<int>& cells,
         // Expand current frontier using precomputed neighbor map
         for (const int cell : frontier) {
             const auto& nmap = neighbor_map_.at(cell);
-            std::copy_if(nmap.begin(), nmap.end(), std::back_inserter(new_frontier),
-                         [&visited](const auto& neighbor)
-                         { return visited.insert(neighbor).second; });
+            std::ranges::copy_if(nmap, std::back_inserter(new_frontier),
+                                 [&visited](const auto& neighbor)
+                                 { return visited.insert(neighbor).second; });
         }
 
         frontier.swap(new_frontier);  // Prepare next level
@@ -262,7 +262,7 @@ void ZoltanPartitioner::connectNeighbors(std::vector<int>& cells,
 
     // Sort final result for faster processing in later steps
     cells.assign(visited.begin(), visited.end());
-    std::sort(cells.begin(), cells.end());
+    std::ranges::sort(cells);
 }
 
 template <class GridView, class Element>
@@ -500,14 +500,14 @@ namespace {
             }
 
             const auto& start = cellGroup.startPointers();
-            std::copy(start.begin(), start.end(), startPtr.begin());
+            std::ranges::copy(start, startPtr.begin());
         }
 
         comm.broadcast(startPtr.data(), comm.size() + 1, 0);
 
         // We're scattering two ints per cell
-        std::transform(startPtr.begin(), startPtr.end(), startPtr.begin(),
-                       [](const auto startIx) { return startIx * 2; });
+        std::ranges::transform(startPtr, startPtr.begin(),
+                               [](const auto startIx) { return startIx * 2; });
 
         auto sendLength = std::vector<int>(comm.size());
         std::adjacent_difference(startPtr.begin() + 1,
@@ -603,8 +603,8 @@ namespace {
         OPM_BEGIN_PARALLEL_TRY_CATCH()
 
         const auto allCovered =
-            std::all_of(partition.begin(), partition.end(),
-                        [](const int d) { return d >= 0; });
+            std::ranges::all_of(partition,
+                                [](const int d) { return d >= 0; });
 
         if (! allCovered) {
             throw std::out_of_range {

@@ -217,8 +217,8 @@ void Opm::SatfuncConsistencyChecks<Scalar>::ViolationSample::clear()
 namespace {
     bool anyFailedChecks(const std::vector<std::size_t>& count)
     {
-        return std::any_of(count.begin(), count.end(),
-                           [](const std::size_t n) { return n > 0; });
+        return std::ranges::any_of(count,
+                                   [](const std::size_t n) { return n > 0; });
     }
 }
 
@@ -293,9 +293,7 @@ buildStructure(ViolationSample& violation)
     violation.checkValues.resize(this->startCheckValues_.back());
 
     if constexpr (std::numeric_limits<Scalar>::has_quiet_NaN) {
-        std::fill(violation.checkValues.begin(),
-                  violation.checkValues.end(),
-                  std::numeric_limits<Scalar>::quiet_NaN());
+        std::ranges::fill(violation.checkValues, std::numeric_limits<Scalar>::quiet_NaN());
     }
 }
 
@@ -391,10 +389,9 @@ namespace {
     {
         auto fieldWidths = std::vector<std::size_t>(columnHeaders.size());
 
-        std::transform(columnHeaders.begin(), columnHeaders.end(),
-                       fieldWidths.begin(),
-                       [minColWidth](const std::string& header)
-                       { return std::max(minColWidth, header.size()); });
+        std::ranges::transform(columnHeaders, fieldWidths.begin(),
+                               [minColWidth](const std::string& header)
+                               { return std::max(minColWidth, header.size()); });
 
         return fieldWidths;
     }
@@ -590,12 +587,10 @@ sortedPointIndices(const ViolationSample& violation,
 
     std::iota(sortedIdxs.begin(), sortedIdxs.end(), std::size_t{0});
 
-    std::sort(sortedIdxs.begin(), sortedIdxs.end(),
-              [pointIDs = violation.pointID.data() + (checkIx * this->numSamplePoints_)]
-              (const std::size_t i1, const std::size_t i2)
-              {
-                  return pointIDs[i1] < pointIDs[i2];
-              });
+    std::ranges::sort(sortedIdxs,
+                      [pointIDs = violation.pointID.data() + (checkIx * this->numSamplePoints_)]
+                      (const std::size_t i1, const std::size_t i2)
+                      { return pointIDs[i1] < pointIDs[i2]; });
 
     return sortedIdxs;
 }

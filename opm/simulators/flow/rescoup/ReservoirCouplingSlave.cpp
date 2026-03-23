@@ -63,6 +63,33 @@ ReservoirCouplingSlave(
 }
 
 template <class Scalar>
+bool
+ReservoirCouplingSlave<Scalar>::
+hasMasterInjectionTarget(const std::string& gname, const Phase phase) const
+{
+    assert(this->report_step_data_);
+    return this->report_step_data_->hasMasterInjectionTarget(gname, phase);
+}
+
+template <class Scalar>
+bool
+ReservoirCouplingSlave<Scalar>::
+hasMasterProductionLimits(const std::string& gname) const
+{
+    assert(this->report_step_data_);
+    return this->report_step_data_->hasMasterProductionLimits(gname);
+}
+
+template <class Scalar>
+bool
+ReservoirCouplingSlave<Scalar>::
+hasMasterProductionTarget(const std::string& gname) const
+{
+    assert(this->report_step_data_);
+    return this->report_step_data_->hasMasterProductionTarget(gname);
+}
+
+template <class Scalar>
 void
 ReservoirCouplingSlave<Scalar>::
 initTimeStepping()
@@ -78,6 +105,40 @@ isFirstSubstepOfSyncTimestep() const
 {
     assert(this->report_step_data_);
     return this->report_step_data_->isFirstSubstepOfSyncTimestep();
+}
+
+template <class Scalar>
+bool
+ReservoirCouplingSlave<Scalar>::
+isSlaveGroup(const std::string& group_name) const {
+    return this->slave_to_master_group_map_.find(group_name) != this->slave_to_master_group_map_.end();
+}
+
+template <class Scalar>
+std::pair<Scalar, Group::InjectionCMode>
+ReservoirCouplingSlave<Scalar>::
+masterInjectionTarget(const std::string& gname, const Phase phase) const
+{
+    assert(this->report_step_data_);
+    return this->report_step_data_->masterInjectionTarget(gname, phase);
+}
+
+template <class Scalar>
+const typename ReservoirCouplingSlave<Scalar>::MasterProductionLimits&
+ReservoirCouplingSlave<Scalar>::
+masterProductionLimits(const std::string& gname) const
+{
+    assert(this->report_step_data_);
+    return this->report_step_data_->masterProductionLimits(gname);
+}
+
+template <class Scalar>
+std::pair<Scalar, Group::ProductionCMode>
+ReservoirCouplingSlave<Scalar>::
+masterProductionTarget(const std::string& gname) const
+{
+    assert(this->report_step_data_);
+    return this->report_step_data_->masterProductionTarget(gname);
 }
 
 // NOTE: It is not legal for a slave to activate before the master has activated. This problem
@@ -140,6 +201,15 @@ maybeReceiveTerminateSignalFromMaster()
 }
 
 template <class Scalar>
+void
+ReservoirCouplingSlave<Scalar>::
+receiveInjectionGroupTargetsFromMaster(std::size_t num_targets)
+{
+    assert(this->report_step_data_);
+    this->report_step_data_->receiveInjectionGroupTargetsFromMaster(num_targets);
+}
+
+template <class Scalar>
 double
 ReservoirCouplingSlave<Scalar>::
 receiveNextTimeStepFromMaster() {
@@ -155,39 +225,31 @@ receiveNextTimeStepFromMaster() {
             this->slave_master_comm_,
             MPI_STATUS_IGNORE
         );
-        this->logger_.info(
-            fmt::format("Slave rank 0 received next timestep {} from master.", timestep)
-        );
+        this->logger_.debug(fmt::format(
+            "Received next timestep {} from master",
+            ReservoirCoupling::formatDays(timestep)
+        ));
     }
     this->comm_.broadcast(&timestep, /*count=*/1, /*emitter_rank=*/0);
-    this->logger_.info("Broadcasted slave next time step to all ranks");
+    this->logger_.debug("Broadcasted slave next time step to all ranks");
     return timestep;
 }
 
 template <class Scalar>
 std::pair<std::size_t, std::size_t>
 ReservoirCouplingSlave<Scalar>::
-receiveNumGroupTargetsFromMaster() const {
+receiveNumGroupConstraintsFromMaster() const {
     assert(this->report_step_data_);
-    return this->report_step_data_->receiveNumGroupTargetsFromMaster();
+    return this->report_step_data_->receiveNumGroupConstraintsFromMaster();
 }
 
 template <class Scalar>
 void
 ReservoirCouplingSlave<Scalar>::
-receiveInjectionGroupTargetsFromMaster(std::size_t num_targets) const
+receiveProductionGroupConstraintsFromMaster(std::size_t num_targets)
 {
     assert(this->report_step_data_);
-    this->report_step_data_->receiveInjectionGroupTargetsFromMaster(num_targets);
-}
-
-template <class Scalar>
-void
-ReservoirCouplingSlave<Scalar>::
-receiveProductionGroupTargetsFromMaster(std::size_t num_targets) const
-{
-    assert(this->report_step_data_);
-    this->report_step_data_->receiveProductionGroupTargetsFromMaster(num_targets);
+    this->report_step_data_->receiveProductionGroupConstraintsFromMaster(num_targets);
 }
 
 template <class Scalar>
@@ -262,7 +324,10 @@ sendNextReportDateToMasterProcess() const
             /*tag=*/static_cast<int>(MessageTag::SlaveNextReportDate),
             this->slave_master_comm_
         );
-        this->logger_.info("Sent next report date to master process from rank 0");
+        this->logger_.debug(fmt::format(
+            "Sent next report date {} to master (offset from slave start)",
+            ReservoirCoupling::formatDays(next_report_time_offset)
+        ));
    }
 }
 
@@ -367,8 +432,8 @@ receiveMasterGroupNamesFromMasterProcess_() {
             this->slave_master_comm_,
             MPI_STATUS_IGNORE
         );
-        this->logger_.info(fmt::format(
-            "Received master group names size from master process rank 0: {}", size));
+        this->logger_.debug(fmt::format(
+            "Received master group names size from master: {}", size));
         // size can be 0 for history matching mode (no GRUPMAST on master)
         if (size > 0) {
             group_names.resize(size);
@@ -381,7 +446,7 @@ receiveMasterGroupNamesFromMasterProcess_() {
                 this->slave_master_comm_,
                 MPI_STATUS_IGNORE
             );
-            this->logger_.info("Received master group names from master process rank 0");
+            this->logger_.debug("Received master group names from master");
         }
     }
     this->comm_.broadcast(&size, /*count=*/1, /*emitter_rank=*/0);
@@ -414,7 +479,7 @@ receiveSlaveNameFromMasterProcess_() {
             this->slave_master_comm_,
             MPI_STATUS_IGNORE
         );
-        this->logger_.info("Received slave name size from master process rank 0");
+        this->logger_.debug("Received slave name size from master");
         slave_name.resize(size+1); // +1 for the null terminator
         MPI_Recv(
             slave_name.data(),
@@ -426,7 +491,7 @@ receiveSlaveNameFromMasterProcess_() {
             MPI_STATUS_IGNORE
         );
         slave_name[size] = '\0';  // Add null terminator
-        this->logger_.info("Received slave name from master process rank 0");
+        this->logger_.debug("Received slave name from master");
     }
     this->comm_.broadcast(&size, /*count=*/1, /*emitter_rank=*/0);
     if (this->comm_.rank() != 0) {
@@ -479,7 +544,7 @@ sendActivationDateToMasterProcess_()
             /*tag=*/static_cast<int>(MessageTag::SlaveActivationDate),
             this->slave_master_comm_
         );
-        this->logger_.info("Sent simulation activation date to master process from rank 0");
+        this->logger_.debug("Sent activation date to master");
    }
 }
 
@@ -500,7 +565,7 @@ sendActivationHandshakeToMasterProcess_() const
             /*tag=*/static_cast<int>(MessageTag::SlaveActivationHandshake),
             this->slave_master_comm_
         );
-        this->logger_.info("Sent simulation activation handshake to master process from rank 0");
+        this->logger_.debug("Sent activation handshake to master");
     }
     this->comm_.barrier();
 }
@@ -522,7 +587,7 @@ sendSimulationStartDateToMasterProcess_() const
             /*tag=*/static_cast<int>(MessageTag::SlaveSimulationStartDate),
             this->slave_master_comm_
         );
-        this->logger_.info("Sent simulation start date to master process from rank 0");
+        this->logger_.debug("Sent start date to master");
    }
 }
 

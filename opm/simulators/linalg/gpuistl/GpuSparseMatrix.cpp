@@ -22,6 +22,7 @@
 #include <opm/simulators/linalg/gpuistl/GpuSparseMatrixGeneric.hpp>
 #include <opm/simulators/linalg/gpuistl/detail/gpu_constants.hpp>
 #include <opm/simulators/linalg/gpuistl/detail/cusparse_safe_call.hpp>
+#include <opm/simulators/linalg/gpuistl/detail/gpu_safe_call.hpp>
 #include <opm/simulators/linalg/gpuistl/detail/cusparse_wrapper.hpp>
 #include <opm/simulators/linalg/gpuistl/detail/gpusparse_matrix_utilities.hpp>
 #include <opm/simulators/linalg/matrixblock.hh>
@@ -201,6 +202,19 @@ GpuSparseMatrix<T>::updateNonzeroValues(const GpuSparseMatrixGeneric<T>& matrix)
     m_nonZeroElements.copyFromDeviceToDevice(matrix.getNonZeroValues());
 }
 
+template <class T>
+void
+GpuSparseMatrix<T>::setToZero()
+{
+    // For blockSize == 1, use GpuSparseMatrixGeneric
+    if (m_genericMatrixForBlockSize1) {
+        m_genericMatrixForBlockSize1->setToZero();
+        return;
+    }
+
+    OPM_GPU_SAFE_CALL(cudaMemset(m_nonZeroElements.data(), 0, nonzeroes() * blockSize() * blockSize() * sizeof(T)));
+}
+
 template <typename T>
 void
 GpuSparseMatrix<T>::setUpperTriangular()
@@ -345,8 +359,6 @@ GpuSparseMatrix<T>::assertSameSize(const VectorType& x) const
     // Assume square matrices: numberOfColumns == numberOfRows
     detail::validateVectorMatrixSizes(x.dim(), blockSize(), N());
 }
-
-
 
 template class GpuSparseMatrix<float>;
 template class GpuSparseMatrix<double>;

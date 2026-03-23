@@ -454,12 +454,11 @@ add_test_runSimulator(CASENAME spe1case1_carfin
                       DIR lgr
                       TEST_ARGS --parsing-strictness=low --enable-ecl-output=true --enable-vtk-output=true)
 
-# Disabled for now as it causes oob memory access
-#add_test_runSimulator(CASENAME spe1case1_carfin_gr
-#                      FILENAME SPE1CASE1_CARFIN_GR
-#                      SIMULATOR flow
-#                      DIR lgr
-#                      TEST_ARGS --parsing-strictness=low --enable-ecl-output=true --enable-vtk-output=true)
+add_test_runSimulator(CASENAME spe1case1_carfin_gr
+                      FILENAME SPE1CASE1_CARFIN_GR
+                      SIMULATOR flow
+                      DIR lgr
+                      TEST_ARGS --parsing-strictness=low --enable-ecl-output=true --enable-vtk-output=true)
 
 if(MPI_FOUND)
   add_test_runSimulator(CASENAME spe1case1_carfin_parallel
@@ -500,6 +499,7 @@ add_test_runSimulator(CASENAME tuning_tsinit_nextstep
                       TEST_ARGS --enable-tuning=true
                       POST_COMMAND $<TARGET_FILE:test_tuning_tsinit_nextstep>)
 
+get_property(opm-common_EMBEDDED_PYTHON TARGET opmcommon PROPERTY EMBEDDED_PYTHON)
 if (opm-common_EMBEDDED_PYTHON)
   include (${CMAKE_CURRENT_SOURCE_DIR}/pyactionActionXComparisons.cmake)
 endif ()

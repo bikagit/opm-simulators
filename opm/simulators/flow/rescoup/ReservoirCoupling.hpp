@@ -23,8 +23,11 @@
 #include <opm/simulators/utils/ParallelCommunication.hpp>
 #include <opm/input/eclipse/Schedule/Group/Group.hpp>
 #include <opm/input/eclipse/Schedule/Group/GuideRate.hpp>
+#include <opm/input/eclipse/Units/Units.hpp>
 
 #include <dune/common/parallel/mpitraits.hh>
+
+#include <fmt/format.h>
 
 #include <mpi.h>
 #include <cmath>
@@ -42,6 +45,7 @@ public:
     explicit Logger(const Parallel::Communication& comm) : comm_(comm) {}
 
     void clearDeferredLogger() { deferred_logger_ = nullptr; }
+    void debug(const std::string &msg) const;
     DeferredLogger& deferredLogger() { return *deferred_logger_; }
     DeferredLogger& deferredLogger() const { return *deferred_logger_; }
     bool haveDeferredLogger() const { return deferred_logger_ != nullptr; }
@@ -132,8 +136,8 @@ enum class MessageTag : int {
     MasterGroupNames,
     MasterGroupNamesSize,
     MasterStartOfReportStep,
-    NumSlaveGroupTargets,
-    ProductionGroupTargets,
+    NumSlaveGroupConstraints,
+    ProductionGroupConstraints,
     SlaveActivationDate,
     SlaveActivationHandshake,
     SlaveInjectionData,
@@ -156,6 +160,19 @@ enum class Phase : std::size_t {
     Count
 };
 
+/// @brief Selects which kind of rate to retrieve from slave group data.
+///
+/// Replaces multiple bool parameters (res_rates, is_injection, network) with a single
+/// enum that names the 5 valid rate categories directly. Only these 5 combinations
+/// of the bools are meaningful; the enum prevents callers from constructing invalid states.
+enum class RateKind {
+    InjectionSurface,
+    InjectionReservoir,
+    ProductionSurface,
+    ProductionNetworkSurface,
+    ProductionReservoir
+};
+
 template <class Scalar>
 struct InjectionRates {
     InjectionRates() = default;
@@ -164,7 +181,6 @@ struct InjectionRates {
     [[nodiscard]] Scalar& operator[](Phase p)       noexcept { return rate[static_cast<std::size_t>(p)]; }
     [[nodiscard]] Scalar  operator[](Phase p) const noexcept { return rate[static_cast<std::size_t>(p)]; }
 };
-
 
 // Used to communicate potentials for oil, gas, and water rates between slave and master processes
 template <class Scalar>
@@ -197,7 +213,10 @@ struct SlaveGroupProductionData {
     Potentials<Scalar> potentials;
     // Production rates are used by the master group in guiderate calculations
     // when converting the guide rate target to the phase of the master group.
-    ProductionRates<Scalar> surface_rates;  // Surface production rates by phase
+    ProductionRates<Scalar> surface_rates;  // Surface production rates by phase (network=false)
+    // Network surface rates - computed with network=true, meaning efficiency factors
+    // are 1.0 for groups/wells with GEFAC/WEFAC item 3 = "NO"
+    ProductionRates<Scalar> network_surface_rates;  // Surface rates for network calculations
     // Individual phase reservoir production rates - needed when master's parent group
     // has RESV control mode, so the conversion uses slave's PVT properties
     ProductionRates<Scalar> reservoir_rates;  // Reservoir production rates by phase
@@ -223,21 +242,48 @@ struct InjectionGroupTarget {
 };
 
 template <class Scalar>
-struct ProductionGroupTarget {
+struct ProductionGroupConstraints {
     // To save memory and avoid varying size of the struct when serializing
     // and deserializing the group name, we use an index instead of the full name.
     std::size_t group_name_idx;   // Index of group name in the master group names vector
-    Scalar target;                // Target rate for the group
-    Group::ProductionCMode cmode;  // Control mode for the group
+    Scalar target;                // Target rate for the active control mode
+    Group::ProductionCMode cmode; // Active control mode for the group
+    // Per-rate-type effective limits (-1 = no limit defined in hierarchy).
+    // These are guide-rate-distributed limits from the group hierarchy.
+    Scalar oil_limit;
+    Scalar water_limit;
+    Scalar gas_limit;
+    Scalar liquid_limit;
+    Scalar resv_limit;
+};
+
+/// @brief Per-rate-type production limits received from master hierarchy.
+/// A value of -1 means no limit defined in the hierarchy for that rate type.
+template <class Scalar>
+struct MasterProductionLimits {
+    Scalar oil_limit{-1};
+    Scalar water_limit{-1};
+    Scalar gas_limit{-1};
+    Scalar liquid_limit{-1};
+    Scalar resv_limit{-1};
 };
 
 // Helper functions
 Phase convertPhaseToReservoirCouplingPhase(::Opm::Phase phase);
+::Opm::Phase convertToOpmPhase(const Phase phase);
 void customErrorHandler_(MPI_Comm* comm, int* err, const std::string &msg);
 void customErrorHandlerSlave_(MPI_Comm* comm, int* err, ...);
 void customErrorHandlerMaster_(MPI_Comm* comm, int* err, ...);
 void setErrhandler(MPI_Comm comm, bool is_master);
 std::pair<std::vector<char>, std::size_t> serializeStrings(const std::vector<std::string>& data);
+
+/// \brief Format seconds as a human-readable string showing both seconds and days.
+/// \param seconds The time value in seconds.
+/// \return A string like "864000s (10.00 days)".
+inline std::string formatDays(double seconds) {
+    double days = seconds / unit::day;
+    return fmt::format(fmt::runtime("{:.0f}s ({:.2f} days)"), seconds, days);
+}
 
 /// \brief Utility class for comparing double values representing epoch dates or elapsed time.
 ///

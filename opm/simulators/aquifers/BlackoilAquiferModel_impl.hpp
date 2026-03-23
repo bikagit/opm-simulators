@@ -297,8 +297,8 @@ createAnalyticAquiferPointer(const AquiferData& aqData,
         this->simulator_.vanguard().eclState().aquifer().connections();
 
     if (! connections.hasAquiferConnections(aquiferID)) {
-        const auto msg = fmt::format("No valid connections for {} aquifer {}.  "
-                                     "Aquifer {} will be ignored.",
+        const auto msg = fmt::format(fmt::runtime("No valid connections for {} aquifer {}.  "
+                                     "Aquifer {} will be ignored."),
                                      aqType, aquiferID, aquiferID);
         OpmLog::warning(msg);
 
@@ -316,12 +316,9 @@ void BlackoilAquiferModel<TypeTag>::createDynamicAquifers(const int episode_inde
 
     for (const auto& [id, aquFlux] : sched.aqufluxs) {
         auto aquPos =
-            std::find_if(std::begin(this->aquifers),
-                         std::end(this->aquifers),
-                [Id = id](const auto& aquPtr)
-            {
-                return aquPtr->aquiferID() == Id;
-            });
+            std::ranges::find_if(this->aquifers,
+                                [Id = id](const auto& aquPtr)
+                                { return aquPtr->aquiferID() == Id; });
 
         if (aquPos == std::end(this->aquifers)) {
             // An aquifer with this 'id' does not yet exist in
