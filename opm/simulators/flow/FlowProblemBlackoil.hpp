@@ -375,6 +375,10 @@ public:
             this->maxOilSaturation_.resize(this->model().numGridDof(), 0.0);
         }
 
+        if (FluidSystem::phaseIsActive(FluidSystem::gasPhaseIdx)) {
+            this->maxGasSaturation_.resize(this->model().numGridDof(), 0.0);
+        }
+
         this->readRockParameters_(simulator.vanguard().cellCenterDepths(),
                                   [&simulator](const unsigned idx)
                                   {
@@ -1619,6 +1623,8 @@ protected:
         const bool invalidateFromHyst = this->updateHysteresis_();
         const bool invalidateFromMaxOilSat = this->updateMaxOilSaturation_();
 
+        // const bool invalidateFromMaxGasSat = this->updateMaxGasSaturation_();
+        
         // deal with DRSDT and DRVDT
         const bool invalidateDRDT = !first_step_after_restart && this->updateCompositionChangeLimits_();
 

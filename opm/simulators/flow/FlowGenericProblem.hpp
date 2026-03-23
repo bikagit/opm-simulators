@@ -260,6 +260,7 @@ public:
     template<class Serializer>
     void serializeOp(Serializer& serializer)
     {
+        serializer(maxGasSaturation_);
         serializer(maxOilSaturation_);
         serializer(polymer_);
         serializer(maxWaterSaturation_);
@@ -336,6 +337,7 @@ protected:
     std::vector<Scalar> rockCompTransMultVal_;
 
     PolymerSolutionContainer<Scalar> polymer_;
+    std::vector<Scalar> maxGasSaturation_;
     std::vector<Scalar> maxOilSaturation_;
     std::vector<Scalar> maxWaterSaturation_;
     std::vector<Scalar> minRefPressure_;

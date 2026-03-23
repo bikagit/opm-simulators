@@ -79,6 +79,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <opm/ml/ml_model.hpp>
 
 namespace Opm {
 
@@ -175,6 +176,8 @@ public:
     using BaseType::shouldWriteRestartFile;
     using BaseType::rockCompressibility;
     using BaseType::porosity;
+    mutable ML::NNModel<Evaluation> modelml_;
+    bool activatemodelml_;
 
     /*!
      * \copydoc FvBaseProblem::registerParameters
@@ -232,6 +235,8 @@ public:
         , pffDofData_(simulator.gridView(), this->elementMapper())
         , tracerModel_(simulator)
         , temperatureModel_(simulator)
+        , modelml_()
+        ,activatemodelml_(Parameters::Get<Parameters::ActivateMLRelPErm>())
     {
         if (! Parameters::Get<Parameters::CheckSatfuncConsistency>()) {
             // User did not enable the "new" saturation function consistency
@@ -241,6 +246,9 @@ public:
             relpermDiagnostics.diagnosis(simulator.vanguard().eclState(),
                                          simulator.vanguard().levelCartesianIndexMapper());
         }
+
+        auto pathml = std::filesystem::current_path() / "mlhyst/models/oldmodelkrnw.model" ;
+        OPM_ERROR_IF(!modelml_.loadModel(pathml), "Failed to load model");
 
         if (energyModuleType == EnergyModules::SequentialImplicitThermal) {
             this->enableDriftCompensationTemp_ = Parameters::Get<Parameters::EnableDriftCompensationTemp>();
@@ -815,6 +823,84 @@ public:
             const auto& materialParams = materialLawParams(globalSpaceIdx);
             MaterialLaw::template relativePermeabilities<ContainerT, FluidState, Args...>(mobility, materialParams, fluidState);
             Valgrind::CheckDefined(mobility);
+
+            if (activatemodelml_) {
+
+                Opm::ML::Tensor<Evaluation> inkrn{2};
+
+                if (FluidSystem::phaseIsActive(oilPhaseIdx)) {
+                    auto maxsatoil = std::max(fluidState.saturation(oilPhaseIdx).value(), maxOilSaturation(globalSpaceIdx));
+
+                    inkrn.data_ = {fluidState.saturation(oilPhaseIdx).value(), maxsatoil};
+
+                    Opm::ML::Tensor<Evaluation> outkrn{1};
+                    outkrn.data_ = {0.00e-03};
+                    OPM_ERROR_IF(!modelml_.apply(inkrn, outkrn), "Failed to apply");
+                    auto ml_krn = fabs(outkrn(0).value());
+                    auto errorkrn = fabs(ml_krn - mobility[2].value());    
+                //                     if (ml_krn < 1e-3){
+                    // if (errorkrn < 1e-3){
+                        // ml_krn = 0.0;
+                    // }
+                // }
+                // std::cout<<"pred "<< ml_krn<<" groundtruth "<<mobility[2].value()<<" errorkrn "<<errorkrn<<std::endl;
+                // std::cout<<"pred "<< ml_krn<<" <mobility[0].value() "<<mobility[0].value()<<" satu0   water"<<fluidState.saturation(waterPhaseIdx).value()<<std::endl;
+                // std::cout<<"pred "<< ml_krn<<" <mobility[1].value() "<<mobility[1].value()<<" satu1 oil  "<<fluidState.saturation(oilPhaseIdx).value()<<std::endl;
+
+
+            // if (errorkrn < 1e-4){
+
+                mobility[1] = ml_krn;          
+                  }
+                else if (FluidSystem::phaseIsActive(gasPhaseIdx)) {
+                    auto maxsatgas = std::max(fluidState.saturation(gasPhaseIdx).value(), maxGasSaturation(globalSpaceIdx));
+
+                    inkrn.data_ = {fluidState.saturation(gasPhaseIdx).value(), maxsatgas};
+
+                    Opm::ML::Tensor<Evaluation> outkrn{1};
+                    outkrn.data_ = {0.00e-03};
+                    OPM_ERROR_IF(!modelml_.apply(inkrn, outkrn), "Failed to apply");
+                    auto ml_krn = fabs(outkrn(0).value());
+                    auto errorkrn = fabs(ml_krn - mobility[2].value());
+                    if (ml_krn < 1e-3){
+                        // if (errorkrn < 1e-3){
+                            ml_krn = 0.0;
+                        // }
+                    }
+
+                    // std::cout<<"GAS Phase Active  test prompt "<<errorkrn<<std::endl;
+
+
+                // if (errorkrn < 1e-4){
+
+                    mobility[2] = ml_krn;        
+                }
+                else
+                {
+                    // if no oil or gas phase is active, we set the mobility to zero
+                    std::cout<<"ELSE "<<std::endl;
+                }
+
+
+
+
+                // auto maxsatgas = std::max(fluidState.saturation(gasPhaseIdx).value(), maxGasSaturation(globalSpaceIdx));
+
+                // inkrn.data_ = {fluidState.saturation(gasPhaseIdx).value(), maxsatgas};
+
+                // Opm::ML::Tensor<Evaluation> outkrn{1};
+                // outkrn.data_ = {0.00e-03};
+                // OPM_ERROR_IF(!modelml_.apply(inkrn, outkrn), "Failed to apply");
+                // auto ml_krn = fabs(outkrn(0).value());
+                // auto errorkrn = fabs(ml_krn - mobility[2].value());
+
+                // std::cout<<"pred "<< ml_krn<<" groundtruth "<<mobility[2].value()<<" errorkrn "<<errorkrn<<std::endl;
+
+
+            // }
+            }
+
+
         }
         if (materialLawManager_->hasDirectionalRelperms()
                || materialLawManager_->hasDirectionalImbnum())
@@ -940,6 +1026,20 @@ public:
         return this->maxOilSaturation_[globalDofIdx];
     }
 
+    Scalar maxGasSaturation(unsigned globalDofIdx) const
+    {
+        return this->maxGasSaturation_[globalDofIdx];
+    }
+
+    Scalar maxWaterSaturation(unsigned globalDofIdx) const
+    {
+        return this->maxWaterSaturation_[globalDofIdx];
+    }
+
+
+
+
+
     /*!
      * \brief Sets an element's maximum oil phase saturation observed during the
      *        simulation.
@@ -955,6 +1055,12 @@ public:
             return;
 
         this->maxOilSaturation_[globalDofIdx] = value;
+    }
+
+
+    void setMaxGasSaturation(unsigned globalDofIdx, Scalar value)
+    {
+        this->maxGasSaturation_[globalDofIdx] = value;
     }
 
     /*!
@@ -1290,6 +1396,36 @@ protected:
         }
     }
 
+        bool updateMaxGasSaturation_()
+    {
+        OPM_TIMEBLOCK(updateMaxGasSaturation);
+        int episodeIdx = this->episodeIndex();
+
+        this->updateProperty_("FlowProblem::updateMaxGasSaturation_() failed:",
+                                [this](unsigned compressedDofIdx, const IntensiveQuantities& iq)
+                                {
+                                    this->updateMaxGasSaturation_(compressedDofIdx,iq);
+                                });
+        return true;
+    }
+
+    bool updateMaxGasSaturation_(unsigned compressedDofIdx, const IntensiveQuantities& iq)
+    {
+        OPM_TIMEBLOCK_LOCAL(updateMaxGasSaturation,  Subsystem::SatProps);
+        const auto& fs = iq.fluidState();
+        const Scalar Sg = decay<Scalar>(fs.saturation(gasPhaseIdx));
+        auto& mog = this->maxGasSaturation_;
+        if(mog[compressedDofIdx] < Sg){
+            mog[compressedDofIdx] = Sg;
+            return true;
+        }else{
+            return false;
+        }
+    }
+
+
+
+
     bool updateMaxWaterSaturation_()
     {
         OPM_TIMEBLOCK(updateMaxWaterSaturation);
@@ -1514,6 +1650,10 @@ protected:
                 this->maxWaterSaturation_[elemIdx] = std::max(this->maxWaterSaturation_[elemIdx], fs.saturation(waterPhaseIdx));
             if (!this->maxOilSaturation_.empty() && oilPhaseIdx > -1)
                 this->maxOilSaturation_[elemIdx] = std::max(this->maxOilSaturation_[elemIdx], fs.saturation(oilPhaseIdx));
+
+            if (!this->maxGasSaturation_.empty() && gasPhaseIdx > -1)
+                this->maxGasSaturation_[elemIdx] = std::max(this->maxGasSaturation_[elemIdx], fs.saturation(gasPhaseIdx));
+
             if (!this->minRefPressure_.empty() && refPressurePhaseIdx_() > -1)
                 this->minRefPressure_[elemIdx] = std::min(this->minRefPressure_[elemIdx], fs.pressure(refPressurePhaseIdx_()));
         }
