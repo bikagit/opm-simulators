@@ -1,0 +1,100 @@
+CHANGES FROM MASTER — neural-cpr-v5 branch
+==========================================
+Model:     cpr_policy_v5_6decks (14→32→24, ReLU, AdamW)
+Trained:   SPE9, Norne, Drogon, 0_BASE_MODEL2, SPE3CASE1, SPE9_CP
+           2762 samples, val_acc = 37.0%
+Note:      C++ runtime is identical to v3. Only the model binary and
+           the data-collection script differ from v3.
+
+
+C++ FILES — identical to v3
+----------------------------
+All C++ changes (new files and ISTLSolver.hpp modifications) are the same
+as described in changes_from_master_v3.txt. See that document for the full
+file-by-file breakdown of:
+  - opm/simulators/linalg/CprPolicyAction.hpp    (new)
+  - opm/simulators/linalg/CprPolicyFeatures.hpp  (new)
+  - opm/simulators/linalg/NeuralCPRPolicy.hpp    (new)
+  - opm/simulators/linalg/NeuralCprPolicy.cpp    (new)
+  - opm/simulators/linalg/ISTLSolver.hpp         (modified)
+  - CMakeLists_files.cmake                        (modified)
+
+No C++ file differs between neural-cpr-v3 and neural-cpr-v5.
+
+
+doc/neural_cpr/ FILES — differences from v3
+--------------------------------------------
+
+doc/neural_cpr/cpr_policy.model  ← CHANGED vs v3
+  v3 value: copy of cpr_policy_v3_2decks.model (1326 samples, 45.5% val_acc)
+  v5 value: copy of cpr_policy_v5_6decks.model (2762 samples, 37.0% val_acc)
+  Format and architecture are identical (14→32→24 ReLU Kerasify binary).
+  Only the trained weight values differ.
+
+doc/neural_cpr/collect_sweep_labels.py  ← CHANGED vs original (bug fix)
+  Change: join key changed from (episode, newton_iter) to
+          (deck, episode, newton_iter).
+  Reason: different reservoir decks share the same episode/newton numbering.
+    Without the deck prefix, Newton steps from SPE9 and Norne with the same
+    episode=0, iter=0 would be merged into a single sample, corrupting the
+    label assignment.
+  Impact: with 6 decks, the bug would have silently dropped or corrupted
+    a significant fraction of samples. The fix is present in both the v5
+    data pipeline and in the v3 branch (applied retroactively), but only
+    matters for multi-deck sweeps.
+  Also added: deck column in output CSV; deck identifier derived from
+    filename stem by stripping trailing _NN config label.
+
+doc/neural_cpr/cpr_policy_v3_2decks.model  (present in both branches)
+  Reference checkpoint for the v3 model. Unchanged.
+
+doc/neural_cpr/cpr_policy_v5_6decks.model  (present in both branches)
+  Active model for this branch. Same file as cpr_policy.model in v5.
+  Trained: 6 decks, 2762 samples, val_acc = 37%.
+
+doc/neural_cpr/cpr_policy_v6_tanh24.model  (present in both branches)
+  Experimental checkpoint: 14→24→24 tanh architecture.
+  Not active in any production branch. Kept for reference.
+
+doc/neural_cpr/run_sweep.py  (unchanged from v3)
+  Same tool as in v3. Covers the full 3×2×2×2 = 24 config space.
+  Used for sweep4 (Drogon, 0_BASE_MODEL2, SPE3CASE1, SPE9_CP).
+
+doc/neural_cpr/train_cpr_policy.py  (extended vs v3)
+  Changes vs. the script used for v3:
+    - --hidden argument: configurable hidden layer width (default 32)
+    - --activation argument: relu / tanh / softplus (default relu)
+    - --class-weights flag: inverse-frequency weighting with --weight-cap
+    - Default export format changed from kerasify to binary (no opm.ml
+      Python package required)
+    - normalise() and all activation forward/backward functions reviewed
+      for consistency with CprPolicyFeatures::toArray()
+  Note: the diag_dominance normalisation is clamp(val/4.0) in v5, matching
+    v3 and the current CprPolicyFeatures.hpp. An experimental log10 scale
+    was tried (v6 branch) but reverted for model compatibility.
+
+
+Training data locations (not committed — live in /tmp/)
+--------------------------------------------------------
+  /tmp/sweep2/   SPE9, Norne — 24 configs each (run 1)
+  /tmp/sweep3/   SPE9, Norne — 24 configs each (run 2, for stable medians)
+  /tmp/sweep4/   SPE9, Drogon, SPE3CASE1, 0_BASE_MODEL2 — 24 configs each
+
+  Combined via:
+    python collect_sweep_labels.py \
+        --csvs /tmp/sweep2/*.csv /tmp/sweep3/*.csv /tmp/sweep4/*.csv \
+        --out training_data.csv --min-configs 2
+
+  Label distribution (top 5):
+    label 23 (cprw+TrueIMPESAnalytic+DILU+DILU): 867 samples (31%)
+    label 22 (cpr +TrueIMPESAnalytic+DILU+DILU): 301 samples (11%)
+    label 21 (cprw+TrueIMPESAnalytic+DILU+ILU0): 262 samples  (9%)
+    label 15 (cprw+TrueIMPES        +DILU+DILU): 192 samples  (7%)
+    label 14 (cpr +TrueIMPES        +DILU+DILU): 175 samples  (6%)
+
+
+Runtime environment variables (same as v3)
+-------------------------------------------
+  OPM_NEURAL_CPR_WEIGHTS    Path to model file. Unset → rule-based fallback.
+  OPM_NEURAL_CPR_CONFIDENCE Softmax confidence threshold (default: 0.6).
+  OPM_CPR_SWEEP_LOG         Path for per-Newton-step feature CSV (data collection).
