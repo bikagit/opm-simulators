@@ -160,6 +160,7 @@ list (APPEND MAIN_SOURCE_FILES
   opm/simulators/linalg/FlexibleSolver7.cpp
   opm/simulators/linalg/FlowLinearSolverParameters.cpp
   opm/simulators/linalg/ISTLSolver.cpp
+  opm/simulators/linalg/NeuralCprPolicy.cpp
   opm/simulators/linalg/MILU.cpp
   opm/simulators/linalg/ParallelIstlInformation.cpp
   opm/simulators/linalg/ParallelOverlappingILU0.cpp
@@ -1166,8 +1167,9 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/simulators/linalg/tpsa/TpsaPreconditionerFactory.hpp
   opm/simulators/linalg/tpsa/TpsaTypes.hpp
   opm/simulators/linalg/tpsa/TpsaVector.hpp
-  opm/simulators/linalg/NeuralCPRFeatures.hpp
-  opm/simulators/linalg/NeuralCPRPolicy.hpp
+  opm/simulators/linalg/CprPolicyAction.hpp
+  opm/simulators/linalg/CprPolicyFeatures.hpp
+  opm/simulators/linalg/NeuralCprPolicy.hpp
   opm/simulators/linalg/istlpreconditionerwrappers.hh
   opm/simulators/linalg/istlsolverwrappers.hh
   opm/simulators/linalg/istlsparsematrixadapter.hh
