@@ -1166,6 +1166,8 @@ list (APPEND PUBLIC_HEADER_FILES
   opm/simulators/linalg/tpsa/TpsaPreconditionerFactory.hpp
   opm/simulators/linalg/tpsa/TpsaTypes.hpp
   opm/simulators/linalg/tpsa/TpsaVector.hpp
+  opm/simulators/linalg/NeuralCPRFeatures.hpp
+  opm/simulators/linalg/NeuralCPRPolicy.hpp
   opm/simulators/linalg/istlpreconditionerwrappers.hh
   opm/simulators/linalg/istlsolverwrappers.hh
   opm/simulators/linalg/istlsparsematrixadapter.hh
