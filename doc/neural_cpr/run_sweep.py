@@ -176,9 +176,12 @@ def main():
     config_dir = out_dir / "configs"
 
     # Build the flow command: prepend mpirun when --nprocs > 1.
+    # Use self,tcp explicitly: the sm (shared-memory) BTL fails on clusters
+    # where --bind-to none is combined with broken sm support. self,tcp is
+    # available on all single-node setups and avoids the sm issue entirely.
     if args.nprocs > 1:
         flow_cmd = ["mpirun", "-np", str(args.nprocs),
-                    "--bind-to", "none", "--mca", "btl", "self,sm",
+                    "--bind-to", "none", "--mca", "btl", "self,tcp",
                     args.flow]
     else:
         flow_cmd = [args.flow]
