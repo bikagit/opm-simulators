@@ -274,7 +274,8 @@ def train(features: list[np.ndarray], labels: list[int],
           class_weights: np.ndarray | None = None,
           noise_std: float   = 0.0,
           n_features: int    = 19,
-          pretrained: str | None = None) -> MLP:
+          pretrained: str | None = None,
+          freeze_encoder: bool = False) -> MLP:
 
     model = MLP(hidden=hidden, depth=depth, activation=activation, seed=seed, n_features=n_features)
 
@@ -282,6 +283,13 @@ def train(features: list[np.ndarray], labels: list[int],
         n = load_pretrained_encoder(model, pretrained)
         model._init_adam()  # reset Adam state after weight loading
         print(f"  Loaded pretrained encoder: {n}/{depth} layers from {pretrained}")
+
+    # When freeze_encoder is set, all layers except the final head are frozen.
+    # For depth=2 this means W0/b0 are fixed; only W1/b1 (hidden→output) trains.
+    frozen_layers = (depth - 1) if freeze_encoder else 0
+    if frozen_layers > 0:
+        print(f"  Freezing encoder: {frozen_layers}/{depth+1} layers fixed")
+
     rng   = np.random.default_rng(seed)          # ← NEW: rng for noise
     n = len(features)
     idx = np.arange(n)
@@ -303,6 +311,9 @@ def train(features: list[np.ndarray], labels: list[int],
                             0.0, 1.0)
             _, cache = model.forward(x)
             loss, grads = model.backward(cache, labels[i], sample_weight=sw)
+            for fi in range(frozen_layers):
+                grads.pop(f"W{fi}", None)
+                grads.pop(f"b{fi}", None)
             model.adam_step(grads, lr)
             total_loss += loss
 
@@ -437,6 +448,10 @@ def main():
     parser.add_argument("--pretrained",   default=None,
                         help=".npz encoder file from pretrain_cpr_policy.py "
                              "(warm-starts encoder layers instead of random init)")
+    parser.add_argument("--freeze-encoder", action="store_true",
+                        help="Freeze all hidden layers except the final head "
+                             "(useful for fine-tuning on a new deck without "
+                             "forgetting the general encoder representation)")
     args = parser.parse_args()
 
     print(f"Loading {args.data} ...")
@@ -476,7 +491,8 @@ def main():
                   class_weights=cw,
                   noise_std=args.noise_std,
                   n_features=n_features,
-                  pretrained=args.pretrained)
+                  pretrained=args.pretrained,
+                  freeze_encoder=args.freeze_encoder)
 
     if args.format == "kerasify":
         export_opm_kerasify(model, args.out)
