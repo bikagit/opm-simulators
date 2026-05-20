@@ -242,6 +242,27 @@ def cosine_lr(epoch: int, total: int, lr_max: float, lr_min: float = 1e-5) -> fl
     return lr_min + 0.5 * (lr_max - lr_min) * (1 + math.cos(math.pi * epoch / total))
 
 
+def load_binary_model(model: MLP, model_path: str) -> int:
+    """Load all weights from a binary .model file. Returns layers loaded."""
+    with open(model_path, "rb") as f:
+        n_layers = struct.unpack("<I", f.read(4))[0]
+        loaded = 0
+        for i in range(n_layers):
+            struct.unpack("<I", f.read(4))[0]      # layer type
+            in_dim  = struct.unpack("<I", f.read(4))[0]
+            out_dim = struct.unpack("<I", f.read(4))[0]
+            struct.unpack("<I", f.read(4))[0]      # out_dim repeated
+            W_T = np.frombuffer(f.read(in_dim * out_dim * 4),
+                                dtype=np.float32).reshape(in_dim, out_dim)
+            b   = np.frombuffer(f.read(out_dim * 4), dtype=np.float32).copy()
+            struct.unpack("<I", f.read(4))[0]      # activation code
+            if i < len(model.weights) and W_T.T.shape == model.weights[i].shape:
+                model.weights[i][...] = W_T.T
+                model.biases[i][...]  = b
+                loaded += 1
+    return loaded
+
+
 def load_pretrained_encoder(model: MLP, npz_path: str) -> int:
     """Warm-start encoder layers from a pretrain_cpr_policy.py .npz file.
     Returns the number of layers successfully loaded."""
@@ -275,11 +296,16 @@ def train(features: list[np.ndarray], labels: list[int],
           noise_std: float   = 0.0,
           n_features: int    = 19,
           pretrained: str | None = None,
+          init_model: str | None = None,
           freeze_encoder: bool = False) -> MLP:
 
     model = MLP(hidden=hidden, depth=depth, activation=activation, seed=seed, n_features=n_features)
 
-    if pretrained:
+    if init_model:
+        n = load_binary_model(model, init_model)
+        model._init_adam()
+        print(f"  Loaded all weights from model: {n}/{depth+1} layers from {init_model}")
+    elif pretrained:
         n = load_pretrained_encoder(model, pretrained)
         model._init_adam()  # reset Adam state after weight loading
         print(f"  Loaded pretrained encoder: {n}/{depth} layers from {pretrained}")
@@ -452,6 +478,10 @@ def main():
                         help="Freeze all hidden layers except the final head "
                              "(useful for fine-tuning on a new deck without "
                              "forgetting the general encoder representation)")
+    parser.add_argument("--init-model",   default=None,
+                        help="Binary .model file to initialise ALL weights from "
+                             "before training (use with --freeze-encoder to "
+                             "fine-tune only the head of an existing model)")
     args = parser.parse_args()
 
     print(f"Loading {args.data} ...")
@@ -492,6 +522,7 @@ def main():
                   noise_std=args.noise_std,
                   n_features=n_features,
                   pretrained=args.pretrained,
+                  init_model=args.init_model,
                   freeze_encoder=args.freeze_encoder)
 
     if args.format == "kerasify":
