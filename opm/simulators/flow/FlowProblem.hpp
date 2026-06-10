@@ -79,6 +79,8 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <chrono>
+#include <iostream>
 #include <opm/ml/ml_model.hpp>
 
 namespace Opm {
@@ -178,6 +180,26 @@ public:
     using BaseType::porosity;
     mutable ML::NNModel<Evaluation> modelml_;
     bool activatemodelml_;
+    // --- Vectorised (batched) ML relperm inference state ---------------------
+    // Inputs (Sn, Sn_hyst) for every grid cell are recorded during assembly,
+    // then evaluated as a single batch at the start of the next nonlinear
+    // iteration (one-iteration lag).  The krn cache is consumed during the
+    // subsequent assembly.  The first assembly (cache not yet populated) falls
+    // back to the pointwise path.  Because the ML krn is stored as a frozen
+    // scalar (no AD derivative) in both paths, the lagged scheme converges to
+    // the same fixed point as the pointwise evaluation.
+    mutable std::vector<float>  mlInFlat_;       // numDof*2, row-major (Sn, Sn_hyst)
+    mutable std::vector<Scalar> mlKrnCache_;     // numDof, krn from last batch
+    mutable bool                mlKrnCacheValid_ = false;
+    mutable std::size_t         mlNumDof_ = 0;
+    // Dedicated wall-clock accumulator for the batched ML inference cost.
+    // Reported separately so the cost is unambiguous regardless of which
+    // SimulatorReport phase (Assembly/Update) the call site falls under:
+    // the batch runs in beginIteration(), which the framework attributes to
+    // assemble_time, so the standard INFOSTEP "Update" column no longer
+    // reflects ML cost once batching is enabled.
+    mutable double              mlInferenceSeconds_ = 0.0;
+    mutable std::size_t         mlBatchCalls_ = 0;
 
     /*!
      * \copydoc FvBaseProblem::registerParameters
@@ -256,7 +278,16 @@ public:
 
     }
 
-    virtual ~FlowProblem() = default;
+    virtual ~FlowProblem()
+    {
+        if (activatemodelml_ && mlBatchCalls_ > 0) {
+            std::cout << "[ML] Batched relperm inference: "
+                      << mlInferenceSeconds_ << " s total over "
+                      << mlBatchCalls_ << " batch calls ("
+                      << (mlInferenceSeconds_ / mlBatchCalls_ * 1e3)
+                      << " ms/call, " << mlNumDof_ << " cells/call)\n";
+        }
+    }
 
     void prefetch(const Element& elem) const
     { this->pffDofData_.prefetch(elem); }
@@ -405,6 +436,25 @@ public:
         OPM_TIMEBLOCK(beginIteration);
         wellModel_.beginIteration();
         aquiferModel_.beginIteration();
+
+        // Vectorised ML relperm: evaluate krn for all cells in one batch using
+        // the (Sn, Sn_hyst) inputs recorded during the previous assembly pass.
+        // mlNumDof_ == 0 means no assembly has happened yet, so we skip and let
+        // the first assembly use the pointwise fallback.
+        if (activatemodelml_ && mlNumDof_ > 0) {
+            const auto t0 = std::chrono::high_resolution_clock::now();
+            std::vector<float> out_flat;
+            const bool ok = modelml_.applyBatch(mlInFlat_, out_flat, static_cast<int>(mlNumDof_));
+            const auto t1 = std::chrono::high_resolution_clock::now();
+            mlInferenceSeconds_ += std::chrono::duration<double>(t1 - t0).count();
+            ++mlBatchCalls_;
+            if (ok) {
+                mlKrnCache_.resize(mlNumDof_);
+                for (std::size_t i = 0; i < mlNumDof_; ++i)
+                    mlKrnCache_[i] = static_cast<Scalar>(std::fabs(out_flat[i]));
+                mlKrnCacheValid_ = true;
+            }
+        }
     }
 
     /*!
@@ -826,52 +876,48 @@ public:
 
             if (activatemodelml_) {
 
-                Opm::ML::Tensor<Evaluation> inkrn{2};
-
                 if (FluidSystem::phaseIsActive(oilPhaseIdx)) {
-                    auto maxsatoil = std::max(fluidState.saturation(oilPhaseIdx).value(), maxOilSaturation(globalSpaceIdx));
+                    const Scalar sn      = fluidState.saturation(oilPhaseIdx).value();
+                    const Scalar sn_hyst = std::max(sn, maxOilSaturation(globalSpaceIdx));
 
-                    inkrn.data_ = {fluidState.saturation(oilPhaseIdx).value(), maxsatoil};
-
-                    Opm::ML::Tensor<Evaluation> outkrn{1};
-                    outkrn.data_ = {0.00e-03};
-                    OPM_ERROR_IF(!modelml_.apply(inkrn, outkrn), "Failed to apply");
-                    auto ml_krn = fabs(outkrn(0).value());
-                    auto errorkrn = fabs(ml_krn - mobility[2].value());    
-                //                     if (ml_krn < 1e-3){
-                    // if (errorkrn < 1e-3){
-                        // ml_krn = 0.0;
-                    // }
-                // }
-                // std::cout<<"pred "<< ml_krn<<" groundtruth "<<mobility[2].value()<<" errorkrn "<<errorkrn<<std::endl;
-                // std::cout<<"pred "<< ml_krn<<" <mobility[0].value() "<<mobility[0].value()<<" satu0   water"<<fluidState.saturation(waterPhaseIdx).value()<<std::endl;
-                // std::cout<<"pred "<< ml_krn<<" <mobility[1].value() "<<mobility[1].value()<<" satu1 oil  "<<fluidState.saturation(oilPhaseIdx).value()<<std::endl;
-
-
-            // if (errorkrn < 1e-4){
-
-                mobility[1] = ml_krn;          
-                  }
-                else if (FluidSystem::phaseIsActive(gasPhaseIdx)) {
-                    auto maxsatgas = std::max(fluidState.saturation(gasPhaseIdx).value(), maxGasSaturation(globalSpaceIdx));
-
-                    inkrn.data_ = {fluidState.saturation(gasPhaseIdx).value(), maxsatgas};
-
-                    Opm::ML::Tensor<Evaluation> outkrn{1};
-                    outkrn.data_ = {0.00e-03};
-                    OPM_ERROR_IF(!modelml_.apply(inkrn, outkrn), "Failed to apply");
-                    auto ml_krn = fabs(outkrn(0).value());
-                    auto errorkrn = fabs(ml_krn - mobility[2].value());
-                    if (ml_krn < 1e-3){
-                        // if (errorkrn < 1e-3){
-                            ml_krn = 0.0;
-                        // }
+                    // Record this cell's inputs for the next batch pass.  The
+                    // buffer is sized lazily to the total number of grid cells.
+                    if (mlNumDof_ == 0) {
+                        mlNumDof_ = this->model().numGridDof();
+                        mlInFlat_.assign(mlNumDof_ * 2, 0.0f);
+                    }
+                    if (globalSpaceIdx < mlNumDof_) {
+                        mlInFlat_[globalSpaceIdx * 2 + 0] = static_cast<float>(sn);
+                        mlInFlat_[globalSpaceIdx * 2 + 1] = static_cast<float>(sn_hyst);
                     }
 
-                    // std::cout<<"GAS Phase Active  test prompt "<<errorkrn<<std::endl;
-
-
-                // if (errorkrn < 1e-4){
+                    Scalar ml_krn{};
+                    if (mlKrnCacheValid_ && globalSpaceIdx < mlKrnCache_.size()) {
+                        // Fast path: use the batched result (computed in
+                        // beginIteration from the previous pass's inputs).
+                        ml_krn = mlKrnCache_[globalSpaceIdx];
+                    } else {
+                        // Fallback pointwise evaluation (first assembly only).
+                        Opm::ML::Tensor<Evaluation> inkrn{2};
+                        inkrn.data_ = {sn, sn_hyst};
+                        Opm::ML::Tensor<Evaluation> outkrn{1};
+                        outkrn.data_ = {0.00e-03};
+                        OPM_ERROR_IF(!modelml_.apply(inkrn, outkrn), "Failed to apply");
+                        ml_krn = fabs(outkrn(0).value());
+                    }
+                    mobility[1] = ml_krn;
+                  }
+                else if (FluidSystem::phaseIsActive(gasPhaseIdx)) {
+                    auto maxsatgas = std::max(fluidState.saturation(gasPhaseIdx).value(),
+                                             maxGasSaturation(globalSpaceIdx));
+                    Opm::ML::Tensor<Evaluation> inkrn_gas{2};
+                    inkrn_gas.data_ = {fluidState.saturation(gasPhaseIdx).value(), maxsatgas};
+                    Opm::ML::Tensor<Evaluation> outkrn{1};
+                    outkrn.data_ = {0.00e-03};
+                    OPM_ERROR_IF(!modelml_.apply(inkrn_gas, outkrn), "Failed to apply");
+                    auto ml_krn = fabs(outkrn(0).value());
+                    if (ml_krn < 1e-3)
+                        ml_krn = 0.0;
 
                     mobility[2] = ml_krn;        
                 }
