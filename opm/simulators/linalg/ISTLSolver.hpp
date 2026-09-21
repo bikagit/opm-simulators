@@ -342,9 +342,9 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
             confidence_threshold_ = thr_env ? std::stof(thr_env) : 0.6f;
 
             // OPM_NEURAL_CPR_FORBID_LABELS=a,b,c — comma-separated list of
-            // label indices (0-23) to exclude from selection.  The policy picks
+            // label indices (0-287) to exclude from selection.  The policy picks
             // the next highest-scoring allowed label instead.
-            // Example: "16,17,18,19,20,21,22,23" blocks all trueimpesanalytic
+            // Example: "192-287" (expand manually) blocks all trueimpesanalytic
             // configs for decks where that weight type is unsupported.
             {
                 const char* forbid_env = std::getenv("OPM_NEURAL_CPR_FORBID_LABELS");
@@ -627,7 +627,7 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
 
             // In a parallel run each MPI rank predicts from its own local matrix
             // partition, so ranks can independently arrive at different configs.
-            // Rank 0 is authoritative: encode its decision as a label 0-23, or
+            // Rank 0 is authoritative: encode its decision as a label 0-287, or
             // -1 (below-threshold / keep current config), then broadcast so every
             // rank applies the same preconditioner structure.  Without this, ranks
             // build mismatched solver objects and deadlock in AMG / overlap setup.
@@ -636,26 +636,13 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
                 int label = -1;
                 if (simulator_.gridView().comm().rank() == 0) {
                     if (!policy_cfg_valid_ || confidence >= confidence_threshold_) {
-                        const int dec    = static_cast<int>(cfg.weight_type);
-                        const int cprw   = cfg.use_cprw ? 1 : 0;
-                        const int fine   = (cfg.fine_smoother   == CprSmoother::DILU) ? 1 : 0;
-                        const int coarse = (cfg.coarse_smoother == CprSmoother::DILU) ? 1 : 0;
-                        label = dec * 8 + cprw * 4 + fine * 2 + coarse;
+                        label = NeuralCprPolicy::encodeLabel(cfg);
                     }
                 }
                 simulator_.gridView().comm().broadcast(&label, 1, 0);
                 if (label < 0)
                     return;
-                const int d = label / 8, w = (label / 4) % 2,
-                          f = (label / 2) % 2, c = label % 2;
-                switch (d) {
-                case 0:  cfg.weight_type = CprWeightType::QuasiIMPES;         break;
-                case 1:  cfg.weight_type = CprWeightType::TrueIMPES;          break;
-                default: cfg.weight_type = CprWeightType::TrueIMPESAnalytic;  break;
-                }
-                cfg.use_cprw        = (w == 1);
-                cfg.fine_smoother   = (f == 0) ? CprSmoother::ParOverILU0 : CprSmoother::DILU;
-                cfg.coarse_smoother = (c == 0) ? CprSmoother::ILU0        : CprSmoother::DILU;
+                cfg = NeuralCprPolicy::decodeLabel(label);
             } else {
                 // Serial path: keep existing threshold check.
                 if (policy_cfg_valid_ && confidence < confidence_threshold_)
@@ -718,11 +705,7 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
 
         static int policyLabel(const CprPolicyAction& a)
         {
-            const int dec = static_cast<int>(a.weight_type);
-            const int cprw = a.use_cprw ? 1 : 0;
-            const int fine = (a.fine_smoother == CprSmoother::DILU) ? 1 : 0;
-            const int coarse = (a.coarse_smoother == CprSmoother::DILU) ? 1 : 0;
-            return dec * 8 + cprw * 4 + fine * 2 + coarse;
+            return NeuralCprPolicy::encodeLabel(a);
         }
 
         void setActiveSolver(const int num) override

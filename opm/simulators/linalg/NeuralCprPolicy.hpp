@@ -25,6 +25,7 @@
 #include <opm/simulators/linalg/PropertyTree.hpp>
 #include <opm/ml/ml_model.hpp>
 
+#include <bitset>
 #include <string>
 #include <vector>
 
@@ -34,7 +35,7 @@ namespace Opm {
 ///
 /// Two operating modes:
 ///   MLP inference  — when a valid Kerasify model file is loaded
-///                    (isLoaded() == true).  Runs a 14→32→16→24 MLP via
+///                    (isLoaded() == true).  Runs a 12→H→288 MLP via
 ///                    Opm::ML::NNModel<float>.
 ///   Rule-based     — deterministic heuristic based on Newton iteration
 ///                    index and residual reduction ratio; no file I/O.
@@ -42,12 +43,15 @@ namespace Opm {
 /// The model file is produced by the companion Python export script using
 /// opm-common's opm.ml.ml_tools.kerasify.export_model().
 ///
-/// MLP architecture: Dense(14→32, relu) → Dense(32→16, relu) → Dense(16→24, linear)
+/// MLP architecture: Dense(12→H, relu) → Dense(H→288, linear)
 ///
-/// Output: 24 logits over the joint 3×2×2×2 action space.
-/// Decode: argmax index i → dec=i/8, cprw=(i/4)%2, fine=(i/2)%2, coarse=i%2
+/// Output: 288 logits over the joint 3×2×4×4×3 action space.
+/// Decode: argmax index i →
+///   w=i/96, cprw=(i/48)%2, fine=(i/12)%4, coarse=(i/3)%4, tol=i%3
 class NeuralCprPolicy {
 public:
+    static constexpr int kNumLabels = 288;
+
     /// Construct.  If model_path is empty or the file cannot be loaded,
     /// falls back to rule-based prediction (isLoaded() == false).
     explicit NeuralCprPolicy(const std::string& model_path = "");
@@ -59,13 +63,13 @@ public:
 
     bool isLoaded() const { return valid_; }
 
-    /// Forbid a label index (0–23) from ever being selected by predict().
+    /// Forbid a label index (0–287) from ever being selected by predict().
     /// When the model's top logit falls on a forbidden label, the next highest
     /// non-forbidden label is returned instead.  Safe to call multiple times.
     void forbidLabel(int label)
     {
-        if (label >= 0 && label < 24)
-            forbidden_mask_ |= (1u << label);
+        if (label >= 0 && label < kNumLabels)
+            forbidden_mask_.set(static_cast<std::size_t>(label));
     }
 
     /// Predict the best CPR configuration for the given features.
@@ -74,6 +78,14 @@ public:
     /// Forbidden labels (see forbidLabel()) are never returned.
     CprPolicyAction predict(const CprPolicyFeatures& feat,
                             float* out_confidence = nullptr) const;
+
+    /// Encode a CprPolicyAction as its label index 0–287 (inverse of decodeLabel).
+    /// Shared by ISTLSolver.hpp for parallel-broadcast and log-string purposes,
+    /// so the encoding lives in exactly one place.
+    static int encodeLabel(const CprPolicyAction& act);
+
+    /// Decode a label index 0–287 into a CprPolicyAction.
+    static CprPolicyAction decodeLabel(int label);
 
     /// Build a complete PropertyTree mirroring setupCPRW() in
     /// setupPropertyTree.cpp, accepted by FlexibleSolver without modification.
@@ -95,14 +107,13 @@ private:
     mutable Opm::ML::NNModel<float> model_;
     bool     valid_            = false;
     int      model_input_size_ = CprPolicyFeatures::kNumFeatures;
-    uint32_t forbidden_mask_   = 0;  ///< bitmask of labels never to select
+    std::bitset<kNumLabels> forbidden_mask_;  ///< bitmask of labels never to select
 
     /// Read the input feature count from the first Dense layer of a binary model file.
     /// Returns CprPolicyFeatures::kNumFeatures on any parse failure.
     static int readModelInputSize(const std::string& path);
 
     static CprPolicyAction ruleBasedPredict(const CprPolicyFeatures& feat);
-    static CprPolicyAction decodeLogits(const std::vector<float>& logits);
 };
 
 } // namespace Opm

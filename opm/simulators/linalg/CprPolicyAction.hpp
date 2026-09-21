@@ -30,31 +30,39 @@ enum class CprWeightType {
 };
 
 /// Smoother type for CPR fine-level and coarse AMG level.
+/// Index 0 serialises as "paroverilu0" on the fine level and "ilu0" on the
+/// coarse AMG level (see NeuralCprPolicy::fineSmootherStr/coarseSmootherStr) —
+/// both names route to the same underlying ILU(0) smoother in the ISTL
+/// preconditioner factory.
 enum class CprSmoother {
-    ParOverILU0,   ///< Parallel ILU(0) with overlap
+    ILU0,          ///< ILU(0), parallel-overlap variant on the fine level
     DILU,          ///< Decoupled ILU
-    ILU0           ///< Sequential ILU(0) (coarse level only)
+    Jacobi,        ///< Point Jacobi
+    SSOR           ///< Symmetric successive over-relaxation
 };
 
 /// A discrete CPR solver configuration produced by NeuralCprPolicy::predict().
 ///
-/// Covers three independent axes:
+/// Covers five independent axes:
 ///   - Pressure-decoupling strategy   (weight_type)
 ///   - Whether to use CPRW well-weights (use_cprw)
 ///   - Fine-level smoother type        (fine_smoother)
 ///   - Coarse AMG smoother type        (coarse_smoother)
+///   - Coarse-solver tolerance         (coarse_tol)
 struct CprPolicyAction {
     CprWeightType weight_type     = CprWeightType::TrueIMPES;
     bool          use_cprw        = true;
     CprSmoother   fine_smoother   = CprSmoother::DILU;
     CprSmoother   coarse_smoother = CprSmoother::ILU0;
+    double        coarse_tol      = 0.01;
 
     bool operator==(const CprPolicyAction& o) const noexcept
     {
         return weight_type     == o.weight_type
             && use_cprw        == o.use_cprw
             && fine_smoother   == o.fine_smoother
-            && coarse_smoother == o.coarse_smoother;
+            && coarse_smoother == o.coarse_smoother
+            && coarse_tol      == o.coarse_tol;
     }
     bool operator!=(const CprPolicyAction& o) const noexcept { return !(*this == o); }
 };

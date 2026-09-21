@@ -126,59 +126,104 @@ CprPolicyAction NeuralCprPolicy::predict(const CprPolicyFeatures& feat,
         in(i) = arr[i];
 
     Opm::ML::Tensor<float> out;
-    if (!model_.apply(in, out) || static_cast<int>(out.data_.size()) < 24) {
+    if (!model_.apply(in, out) || static_cast<int>(out.data_.size()) < kNumLabels) {
         if (out_confidence) *out_confidence = 1.0f;
         return ruleBasedPredict(feat);
     }
 
     // Apply forbidden mask: set disallowed logits to -inf so they are never
     // selected by argmax or included in the softmax normalisation sum.
-    if (forbidden_mask_) {
-        for (int i = 0; i < 24; ++i) {
-            if (forbidden_mask_ & (1u << i))
-                out.data_[i] = -std::numeric_limits<float>::infinity();
-        }
+    for (int i = 0; i < kNumLabels; ++i) {
+        if (forbidden_mask_.test(static_cast<std::size_t>(i)))
+            out.data_[i] = -std::numeric_limits<float>::infinity();
     }
+
+    const auto* d = out.data_.data();
+    const int best = static_cast<int>(std::max_element(d, d + kNumLabels) - d);
 
     if (out_confidence) {
         // Softmax over allowed logits only, numerically stable.
-        const auto* d = out.data_.data();
         float max_l = -std::numeric_limits<float>::infinity();
-        for (int i = 0; i < 24; ++i)
+        for (int i = 0; i < kNumLabels; ++i)
             if (std::isfinite(d[i])) max_l = std::max(max_l, d[i]);
         float sum = 0.f;
-        for (int i = 0; i < 24; ++i)
+        for (int i = 0; i < kNumLabels; ++i)
             if (std::isfinite(d[i])) sum += std::exp(d[i] - max_l);
-        const int best = static_cast<int>(
-            std::max_element(d, d + 24) - d);
         *out_confidence = (sum > 0.f) ? std::exp(d[best] - max_l) / sum : 1.0f;
     }
 
-    return decodeLogits(out.data_);
+    return decodeLabel(best);
 }
 
-CprPolicyAction NeuralCprPolicy::decodeLogits(const std::vector<float>& logits)
-{
-    // Joint 3×2×2×2 = 24-way output.
-    // Index i encodes: dec = i/8, cprw = (i/4)%2, fine = (i/2)%2, coarse = i%2
-    // Forbidden labels have been set to -inf before this call.
-    const auto best = std::max_element(logits.begin(), logits.begin() + 24);
-    const int  idx  = static_cast<int>(std::distance(logits.begin(), best));
+namespace {
+constexpr double kCoarseTolValues[3] = {0.01, 0.1, 0.5};
 
-    const int dec    = idx / 8;
-    const int cprw   = (idx / 4) % 2;
-    const int fine   = (idx / 2) % 2;
-    const int coarse = idx % 2;
+int coarseTolIndex(double tol)
+{
+    // Snap to the nearest of the three trained tolerance buckets.
+    int best = 0;
+    double bestDist = std::abs(tol - kCoarseTolValues[0]);
+    for (int i = 1; i < 3; ++i) {
+        const double dist = std::abs(tol - kCoarseTolValues[i]);
+        if (dist < bestDist) { bestDist = dist; best = i; }
+    }
+    return best;
+}
+
+int smootherIndex(CprSmoother s)
+{
+    switch (s) {
+    case CprSmoother::ILU0:   return 0;
+    case CprSmoother::DILU:   return 1;
+    case CprSmoother::Jacobi: return 2;
+    case CprSmoother::SSOR:   return 3;
+    }
+    return 0;
+}
+
+CprSmoother smootherFromIndex(int i)
+{
+    switch (i) {
+    case 0:  return CprSmoother::ILU0;
+    case 1:  return CprSmoother::DILU;
+    case 2:  return CprSmoother::Jacobi;
+    default: return CprSmoother::SSOR;
+    }
+}
+} // namespace
+
+int NeuralCprPolicy::encodeLabel(const CprPolicyAction& act)
+{
+    const int w      = static_cast<int>(act.weight_type);
+    const int cprw   = act.use_cprw ? 1 : 0;
+    const int fine   = smootherIndex(act.fine_smoother);
+    const int coarse = smootherIndex(act.coarse_smoother);
+    const int tol    = coarseTolIndex(act.coarse_tol);
+    return w * 96 + cprw * 48 + fine * 12 + coarse * 3 + tol;
+}
+
+CprPolicyAction NeuralCprPolicy::decodeLabel(int label)
+{
+    label = std::clamp(label, 0, kNumLabels - 1);
+    const int w      = label / 96;
+    int rem          = label % 96;
+    const int cprw   = rem / 48;
+    rem              = rem % 48;
+    const int fine   = rem / 12;
+    rem              = rem % 12;
+    const int coarse = rem / 3;
+    const int tol    = rem % 3;
 
     CprPolicyAction act;
-    switch (dec) {
+    switch (w) {
     case 0:  act.weight_type = CprWeightType::QuasiIMPES;        break;
     case 1:  act.weight_type = CprWeightType::TrueIMPES;         break;
     default: act.weight_type = CprWeightType::TrueIMPESAnalytic; break;
     }
-    act.use_cprw        = (cprw   == 1);
-    act.fine_smoother   = (fine   == 0) ? CprSmoother::ParOverILU0 : CprSmoother::DILU;
-    act.coarse_smoother = (coarse == 0) ? CprSmoother::ILU0        : CprSmoother::DILU;
+    act.use_cprw        = (cprw == 1);
+    act.fine_smoother   = smootherFromIndex(fine);
+    act.coarse_smoother = smootherFromIndex(coarse);
+    act.coarse_tol      = kCoarseTolValues[tol];
     return act;
 }
 
@@ -198,7 +243,7 @@ CprPolicyAction NeuralCprPolicy::ruleBasedPredict(const CprPolicyFeatures& feat)
     } else if (feat.nl_iteration == 0) {
         // First Newton step: prefer cheap weight computation and smoother setup.
         act.weight_type   = CprWeightType::QuasiIMPES;
-        act.fine_smoother = CprSmoother::ParOverILU0;
+        act.fine_smoother = CprSmoother::ILU0;
     } else {
         // Mid-convergence: balanced choice.
         act.weight_type   = CprWeightType::QuasiIMPES;
@@ -232,7 +277,7 @@ PropertyTree NeuralCprPolicy::configToPropertyTree(const CprPolicyAction& act,
     prm.put("preconditioner.finesmoother.relaxation", 1.0);
     prm.put("preconditioner.verbosity",        0);
     prm.put("preconditioner.coarsesolver.maxiter",   1);
-    prm.put("preconditioner.coarsesolver.tol",       1e-1);
+    prm.put("preconditioner.coarsesolver.tol",       act.coarse_tol);
     prm.put("preconditioner.coarsesolver.solver",    "loopsolver"s);
     prm.put("preconditioner.coarsesolver.verbosity", 0);
 
@@ -269,6 +314,8 @@ void NeuralCprPolicy::updatePropertyTreeInPlace(const CprPolicyAction& act,
     if (act.coarse_smoother != prev.coarse_smoother)
         prm.put("preconditioner.coarsesolver.preconditioner.smoother",
                 coarseSmootherStr(act.coarse_smoother));
+    if (act.coarse_tol != prev.coarse_tol)
+        prm.put("preconditioner.coarsesolver.tol", act.coarse_tol);
 }
 
 // ---------------------------------------------------------------------------
@@ -287,12 +334,24 @@ std::string NeuralCprPolicy::weightTypeStr(CprWeightType w)
 
 std::string NeuralCprPolicy::fineSmootherStr(CprSmoother s)
 {
-    return (s == CprSmoother::DILU) ? "dilu" : "paroverilu0";
+    switch (s) {
+    case CprSmoother::ILU0:   return "paroverilu0";
+    case CprSmoother::DILU:   return "dilu";
+    case CprSmoother::Jacobi: return "jac";
+    case CprSmoother::SSOR:   return "ssor";
+    }
+    return "paroverilu0";
 }
 
 std::string NeuralCprPolicy::coarseSmootherStr(CprSmoother s)
 {
-    return (s == CprSmoother::DILU) ? "dilu" : "ilu0";
+    switch (s) {
+    case CprSmoother::ILU0:   return "ilu0";
+    case CprSmoother::DILU:   return "dilu";
+    case CprSmoother::Jacobi: return "jac";
+    case CprSmoother::SSOR:   return "ssor";
+    }
+    return "ilu0";
 }
 
 } // namespace Opm

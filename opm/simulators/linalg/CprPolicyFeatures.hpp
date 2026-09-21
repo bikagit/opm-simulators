@@ -55,16 +55,24 @@ struct CprPolicyFeatures {
     double condition_number_estimate= 1.0;  ///< max_diag / min_diag over sampled rows
     double bhp_well_fraction        = 0.0;  ///< fraction of wells currently on BHP control
 
-    static constexpr int kNumFeatures = 19;
+    static constexpr int kNumFeatures = 12;
 
     /// Return all features normalised to approximately [0, 1].
+    ///
+    /// Only the original 12 features are exposed here — the 7 later additions
+    /// (well_density, nl_residual_trend, num_phases, dt_cut_count,
+    /// prev2_linsolver_iters, condition_number_estimate, bhp_well_fraction)
+    /// are still computed by extractFeatures() and available on the struct,
+    /// but are not part of the model input: the 288-label policy (3 weight
+    /// types x 2 cprw x 4 fine smoothers x 4 coarse smoothers x 3 coarse
+    /// tolerances) is trained on the 12-feature sweep CSVs, matching
+    /// train_cpr_policy_288.py::normalise().
     std::array<float, kNumFeatures> toArray() const
     {
         auto c01 = [](double v) -> float {
             return static_cast<float>(std::clamp(v, 0.0, 1.0));
         };
         return {{
-            // original 12
             static_cast<float>(std::log1p(dt_days) / 7.0),
             c01(dt_ratio / 10.0),
             static_cast<float>((std::log10(std::max(nl_residual_norm, 1e-14)) + 14.0) / 14.0),
@@ -77,18 +85,6 @@ struct CprPolicyFeatures {
             c01(time_elapsed_frac),
             c01(num_cells_log / 6.0),
             c01(block_size / 6.0),
-            // highest-impact new (sweep5)
-            c01(well_density * 200.0),                       // 0.5% density → 1.0
-            static_cast<float>(                              // log: 0.01→0, 1→0.5, 100→1
-                (std::log10(std::clamp(nl_residual_trend, 0.01, 100.0)) + 2.0) / 4.0),
-            // medium-impact new
-            c01(num_phases / 3.0),                           // 1/2/3 → 0.33/0.67/1.0
-            c01(dt_cut_count / 5.0),                         // 5 cuts → 1.0
-            c01(prev2_linsolver_iters / 50.0),               // same scale as prev_linsolver_iters
-            static_cast<float>(                              // log: 1→0, 1e5→0.5, 1e10→1
-                std::clamp(std::log10(std::max(condition_number_estimate, 1.0)) / 10.0,
-                           0.0, 1.0)),
-            c01(bhp_well_fraction)                           // already [0,1]
         }};
     }
 };
