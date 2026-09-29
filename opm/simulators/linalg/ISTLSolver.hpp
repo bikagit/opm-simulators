@@ -613,6 +613,11 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
         ///            type is unchanged, rather than rebuilding all 30+ nodes.
         void applyNeuralPolicy(const Matrix& M)
         {
+            // No-op when running without a model file: let the true OPM default
+            // solver config in prm_ pass through unchanged.
+            if (!neural_policy_->isLoaded())
+                return;
+
             // Tier 1: prm_ will not be re-read if we are not about to create a
             // new solver object.  Skip early.
             if (!shouldCreateSolver())
