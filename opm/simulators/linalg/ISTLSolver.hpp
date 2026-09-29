@@ -468,7 +468,7 @@ std::unique_ptr<Matrix> blockJacobiAdjacency(const Grid& grid,
                                      ? feat.nl_residual_norm / prev_residual_norm_
                                      : 1.0;
             feat.nl_iteration = double(
-                simulator_.problem().iterationContext().iteration());
+                simulator_.model().newtonMethod().numIterations());
 
             // nnz_per_row: sparsity pattern is fixed for the whole simulation.
             if (cached_nnz_per_row_ < 0.0)
