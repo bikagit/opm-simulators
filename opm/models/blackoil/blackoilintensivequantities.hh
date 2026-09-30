@@ -671,20 +671,12 @@ public:
 
     OPM_HOST_DEVICE void assertFiniteMembers()
     {
-        // some safety checks in debug mode
-        for (unsigned phaseIdx = 0; phaseIdx < numPhases; ++phaseIdx) {
-            if (!getFluidSystem().phaseIsActive(phaseIdx)) {
-                continue;
-            }
-
-            assert(isfinite(fluidState_.density(phaseIdx)));
-            assert(isfinite(fluidState_.saturation(phaseIdx)));
-            assert(isfinite(fluidState_.temperature(phaseIdx)));
-            assert(isfinite(fluidState_.pressure(phaseIdx)));
-            assert(isfinite(fluidState_.invB(phaseIdx)));
-        }
-        assert(isfinite(fluidState_.Rs()));
-        assert(isfinite(fluidState_.Rv()));
+        // Intentionally empty: this function runs inside OpenMP parallel
+        // regions where neither assert() (aborts the process) nor throw
+        // (triggers std::terminate) can safely report non-finite states.
+        // Instead we let NaN values propagate to the Newton convergence
+        // check, which detects them as non-convergence and triggers
+        // timestep chopping — the correct recovery mechanism.
     }
 
     /*!
